@@ -4,9 +4,12 @@ version: 2
 # values.yaml: one pull request moves both. The operator's fallbacks in
 # admin/hardcode_admin/manifests.py repeat them by hand, and the admin tests
 # fail until the three agree.
+# Its updates leave their commit message to the group: Dependabot refuses
+# one set on them.
 multi-ecosystem-groups:
   images:
     schedule: { interval: weekly }
+    commit-message: { prefix: build, include: scope }
 
 # Its commits follow Conventional Commits like everyone's (tests/commits.py):
 # build(deps): bump ..., and ci(deps) for the actions.
@@ -29,12 +32,10 @@ updates:
     schedule: { interval: weekly }
   - package-ecosystem: docker-compose
     directory: /
-    commit-message: { prefix: build, include: scope }
     patterns: ["*"]
     multi-ecosystem-group: images
   - package-ecosystem: helm
     directory: /helm/hardcode
-    commit-message: { prefix: build, include: scope }
     patterns: ["*"]
     multi-ecosystem-group: images
   # The images' base: ubuntu.

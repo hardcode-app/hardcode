@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """
 The commit messages on the branch: each subject in the Conventional Commits
-form, ``type(scope)!: summary``, and no attribution lines (AGENTS.md, Git).
+form, ``type(scope)!: summary``, and no attribution lines (AGENTS.md, Git);
+and Dependabot's commits in the same form.
 
     tests/commits.py    every commit reachable from HEAD, merges left out
 
@@ -13,6 +14,8 @@ checked here.
 from __future__ import annotations
 
 import re
+
+import yaml
 
 import harness
 from harness import ROOT, Suite
@@ -53,6 +56,31 @@ def commits() -> list[tuple[str, str]]:
     return found
 
 
+def dependabot_problems() -> list[str]:
+    """
+    Why Dependabot's commits wouldn't follow the convention, an update at a
+    time: each sets a prefix that is one of the types, and an update in a
+    multi-ecosystem group leaves it to the group (Dependabot refuses the
+    whole file otherwise).
+    """
+    config = yaml.safe_load((ROOT / ".github" / "dependabot.yml").read_text(encoding="utf-8"))
+    groups = config.get("multi-ecosystem-groups") or {}
+    problems = []
+
+    for update in config["updates"]:
+        name = f"{update['package-ecosystem']} {update.get('directory') or update.get('directories')}"
+        group = update.get("multi-ecosystem-group")
+
+        if group and "commit-message" in update:
+            problems.append(f"{name}: commit-message belongs on its group, {group}")
+        message = (groups.get(group) or {}).get("commit-message") if group else update.get("commit-message")
+
+        if not message or message.get("prefix") not in TYPES:
+            problems.append(f"{name}: no commit-message prefix that is a type ({message})")
+
+    return problems
+
+
 def run_checks(suite: Suite) -> None:
     history = commits()
 
@@ -71,6 +99,9 @@ def run_checks(suite: Suite) -> None:
         f"{short}: {match.group(0).strip()}" for short, message in history for match in ATTRIBUTION.finditer(message)
     ]
     suite.check("no attribution lines", not attributed, "\n".join(attributed))
+
+    problems = dependabot_problems()
+    suite.check("Dependabot's commits follow the convention too", not problems, "\n".join(problems))
 
 
 if __name__ == "__main__":
