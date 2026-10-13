@@ -1,0 +1,122 @@
+# Releasing
+
+A release is a tag. Pushing `vX.Y.Z` runs
+[`.github/workflows/release.yml`](../.github/workflows/release.yml), which
+builds everything, and publishes a GitHub Release only when every build
+succeeded.
+
+```sh
+git tag v1.2.0
+git push origin v1.2.0
+```
+
+- **Versions** are `X.Y.Z`, or `X.Y.Z-N` for a prerelease. The prerelease
+  part is a number, because Windows installers (MSI) take nothing else; the
+  workflow refuses any other tag before it publishes anything.
+- **A prerelease** is published as one: the app's updater, the images'
+  `latest` and `X.Y` tags, and GitHub's "latest release" all skip it.
+- **The version** lives in the tag. Each build job writes it into every
+  file that carries one (`release/release.py stamp`: the CLI's
+  `__version__` and `pyproject.toml`, the admin's two, the app's `Cargo.toml`,
+  `Cargo.lock` and `tauri.conf.json`, and the chart's `Chart.yaml`). In the
+  repository they stay at the development version; `tests/release.py`
+  checks they agree.
+- **A manual run** (Actions → Release → Run workflow) builds the same
+  without a version, signs nothing, and publishes only the images' `latest`
+  tag, from `main`.
+
+## What a release publishes
+
+| | Files |
+|---|---|
+| The desktop app, with the `hardcode` command as its sidecar | `HardCode_X.Y.Z_amd64.deb`, `HardCode-X.Y.Z-1.x86_64.rpm`, `HardCode_X.Y.Z_amd64.AppImage` (Linux, built in the build image); `HardCode_X.Y.Z_aarch64.dmg` (macOS); `HardCode_X.Y.Z_x64-setup.exe`, `HardCode_X.Y.Z_x64_en-US.msi` (Windows) |
+| Its updates, once the updater is set up (below) | a `.sig` beside each installer, `HardCode_aarch64.app.tar.gz` (macOS's update) and `latest.json` |
+| The `hardcode` command | `hardcode-linux-x64`, `hardcode-macos-arm64`, `hardcode-win-x64.exe` (one file each, the stack inside), and the Python package `hardcode_cli-X.Y.Z-py3-none-any.whl` (`pipx install` it) |
+| Kubernetes | the chart `hardcode-X.Y.Z.tgz`, also at `oci://ghcr.io/<owner>/charts/hardcode`, with its images set to `ghcr.io/<owner>/hardcode-{vscode,squid,gateway,admin}:X.Y.Z` (also tagged `X.Y` and `latest`) |
+| The source | `hardcode-X.Y.Z-source.tar.gz`, the tag's files (`git archive`); GitHub attaches its own archives as well |
+| Checksums | `SHA256SUMS`, every file's: `sha256sum -c SHA256SUMS --ignore-missing` |
+
+The release's description is [`release/notes.md`](../release/notes.md)
+(how to install each of these), followed by GitHub's generated notes: the
+pull requests merged since the last release, Dependabot's under their own
+heading ([`.github/release.yml`](../.github/release.yml)).
+
+The Linux builds, the chart and the release's assembly run in the build
+image, as everything does. The macOS and Windows builds can only run on
+those platforms; they install the same pinned PyInstaller
+(`images/build/requirements.txt`), PyYAML (`cli/requirements.txt`) and
+Tauri CLI (the build image's version) as the build image has. macOS builds
+are unsigned unless the `APPLE_CERTIFICATE`, `APPLE_CERTIFICATE_PASSWORD`
+and `APPLE_SIGNING_IDENTITY` secrets hold a certificate.
+
+## The app's updater
+
+A release's app asks the repository's newest release for `latest.json`
+(`https://github.com/<owner>/<repo>/releases/latest/download/latest.json`)
+as it starts. When that is a newer version, the sidebar offers it; **Install
+and restart** downloads the installer of the kind the app was installed
+from (a `.deb` or `.rpm` installs with a password prompt, an AppImage is
+replaced in place, the macOS app is replaced, the Windows installer runs
+without questions), and installs it only when:
+
+- its signature checks out against the public key the app was built with,
+  `release/updater.pub`, and
+- the signature was made for the version `latest.json` announces
+  (`requireSignedVersion`): a forged `latest.json` can't offer an older,
+  genuinely signed release as a newer one.
+
+Then the app starts again. The sandboxes keep running throughout; they
+don't belong to the app. An app offline, or with GitHub down, asks again at
+its next start. Development and local builds (`app/build.sh build`,
+`app/build.sh bundle` without a release's configuration) have no updater:
+the configuration that sets it up is added by the release workflow only
+(`release/release.py updater-config`), and a test keeps it out of the
+checkout's.
+
+### Setting it up, once
+
+Until `release/updater.pub` exists, releases are published without the
+`.sig` files and `latest.json`, and their app has no updater.
+
+1. Make a key pair, with a password, in the build image's scratch folder
+   (mounted at the same path on your machine):
+
+   ```sh
+   images/build/run.sh cargo tauri signer generate \
+     --write-keys "${TMPDIR:-/tmp}/hardcode-build-$(id -u)/updater.key"
+   ```
+
+2. Copy `updater.key.pub` to `release/updater.pub` and commit it. Every
+   app built from then on trusts this key and no other: changing it is a
+   security change, and its commit says why.
+3. In the repository's settings (Secrets and variables → Actions), add the
+   secrets `TAURI_SIGNING_PRIVATE_KEY` (the content of `updater.key`) and
+   `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`.
+4. Keep `updater.key` and its password somewhere safe (a password
+   manager), and delete the scratch copy.
+
+The next tag's installers are signed and its `latest.json` published. Apps
+from releases before that have no updater: their users install the new
+release by hand, once.
+
+**Losing the key** means no installed app can be updated again: a new key
+is a new `release/updater.pub`, and every user installs by hand once.
+**A leaked key** lets whoever holds it sign an update that every installed
+app accepts, if they can also publish it as this repository's newest
+release: rotate the key (the same steps), and publish a release signed with
+the new one.
+
+## Testing the steps
+
+`tests/release.py` tests `release/release.py` for real: the version written
+into every file (and nothing else), the updater's configuration, a
+`latest.json` assembled from installers signed with a throwaway key (each
+signature carrying its version), the description and the checksums.
+`tests/app.py` builds the app with a release's updater configuration,
+pointed at a `latest.json` it serves, and checks that the app offers the
+newer version. CI runs both, and actionlint is worth running over the
+workflows after changing them:
+
+```sh
+docker run --rm --memory 512m -v "$PWD:/repo:ro" -w /repo rhysd/actionlint:1.7.12
+```

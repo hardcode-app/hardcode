@@ -1,0 +1,24 @@
+# Python formatting and lint for the whole repository: the CLI, the admin,
+# the test suites and docs/tools. Applied in the build image by
+# `tests/lint.py --fix` and checked by `tests/lint.py`: ruff first, then
+# isort for the imports.
+
+[tool.ruff]
+# Relaxed: a generous line and ruff's default rules (pyflakes and
+# pycodestyle's errors), nothing stylistic beyond the formatter. Import
+# sorting (I) stays off because isort runs after ruff.
+line-length = 120
+target-version = "py39"        # the CLI's floor
+extend-include = ["cli/hardcode"]
+extend-exclude = ["app", "images", "profiles"]
+
+[tool.ruff.lint]
+select = ["E4", "E7", "E9", "F"]
+
+[tool.isort]
+profile = "black"              # the layout ruff's formatter agrees with
+line_length = 120
+# Found through sys.path rather than installed: the CLI and admin packages,
+# and the suites' shared module.
+known_first_party = ["hardcode_cli", "hardcode_admin", "harness"]
+skip_gitignore = true

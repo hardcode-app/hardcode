@@ -1,0 +1,40 @@
+# Lines the allowlist grammar must accept (ok) or refuse (bad). Both
+# implementations are run over this file: cli/hardcode_cli/allowlist.py by
+# cli/tests/test_allowlist.py, images/squid/allowlist-render.sh by
+# tests/proxy.py. Format: ok|bad <TAB> <the line as it would appear in allowlist.txt>
+ok	pypi.org
+ok	.example.com
+ok	github.com/ourcompany   rw
+ok	github.com/ourcompany/
+ok	ssh.github.com:443 ssh
+ok	github.com ssh
+ok	example.com   # a comment
+ok	EXAMPLE.COM
+ok	xn--bcher-kva.example
+ok	a.b.c.d.example.org/deep/path
+ok	example.com.
+ok	registry.npmjs.org/@scope
+ok	example.com/
+bad	example.com..
+bad	example.com/a/../b
+bad	example.com/./a
+bad	example.com/a/..
+bad	com
+bad	example.com ro
+bad	example.com bogus
+bad	example.com rw extra
+bad	.example.com/path
+bad	example.com/a:b
+bad	example.com: ssh
+bad	example.com:99999 ssh
+bad	example.com:0 ssh
+bad	.example.com ssh
+bad	example.com/x ssh
+bad	127.0.0.1
+bad	10.0.0.1/path rw
+bad	example.com/a?b
+bad	-example.com
+bad	example-.com
+bad	exa_mple.com
+bad	example..com
+bad	example.com:443

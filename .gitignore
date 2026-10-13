@@ -1,0 +1,17 @@
+# Profiles live in each user's HardCode home (~/.config/hardcode), never in
+# the repository: they are private.
+/profiles/
+# The stack a build stages into the package (python -m hardcode_cli.stack),
+# and what building the package leaves behind.
+/cli/hardcode_cli/stack/
+/cli/build/
+*.egg-info/
+# The configuration a release's build adds (release/release.py updater-config).
+/app/src-tauri/tauri.updater.conf.json
+
+__pycache__/
+.ruff_cache/
+/dist/
+*.bak
+.DS_Store
+*.pyc

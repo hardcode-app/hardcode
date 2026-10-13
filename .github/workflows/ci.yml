@@ -1,0 +1,175 @@
+# Every suite runs in the build image (images/build, Ubuntu 26.04), the one
+# environment things are built and tested in; a runner needs nothing but
+# Docker. The exception is the CLI's portability job: the command runs on
+# users' macOS and Windows machines with whatever Python they have, and only
+# those platforms can check that.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  lint:
+    name: Python formatting and lint
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: ./.github/actions/build-image
+      - run: tests/lint.py
+
+  cli:
+    name: CLI
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: ./.github/actions/build-image
+      - run: tests/cli.py
+
+  cli-portability:
+    name: CLI unit tests (${{ matrix.os }}, Python ${{ matrix.python }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: macos-latest,   python: "3.14" }
+          - { os: windows-latest, python: "3.14" }
+          - { os: ubuntu-latest,  python: "3.9" }   # the oldest the command supports
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: ${{ matrix.python }}
+      - run: pip install -r cli/requirements.txt
+      - run: python -m unittest discover -s cli -t cli
+
+  app:
+    name: Desktop app (Tauri)
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: ./.github/actions/build-image
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cache/hardcode-build
+            app/src-tauri/target
+          key: app-${{ hashFiles('app/src-tauri/Cargo.lock', 'images/build/**') }}
+          restore-keys: app-
+      - run: tests/app.py
+
+  admin:
+    name: Operator and admin API
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: ./.github/actions/build-image
+      - run: tests/admin.py
+
+  proxy:
+    name: Proxy policy (real squid) and image scripts
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: ./.github/actions/build-image
+      - run: tests/proxy.py
+      - run: tests/images.py
+
+  release:
+    name: Release steps
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: ./.github/actions/build-image
+      - run: tests/release.py
+
+  helm:
+    name: Helm chart
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: ./.github/actions/build-image
+      - run: tests/helm.py
+
+  images:
+    name: Images build
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+      - name: squid
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: images/squid
+          push: false
+          cache-from: type=gha,scope=squid
+          cache-to: type=gha,scope=squid,mode=max
+      - name: gateway
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: images/gateway
+          push: false
+          cache-from: type=gha,scope=gateway
+          cache-to: type=gha,scope=gateway,mode=max
+      - name: admin
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          file: images/admin/Dockerfile
+          push: false
+          cache-from: type=gha,scope=admin
+          cache-to: type=gha,scope=admin,mode=max
+      # The full VS Code image is ~12 GB and 15-20 minutes; this keeps the Dockerfile
+      # honest with every language off (VS Code and the core extensions only).
+      - name: vscode (minimal)
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: images/vscode
+          push: false
+          build-args: |
+            INSTALL_BUILD_ESSENTIALS=false
+            INSTALL_PYTHON=false
+            INSTALL_CPP=false
+            INSTALL_RUST=false
+            INSTALL_GO=false
+            INSTALL_PERL=false
+            INSTALL_RUBY=false
+            INSTALL_NODE=false
+            INSTALL_JAVA=false
+            INSTALL_DOTNET=false
+            INSTALL_DOCKER=false
+            INSTALL_CLAUDE_CLI=false
+            INSTALL_CODEX_CLI=false
+          cache-from: type=gha,scope=vscode-minimal
+          cache-to: type=gha,scope=vscode-minimal,mode=max
+
+  e2e:
+    name: Operator end-to-end (kind)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    needs: [admin, helm]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: ./.github/actions/build-image
+      # kind, kubectl and helm are in the image; the cluster is created and
+      # deleted by the script, its node container capped.
+      - run: KIND_NODE_MEMORY=6g tests/e2e_kind.py

@@ -1,0 +1,36 @@
+version: 2
+
+# coredns and docker (dind) are pinned in compose.yaml and in the chart's
+# values.yaml: one pull request moves both. The operator's fallbacks in
+# admin/hardcode_admin/manifests.py repeat them by hand, and the admin tests
+# fail until the three agree.
+multi-ecosystem-groups:
+  images:
+    schedule: { interval: weekly }
+
+updates:
+  - package-ecosystem: cargo
+    directory: /app/src-tauri
+    schedule: { interval: weekly }
+    groups:
+      app: { patterns: ["*"] }
+  - package-ecosystem: pip
+    directories: ["/admin", "/cli", "/images/build"]
+    schedule: { interval: weekly }
+  # Local composite actions aren't followed from the workflows that use them:
+  # each one's folder is listed.
+  - package-ecosystem: github-actions
+    directories: ["/", "/.github/actions/build-image"]
+    schedule: { interval: weekly }
+  - package-ecosystem: docker-compose
+    directory: /
+    patterns: ["*"]
+    multi-ecosystem-group: images
+  - package-ecosystem: helm
+    directory: /helm/hardcode
+    patterns: ["*"]
+    multi-ecosystem-group: images
+  # The images' base: ubuntu.
+  - package-ecosystem: docker
+    directories: ["/images/vscode", "/images/squid", "/images/gateway", "/images/admin", "/images/build"]
+    schedule: { interval: weekly }

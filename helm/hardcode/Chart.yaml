@@ -1,0 +1,10 @@
+apiVersion: v2
+name: hardcode
+description: >-
+  HardCode: a sandboxed development environment. VS Code in the browser with
+  Claude Code, a rootless Docker daemon, and egress limited to an allowlist of
+  URLs enforced by an inspecting Squid proxy and a filtering CoreDNS.
+type: application
+version: 0.1.0
+appVersion: "0.1.0"
+keywords: [vscode, claude, sandbox, devcontainer, squid, egress]

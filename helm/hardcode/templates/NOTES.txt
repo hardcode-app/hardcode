@@ -1,0 +1,31 @@
+HardCode is installing in namespace {{ .Release.Namespace }}.
+
+Operator + admin:
+  kubectl -n {{ .Release.Namespace }} rollout status deploy/{{ include "hardcode.fullname" . }}-admin
+{{- if .Values.admin.ui.enabled }}
+{{- if .Values.admin.ingress.enabled }}
+
+Admin UI: https://{{ .Values.admin.ingress.host }}/
+{{- else }}
+
+Admin UI (no Ingress configured):
+  kubectl -n {{ .Release.Namespace }} port-forward svc/{{ include "hardcode.fullname" . }}-admin 8080:{{ .Values.admin.service.port }}
+  then open http://localhost:8080/
+{{- end }}
+{{- if or .Values.admin.email .Values.admin.existingSecret }}
+Sign in with the bootstrap admin ({{ .Values.admin.email | default "see admin.existingSecret" }}); you'll enrol an authenticator app on first sign-in.
+{{- else }}
+WARNING: no bootstrap admin (admin.email / admin.password or admin.existingSecret), so nobody can sign in yet.
+{{- end }}
+{{- end }}
+
+Profiles:
+  kubectl -n {{ .Release.Namespace }} get profiles
+{{- if .Values.profiles }}
+{{- range .Values.profiles }}
+  VS Code for "{{ .name }}": {{ if .vscodeHost }}https://{{ .vscodeHost }}/{{ else }}kubectl -n {{ $.Release.Namespace }} port-forward svc/{{ .name }}-vscode 8000:8000{{ end }}
+     token: kubectl -n {{ $.Release.Namespace }} get secret {{ .name }}-vscode-token -o jsonpath='{.data.token}' | base64 -d
+{{- end }}
+{{- else }}
+  None created by the chart; add them in the admin UI or with kubectl (kind: Profile, apiVersion: hardcode-app.github.io/v1alpha1).
+{{- end }}

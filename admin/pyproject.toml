@@ -1,0 +1,24 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "hardcode-admin"
+version = "0.1.0"
+description = "HardCode on Kubernetes: the operator and the admin UI"
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "MIT" }
+# All three are in the Ubuntu archive (python3-flask, gunicorn, python3-qrcode);
+# qrcode is optional (the enrolment page shows the secret as text without it).
+dependencies = ["Flask>=3", "hardcode-cli"]
+
+[project.optional-dependencies]
+serve = ["gunicorn>=21"]
+qr = ["qrcode>=7"]
+
+[tool.setuptools.packages.find]
+include = ["hardcode_admin*"]
+
+[tool.setuptools.package-data]
+hardcode_admin = ["web/*"]

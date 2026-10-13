@@ -1,0 +1,527 @@
+#!/usr/bin/env python3
+"""
+The ``hardcode`` command.
+
+First its unit tests (every function, with ``docker compose`` faked), then the
+whole command against a throwaway home, with the checkout's stack, where the
+real ``docker compose config`` validates every file it writes; then the
+standalone binary and the Python package, as a release builds them, each
+making a profile from the stack it carries. Nothing is started, and your
+own profiles are never touched.
+"""
+
+from __future__ import annotations
+
+import os
+import re
+import secrets
+import sys
+import tempfile
+import zipfile
+from pathlib import Path
+from typing import Optional
+
+import harness
+from harness import ROOT, Output, Suite
+
+# The scenario's own profiles, besides "default": named so that nobody else's
+# can be called the same. Removing a profile runs `docker compose down -v`
+# and `docker image rm` for its name, and "old-node" might be yours.
+TAG = "t" + secrets.token_hex(3)
+NODE = f"{TAG}-node"
+COPY = f"{TAG}-copy"
+
+# Nothing in the scenario needs a Docker daemon, except removing a profile:
+# without one, `compose ps` reports nothing (not your stack's containers),
+# and `compose config` works as it does anywhere.
+NO_DAEMON = "unix:///nonexistent/hardcode-cli-scenario.sock"
+REAL_DAEMON = os.environ.get("DOCKER_HOST", "unix:///var/run/docker.sock")
+
+# Every language and tool: the scenario switches some of them off later.
+LANGUAGES = [
+    "python", "node", "java", "dotnet", "go", "rust", "cpp", "ruby", "perl",
+    "build_essentials", "docker", "claude_cli", "codex_cli",
+]  # fmt: skip
+
+# A new profile's .env: the header, the port, subnet and DNS address, the
+# languages switched on, then the commented reference of every setting.
+ENV_SETTINGS = re.compile(
+    r"^(#[^\n]*\n)+(VSCODE_PORT=\d+\nDEVNET_SUBNET=[^\n]+\nDNS_IP=[^\n]+\n(INSTALL_[A-Z_]+=true\n)+)\n# --- Every setting",
+)
+
+
+class Home:
+    """
+    A throwaway HardCode home, which the command runs against with
+    ``--config``, using the checkout's own stack. Outside the default home,
+    its profiles' Compose projects and images carry the home's id, so none
+    of them can be yours, "default" included.
+    """
+
+    def __init__(self, root: Path):
+        self.root = root / "home"
+
+        # The command picks a profile from HARDCODE_PROFILE when it's set;
+        # the checks below choose theirs explicitly.
+        self.environment = {key: value for key, value in os.environ.items() if key != "HARDCODE_PROFILE"}
+        self.environment["DOCKER_HOST"] = NO_DAEMON
+
+        sys.path.insert(0, str(ROOT / "cli"))
+        from hardcode_cli import home
+
+        self.id = home.home_id(self.root)
+
+    def hardcode(self, *arguments: str, profile: str = "", env: Optional[dict[str, str]] = None) -> Output:
+        """
+        Run the command against this home, for *profile* when one is named,
+        with *env* added to the environment.
+        """
+        command = [sys.executable, ROOT / "cli" / "hardcode", "--config", self.root]
+        if profile:
+            command += ["-p", profile]
+
+        return harness.run([*command, *arguments], env={**self.environment, **(env or {})})
+
+    def project(self, profile: str) -> str:
+        """
+        The Compose project of one of this home's profiles.
+        """
+        return f"hardcode-{self.id}-{profile}"
+
+    def profile_file(self, profile: str, name: str) -> str:
+        """
+        The text of one of a profile's files.
+        """
+        return (self.root / "profiles" / profile / name).read_text(encoding="utf-8")
+
+    def port(self, profile: str) -> str:
+        """
+        The VS Code port the profile was given (free on this machine then).
+        """
+        match = re.search(r"^VSCODE_PORT=(\d+)$", self.profile_file(profile, ".env"), re.MULTILINE)
+        return match.group(1) if match else ""
+
+    def profiles_whose(self, name: str, pattern: str) -> list[str]:
+        """
+        The profiles whose file *name* has a line matching *pattern*.
+        """
+        matching = []
+
+        for directory in sorted((self.root / "profiles").iterdir()):
+            path = directory / name
+            if path.exists() and re.search(pattern, path.read_text(encoding="utf-8"), re.MULTILINE):
+                matching.append(directory.name)
+
+        return matching
+
+
+def count_lines(text: str, pattern: str) -> int:
+    """
+    How many lines of *text* match *pattern*.
+    """
+    return sum(1 for line in text.splitlines() if re.search(pattern, line))
+
+
+def check_profiles(suite: Suite, home: Home) -> None:
+    hc = home.hardcode
+
+    suite.section("profiles")
+    suite.expect("a new home has no profiles", hc("profiles"), r"^no profiles yet in ")
+    suite.expect_failure("nothing makes one by itself", hc("up"), r"hardcode profile add default --lang")
+    suite.expect_failure("from the template, one needs its languages", hc("profile", "add", "default"), r"--lang")
+    suite.expect(
+        "profile add default with every language and tool",
+        hc("profile", "add", "default", "--lang", ",".join(LANGUAGES)),
+        r"created from the template \(VS Code on port \d+, subnet 172.31.253.0/24",
+    )
+    suite.check(".env holds only what differs", ENV_SETTINGS.match(home.profile_file("default", ".env")) is not None)
+    suite.expect("profiles lists it", hc("profiles"), r"^default +\d+ +172.31.253.0/24 +stopped")
+    suite.expect(
+        "profile add allocates the next port and subnet",
+        hc("profile", "add", NODE, "--from", "default"),
+        r"port \d+, subnet 172.31.252.0/24",
+    )
+    suite.check("a port of its own", home.port(NODE) not in ("", home.port("default")), home.port(NODE))
+    suite.expect_failure(
+        "profile add rejects a bad name",
+        hc("profile", "add", "Bad_Name"),
+        r"not a valid profile name",
+    )
+    suite.expect_failure("profile add rejects a duplicate", hc("profile", "add", NODE, "--lang", ""), r"already exists")
+    suite.expect(
+        "profile add copies another profile",
+        hc("profile", "add", COPY, "--from", NODE),
+        rf"created from {NODE}",
+    )
+    suite.expect("three profiles listed", hc("profiles"), rf"^{COPY} +\d+ +172.31.251.0/24")
+
+    suite.expect(
+        "compose uses the profile's project name, with the home's id",
+        hc("compose", "config", profile=NODE),
+        rf"^name: {home.project(NODE)}",
+    )
+    suite.expect(
+        "compose uses the profile's image",
+        hc("compose", "config", profile=NODE),
+        rf"image: hardcode-vscode:{home.id}-{NODE}",
+    )
+    suite.expect(
+        "HARDCODE_PROFILE selects a profile",
+        hc("compose", "config", env={"HARDCODE_PROFILE": COPY}),
+        rf"^name: {home.project(COPY)}",
+    )
+    suite.expect("compose config validates", hc("compose", "config", "--quiet", profile=COPY))
+    suite.expect("--json status", hc("--json", "status"), r'"state": "stopped"')
+
+
+def check_allowlist(suite: Suite, home: Home) -> None:
+    hc = home.hardcode
+
+    def allowlist(profile: str = "default") -> Output:
+        return Output(0, home.profile_file(profile, "allowlist.txt"))
+
+    def given(profile: str = "default") -> Output:
+        return Output(0, home.profile_file(profile, "proxy-allowlist.txt"))
+
+    suite.section("allowlist")
+    suite.expect("allow appends to the Custom section", hc("allow", "GitHub.com/Me"), r"allowed github.com/me")
+    suite.expect("entry is in the file", allowlist(), r"^github.com/me$")
+    suite.expect("and in what the proxy is given", given(), r"^github.com/me$")
+    suite.expect("allow is idempotent", hc("allow", "github.com/me"), r"already allowed")
+    suite.expect(
+        "allow upgrades the flag in place",
+        hc("allow", "github.com/me", "rw"),
+        r"allowed github.com/me \(rw\)",
+    )
+    suite.expect("one line, with rw", allowlist(), r"^github.com/me +rw$")
+
+    suite.expect_failure("allow rejects a bare TLD", hc("allow", "com"), r"not a valid hostname")
+    suite.expect_failure("allow rejects a wildcard with a path", hc("allow", ".github.com/x"), r"can't have a path")
+    suite.expect_failure("allow rejects a bad flag", hc("allow", "github.com", "bogus"), r"invalid choice")
+    suite.expect("allow ssh entries", hc("allow", "ssh.github.com:443", "ssh"), r"allowed ssh.github.com:443 \(ssh\)")
+
+    suite.expect("deny comments the entry out", hc("deny", "github.com/me"), r"denied github.com/me")
+    suite.expect("commented line kept", allowlist(), r"^#github.com/me +rw$")
+    suite.expect_failure("deny of an inactive entry fails", hc("deny", "github.com/me"), r"not an active entry")
+    suite.expect("allow re-enables a denied entry", hc("allow", "github.com/me"), r"allowed github.com/me")
+    suite.expect("re-enabled, flag reset", allowlist(), r"^github.com/me$")
+
+    # --all applies an edit to every profile, reporting each one.
+    suite.expect(
+        "allow --all touches every profile",
+        hc("--all", "allow", "github.com/ourcompany"),
+        rf"\[default\] allowed[\s\S]*\[{COPY}\] allowed[\s\S]*\[{NODE}\] allowed",
+    )
+    suite.check(
+        "entry present in all three",
+        len(home.profiles_whose("allowlist.txt", r"^github.com/ourcompany")) == 3,
+    )
+    suite.expect("deny --all", hc("--all", "deny", "github.com/ourcompany"), rf"\[{NODE}\] denied")
+    suite.check(
+        "entry commented in all three",
+        len(home.profiles_whose("allowlist.txt", r"^#github.com/ourcompany")) == 3,
+    )
+    suite.expect(
+        "deny --all reports profiles without the entry",
+        hc("--all", "deny", "github.com/ourcompany"),
+        r"not an active entry",
+    )
+    suite.check(
+        "a profile's allowlist is independent",
+        count_lines(home.profile_file(COPY, "allowlist.txt"), r"^ssh.github.com") == 0,
+    )
+
+    # The entries HardCode provides: listed, switched off and on, never deleted.
+    suite.expect(
+        "allowlist lists every entry, provided ones by block",
+        hc("allowlist"),
+        r"^VS Code \(every profile\)$[\s\S]*^Python \(comes with the language\)$\n  on   pypi\.org$",
+    )
+    suite.expect("deny switches a provided entry off", hc("deny", "pypi.org"), r"denied pypi\.org")
+    suite.expect("with an off line", allowlist(), r"^off pypi\.org$")
+    suite.expect("which the full list shows", hc("allowlist"), r"^  off  pypi\.org$")
+    suite.expect("and the proxy's file has commented out", given(), r"^#pypi\.org ")
+    suite.expect_failure(
+        "a provided entry can't be removed",
+        hc("allowlist", "remove", "pypi.org"),
+        r"can't be deleted: switch it off instead",
+    )
+    suite.expect("allow switches it back on", hc("allow", "pypi.org"), r"switched pypi\.org back on")
+
+    # The proxy runs as its own user and must still be able to read its file.
+    mode = (home.root / "profiles" / "default" / "proxy-allowlist.txt").stat().st_mode & 0o777
+    suite.check("the proxy's file is readable by the proxy user", mode == 0o644, f"mode {oct(mode)}")
+
+
+def check_forwards(suite: Suite, home: Home) -> None:
+    hc = home.hardcode
+
+    suite.section("forwards")
+    suite.expect("forward writes the override", hc("forward", "3000"), r"forwarding localhost:3000 -> vscode:3000")
+    suite.expect(
+        "forward to docker with a target port",
+        hc("forward", "8080", "docker", "80"),
+        r"forwarding localhost:8080 -> docker:80",
+    )
+    suite.expect(
+        "GATEWAY_FORWARDS keeps VS Code first",
+        hc("compose", "config"),
+        r"GATEWAY_FORWARDS: 8000:vscode:8000 3000:vscode:3000 8080:docker:80",
+    )
+    suite.expect(
+        "VS Code published on the profile's port", hc("compose", "config"), rf'published: "{home.port("default")}"'
+    )
+    suite.expect("ports published", hc("compose", "config"), r'published: "3000"')
+    suite.expect("forward is idempotent", hc("forward", "3000"), r"already forwarded")
+    suite.expect_failure("forward refuses the VS Code port", hc("forward", home.port("default")), r"VS Code port")
+    suite.expect_failure(
+        "forward refuses another profile's port",
+        hc("forward", "3000", profile=COPY),
+        r"used by profile 'default'",
+    )
+    suite.expect_failure("forward refuses --all", hc("--all", "forward", "3001"), r"isn't supported")
+
+    suite.expect("unforward", hc("unforward", "3000"), r"forward for port 3000 removed")
+    suite.expect("remove the last forward", hc("unforward", "8080"), r"forward for port 8080 removed")
+
+    # With no forwards left, the override is back to an empty services map.
+    override = home.profile_file("default", "compose.override.yaml")
+    content = [line for line in override.splitlines() if line.strip() and not line.strip().startswith("#")]
+    suite.check("no gateway section left", content[:1] == ["services: {}"], override)
+
+    suite.expect_failure("unforward of an unknown port fails", hc("unforward", "4444"), r"isn't forwarded")
+
+
+def check_mounts(suite: Suite, home: Home) -> None:
+    hc = home.hardcode
+    source = home.root / "src"
+    source.mkdir()
+
+    suite.section("mounts")
+    suite.expect(
+        "mount (relative remote, under the home)",
+        hc("mount", str(source), "work"),
+        r"mounted .* at /home/dev/work",
+    )
+
+    # A mount goes into both the VS Code container and the Docker daemon, so that paths
+    # in `docker run -v` from inside the VS Code container mean the same thing.
+    config = hc("compose", "config").text
+    suite.check("mounted in vscode and docker", count_lines(config, r"target: /home/dev/work") == 2, config)
+
+    suite.expect("mount read-only", hc("mount", str(source), "/opt/data", "--ro"), r"read-only")
+    config_lines = hc("compose", "config").text.splitlines()
+    target = next((index for index, line in enumerate(config_lines) if "target: /opt/data" in line), None)
+    near_target = config_lines[target : target + 4] if target is not None else []
+    suite.check(
+        "read_only in the resolved config",
+        any("read_only: true" in line for line in near_target),
+        "\n".join(near_target),
+    )
+
+    suite.expect_failure("mount duplicate", hc("mount", str(source), "work"), r"already mounted")
+    suite.expect_failure("mount of a missing folder", hc("mount", "/nonexistent-xyz", "x"), r"not a folder")
+
+    suite.expect("mount --all", hc("--all", "mount", str(source), "tools", "--ro"), rf"\[{NODE}\] mounted")
+    suite.check(
+        "mount present in every profile",
+        len(home.profiles_whose("compose.override.yaml", r"/tools:ro")) == 3,
+    )
+    suite.expect("unmount --all", hc("--all", "unmount", "tools"), rf"\[{NODE}\] mount at /home/dev/tools removed")
+    suite.expect("unmount by absolute path", hc("unmount", "/opt/data"), r"mount at /opt/data removed")
+    suite.expect("unmount by relative path", hc("unmount", "work"), r"mount at /home/dev/work removed")
+    suite.expect_failure("unmount of nothing", hc("unmount", "work"), r"nothing is mounted")
+
+
+def check_docker_daemon(suite: Suite, home: Home) -> None:
+    hc = home.hardcode
+
+    def services() -> list[str]:
+        return hc("compose", "config", "--services").text.split()
+
+    suite.section("docker daemon")
+    suite.check("docker is part of the project by default", "docker" in services())
+
+    suite.expect("docker off edits .env", hc("docker", "off"), r"docker off")
+    suite.check("the docker service is gone from the project", "docker" not in services())
+    suite.expect("the VS Code container no longer depends on it", hc("compose", "config", "--quiet"))
+    suite.expect("the VS Code container is told", hc("compose", "config"), r'ENABLE_DOCKER: "false"')
+    suite.expect_failure(
+        "no forwards to a daemon that isn't there",
+        hc("forward", "8081", "docker", "80"),
+        r"without the Docker daemon",
+    )
+
+    suite.expect("docker on", hc("docker", "on"), r"docker on")
+    suite.check("the docker service is back", "docker" in services())
+
+
+def check_languages(suite: Suite, home: Home) -> None:
+    hc = home.hardcode
+
+    suite.section("languages (no build)")
+    suite.expect("disable two at once", hc("disable", "c#", "java", "--no-build"), r"dotnet off, java off")
+    suite.check("off is unset in .env", "INSTALL_DOTNET=" not in home.profile_file("default", ".env"))
+
+    given = home.profile_file("default", "proxy-allowlist.txt")
+    suite.check(
+        "the proxy is no longer given their entries",
+        "api.nuget.org" not in given and "repo1.maven.org" not in given,
+        given,
+    )
+    suite.expect("languages says so", hc("languages"), r"^off\s+java ")
+
+    suite.expect("enable with an alias", hc("enable", "c#", "--no-build"), r"dotnet on")
+    suite.expect(
+        "its entries are back", hc("allowlist"), r"^C# / \.NET \(comes with the language\)$\n  on   api\.nuget\.org$"
+    )
+    suite.expect_failure("unknown language", hc("enable", "cobol", "--no-build"), r"unknown language")
+    suite.expect("--all enable", hc("--all", "enable", "python", "--no-build"), rf"\[{COPY}\] already so: python on")
+
+    suite.section("extensions")
+    suite.expect("extension add", hc("extension", "add", "eamodio.gitlens"), r"added extension eamodio\.gitlens")
+    suite.expect(
+        ".env has it", Output(0, home.profile_file("default", ".env")), r"^VSCODE_EXTENSIONS=eamodio\.gitlens$"
+    )
+    suite.expect("extensions lists it as the profile's own", hc("extensions"), r"^eamodio\.gitlens\s+custom$")
+    suite.expect("one a language brings", hc("extension", "add", "golang.go"), r"already comes with Go")
+    suite.expect_failure("not an id", hc("extension", "add", "gitlens"), r"not an extension id")
+    suite.expect("extension remove", hc("extension", "remove", "eamodio.gitlens"), r"removed extension")
+
+
+def check_removal(suite: Suite, home: Home) -> None:
+    hc = home.hardcode
+
+    # Removal takes the containers, volumes and image down first, so it needs
+    # the daemon; the profiles' names are the scenario's own (see TAG).
+    daemon = {"DOCKER_HOST": REAL_DAEMON}
+
+    suite.section("remove")
+    suite.expect("profile remove", hc("profile", "remove", COPY, "--yes", env=daemon), rf"profile '{COPY}' removed")
+    suite.expect("profile remove", hc("profile", "remove", NODE, "--yes", env=daemon), rf"profile '{NODE}' removed")
+    suite.expect_failure(
+        "profile remove of an unknown profile",
+        hc("profile", "remove", "nope", "--yes"),
+        r"no profile",
+    )
+    suite.expect("default goes like any other", hc("profile", "remove", "default", "--yes", env=daemon), r"removed")
+    suite.expect("and the home is empty again", hc("profiles"), r"^no profiles yet in ")
+
+    suite.section("the port")
+    suite.expect("a profile again", hc("profile", "add", "default", "--lang", ""), r"created from the template")
+    suite.expect("port moves VS Code", hc("port", "12345"), r"VS Code on port 12345")
+    suite.check("in .env", home.port("default") == "12345", home.port("default"))
+    suite.expect("compose publishes it", hc("compose", "config"), r'published: "12345"')
+    suite.expect("profile remove", hc("profile", "remove", "default", "--yes", env=daemon), r"removed")
+
+
+def check_binary(suite: Suite) -> None:
+    """
+    The standalone binary, built as the release builds it, carries the
+    stack: in a home and a cache of its own, run from a folder that isn't a
+    checkout, it makes a profile from it, writes it out readable by
+    everyone, and Compose takes the result.
+    """
+    suite.section("the standalone binary")
+
+    with tempfile.TemporaryDirectory(prefix="hc-binary-") as temporary:
+        folder = Path(temporary)
+        built = harness.run([ROOT / "app" / "build.sh", "cli", folder / "dist"], timeout=900)
+        suite.require("app/build.sh cli builds it", built.ok, built.tail(30))
+
+        binary = next((folder / "dist").glob("hardcode-linux-*"))
+        environment = {
+            **os.environ,
+            "HARDCODE_CONFIG": str(folder / "home"),
+            "XDG_CACHE_HOME": str(folder / "cache"),
+            "DOCKER_HOST": NO_DAEMON,
+        }
+
+        made = harness.run([binary, "profile", "add", "probe", "--lang", "docker"], env=environment, cwd=folder)
+        suite.expect("it makes a profile from the stack it carries", made, r"created from the template")
+
+        written = sorted((folder / "cache" / "hardcode" / "stack").glob("*/compose.yaml"))
+        suite.check("...written out to its cache", len(written) == 1, "\n".join(map(str, written)))
+
+        if written:
+            squid_conf = written[0].parent / "images" / "squid" / "squid.conf"
+            mode = squid_conf.stat().st_mode & 0o777
+            suite.check("...readable by everyone (squid reads its config as squid)", mode == 0o644, oct(mode))
+
+        config = harness.run([binary, "-p", "probe", "compose", "config", "--quiet"], env=environment, cwd=folder)
+        suite.expect("and Compose takes it", config)
+
+
+def check_wheel(suite: Suite) -> None:
+    """
+    The Python package, built as the release builds it, carries the stack
+    too: installed into a virtual environment of its own (nothing fetched),
+    and run from a folder that isn't a checkout, it makes a profile from it.
+    """
+    suite.section("the Python package")
+
+    with tempfile.TemporaryDirectory(prefix="hc-wheel-") as temporary:
+        folder = Path(temporary)
+        built = harness.run([ROOT / "app" / "build.sh", "wheel", folder / "dist"], timeout=600)
+        wheels = sorted((folder / "dist").glob("hardcode_cli-*-py3-none-any.whl"))
+        suite.require("app/build.sh wheel builds it", built.ok and len(wheels) == 1, built.tail(30))
+
+        with zipfile.ZipFile(wheels[0]) as wheel:
+            names = set(wheel.namelist())
+        carried = [
+            "hardcode_cli/stack/compose.yaml",
+            "hardcode_cli/stack/images/squid/squid.conf",
+            "hardcode_cli/stack/images/vscode/Dockerfile",
+            "hardcode_cli/stack/template/.env",
+        ]
+        suite.check(
+            "it carries the stack",
+            all(name in names for name in carried),
+            "\n".join(name for name in carried if name not in names),
+        )
+
+        venv = folder / "venv"
+        created = harness.run([sys.executable, "-m", "venv", venv])
+        installed = harness.run([venv / "bin" / "pip", "install", "--quiet", "--no-index", "--no-deps", wheels[0]])
+        suite.require(
+            "it installs into a virtual environment", created.ok and installed.ok, created.text + installed.text
+        )
+
+        environment = {
+            **os.environ,
+            "HARDCODE_CONFIG": str(folder / "home"),
+            "XDG_CACHE_HOME": str(folder / "cache"),
+            "DOCKER_HOST": NO_DAEMON,
+        }
+        hardcode = venv / "bin" / "hardcode"
+        made = harness.run([hardcode, "profile", "add", "probe", "--lang", "docker"], env=environment, cwd=folder)
+        suite.expect("installed, it makes a profile from the stack it carries", made, r"created from the template")
+
+        written = sorted((folder / "cache" / "hardcode" / "stack").glob("*/compose.yaml"))
+        suite.check("...written out to its cache", len(written) == 1, "\n".join(map(str, written)))
+
+
+def run_checks(suite: Suite) -> None:
+    suite.section("unit tests")
+    cli = ROOT / "cli"
+    if not harness.run_unittests(suite, "cli/tests", start=cli, top=cli):
+        suite.abort("the unit tests failed; the scenario would only repeat that")
+
+    with tempfile.TemporaryDirectory(prefix="hc-cli-") as temporary:
+        home = Home(Path(temporary))
+
+        # Each part builds on the profiles and files the previous ones left.
+        check_profiles(suite, home)
+        check_allowlist(suite, home)
+        check_forwards(suite, home)
+        check_mounts(suite, home)
+        check_docker_daemon(suite, home)
+        check_languages(suite, home)
+        check_removal(suite, home)
+
+    check_binary(suite)
+    check_wheel(suite)
+
+
+if __name__ == "__main__":
+    harness.main("cli", run_checks)

@@ -1,0 +1,51 @@
+# This profile's allowlist: its own entries, and the entries HardCode
+# provides that it switches off. Squid (HTTP/HTTPS, inspected) and CoreDNS
+# (DNS) let traffic out only to what the allowlist allows.
+#
+# The provided entries aren't in this file. They come in blocks: those every
+# profile has (VS Code, OS package mirrors, container registries, GitHub raw
+# files) and those of the languages and tools the profile has on. They
+# follow HardCode's updates: an entry a newer HardCode adds arrives switched
+# on, and one it drops goes. `hardcode allowlist` lists everything, provided
+# and your own, as the app's and the admin's Allowlist do.
+#
+# An entry:
+#   example.com             that host, any URL
+#   .example.com            that host and every subdomain
+#   example.com/some/path   only URLs under that path
+#   <entry> rw              uploads allowed too
+#   example.com[:port] ssh  an SSH tunnel (port 22 by default). SSH can't be
+#                           inspected, so this is whole-host and read-write.
+#
+# Entries are read-only unless marked "rw": GET, HEAD, OPTIONS and the POST
+# git uses to clone/fetch/pull. So a registry or package index can be pulled
+# from but not pushed to, and a git namespace can be cloned but not pushed to.
+# "rw" is needed for APIs that take POST, login flows, and anywhere you push
+# or publish. "rw" counts as an upload target: with credentials, data can be
+# sent there. Keep those entries short.
+#
+# One entry per line, "#" starts a comment; an entry of yours commented out
+# is switched off. "off <entry>" (or "off <host[:port]> ssh") switches off one
+# of the provided entries: it stays off through updates and language
+# switches.
+#
+# Apply changes:  `hardcode allow` / `hardcode deny`, `hardcode allowlist
+#                 enable|disable` or the HardCode app do it for you; after
+#                 editing this file by hand: hardcode reload
+
+# --- Custom ----------------------------------------------------------------
+# Entries added by `hardcode allow` or the HardCode app land here.
+#
+# Git hosting: add the namespaces you work in, never the whole host.
+# Read-only lets you clone/fetch/pull; add "rw" for the ones you push to.
+#github.com/myuser          rw
+#github.com/some-org
+#api.github.com/repos/myuser
+# Claude Code's official plugin marketplace is a GitHub repo:
+#github.com/anthropics/claude-code
+# SSH instead of HTTPS: whole host, read-write, nothing inspected.
+#github.com                 ssh   # port 22
+#ssh.github.com:443         ssh
+
+# --- Switched off ----------------------------------------------------------
+# Entries HardCode provides that this profile doesn't allow, one "off <entry>" each.

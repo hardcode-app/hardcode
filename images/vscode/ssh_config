@@ -1,0 +1,6 @@
+# All SSH from the VS Code container goes through the egress proxy, which only tunnels it
+# to hosts that have an "ssh" entry in the profile's allowlist.txt. The
+# entrypoint rewrites this file from HTTPS_PROXY at start (the proxy's name
+# differs on Kubernetes); this is the Compose default.
+Host *
+    ProxyCommand nc -X connect -x squid:3128 %h %p

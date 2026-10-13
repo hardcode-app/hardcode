@@ -1,0 +1,420 @@
+#!/usr/bin/env python3
+"""
+The VS Code image's start-up scripts, run for real without the 12 GB image.
+
+- The SSH proxy stanza the entrypoint writes, read back by the real OpenSSH
+  client: ``%h`` and ``%p`` must reach the proxy command as the destination's
+  host and port.
+- The Kubernetes home-seeding script, run as uid 1000 in a container onto a
+  volume root that belongs to root and is world-writable, as a freshly
+  provisioned PVC is.
+- The VS Code extensions: how the VS Code container keeps the home's
+  extensions in step with the profile's list (hardcode-sync-extensions,
+  once and watching) and checks their publishers
+  (hardcode-verify-extensions). Both run for real against a fake VS Code
+  CLI and a fake Marketplace (tests/fixtures/fake_code.py and
+  fake_marketplace_curl.py).
+
+Every container is memory-capped.
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import shutil
+import subprocess
+import sys
+import time
+from pathlib import Path
+
+import harness
+from harness import ROOT, Docker, Suite
+
+VSCODE = ROOT / "images" / "vscode"
+SSH_PROXY_CONFIG = VSCODE / "ssh-proxy-config.sh"
+FIXTURES = ROOT / "tests" / "fixtures"
+
+# The fake Marketplace: what each extension needs. One pulls in a
+# dependency, one is a pack, and two publishers have no verified domain, one
+# of them a reviewed exception.
+MARKETPLACE = {
+    "core.one": {},
+    "py.one": {"extensionDependencies": ["py.dep"]},
+    "py.dep": {},
+    "go.pack": {"extensionPack": ["go.member"]},
+    "go.member": {},
+    "me.mine": {"extensionDependencies": ["me.dep"]},
+    "me.dep": {},
+    "bad.one": {},
+    "lldb.reviewed": {},
+    "user.own": {},
+    "user.two": {},
+}
+UNVERIFIED = "bad.one,lldb.reviewed"
+
+
+def check_ssh_proxy_stanza(suite: Suite, scratch: Path) -> None:
+    """
+    OpenSSH parses the generated stanza with its host and port tokens intact.
+
+    ``ssh -G`` prints the configuration as OpenSSH understood it, with ``%h``
+    and ``%p`` still unexpanded (they are filled in at connect time). A
+    doubled percent sign in the stanza would reach ``nc`` as a literal "%h".
+    """
+    config = scratch / "ssh_config"
+
+    for proxy in ("squid:3128", "p-squid.sandbox.svc.cluster.local:3128"):
+        host, port = proxy.rsplit(":", 1)
+        stanza = harness.run(["bash", SSH_PROXY_CONFIG, host, port])
+        config.write_text(stanza.text, encoding="utf-8")
+
+        parsed = harness.run(["ssh", "-G", "-F", config, "-p", "443", "ssh.github.com"])
+        got = next((line for line in parsed.text.splitlines() if line.lower().startswith("proxycommand ")), "")
+        want = f"proxycommand nc -X connect -x {proxy} %h %p"
+
+        suite.check(
+            f"OpenSSH reads the stanza for {proxy} with its host/port tokens intact",
+            got == want,
+            f"got:  {got}\nwant: {want}",
+        )
+
+    usage = harness.run(["bash", SSH_PROXY_CONFIG, "only-one"])
+    suite.check("usage is checked", not usage.ok, usage.text)
+
+
+def seed_home_script() -> str:
+    """
+    The seeding script, as the operator puts it into the VS Code container pod.
+    """
+    sys.path[:0] = [str(ROOT / "cli"), str(ROOT / "admin")]
+    from hardcode_admin import manifests
+
+    return manifests.SEED_HOME
+
+
+def check_home_seeding(suite: Suite, docker: Docker, scratch: Path) -> None:
+    """
+    The image's home is copied onto an empty volume once, by uid 1000,
+    without needing to own the volume root.
+    """
+    # A small stand-in for the image's home: a tool, a dotfile, and the
+    # link to the shared volume.
+    home = scratch / "home"
+    (home / ".local" / "bin").mkdir(parents=True)
+    claude = home / ".local" / "bin" / "claude"
+    claude.write_text("#!/bin/sh\n")
+    claude.chmod(0o755)
+    (home / ".bashrc").write_text("# rc\n")
+    (home / "shared").symlink_to("/shared")
+
+    # The volume root as a provisioner leaves it: root's, mode 777, with
+    # lost+found inside.
+    volume = scratch / "pvc"
+    provision = "mkdir -p /t/pvc/lost+found && chown 0:0 /t/pvc && chmod 777 /t/pvc"
+    docker.run(harness.BUILD_IMAGE, "sh", "-c", provision, memory="64m", volumes=[f"{scratch}:/t"])
+
+    # The script takes the image's home and the volume as $1 and $2, as the
+    # pod's init container passes them.
+    seed_command = ["bash", "-c", seed_home_script(), "seed-home", "/home/dev", "/mnt/home"]
+
+    def seed() -> harness.Output:
+        return docker.run(
+            "ubuntu:26.04",
+            *seed_command,
+            memory="128m",
+            user="1000:1000",
+            volumes=[f"{home}:/home/dev:ro", f"{volume}:/mnt/home"],
+        )
+
+    first = seed()
+    claude_copy = volume / ".local" / "bin" / "claude"
+    shared_link = volume / "shared"
+    seeded = (
+        first.ok
+        and (volume / ".hardcode-seeded").exists()
+        and claude_copy.exists()
+        and claude_copy.stat().st_mode & 0o111 != 0
+        and shared_link.is_symlink()
+        and str(shared_link.readlink()) == "/shared"
+    )
+    listing = harness.run(["ls", "-la", volume]).text
+    suite.check(
+        "seeded as uid 1000 without touching the root-owned volume root",
+        seeded,
+        f"exit {first.code}\n{first.text}\n{listing}",
+    )
+
+    second = seed()
+    suite.check("a second start is a no-op", second.ok, second.text)
+
+
+class ExtensionWorld:
+    """
+    A VS Code container's extension setup in a scratch directory: the fake
+    Marketplace, the profile's list, a home, and a PATH where ``code`` and
+    ``curl`` are the fakes and ``hardcode-verify-extensions`` the real script.
+    """
+
+    def __init__(self, scratch: Path):
+        self.root = scratch / "extensions"
+        self.market = self.root / "market"
+        self.home = self.root / "home"
+        self.log = self.root / "code.log"
+        self.wanted = self.root / "wanted"
+
+        self.market.mkdir(parents=True)
+        self.home.mkdir()
+        for extension_id, needs in MARKETPLACE.items():
+            publisher, name = extension_id.split(".")
+            manifest = {"publisher": publisher, "name": name, **needs}
+            (self.market / f"{extension_id}.json").write_text(json.dumps(manifest))
+
+        # Copies, made executable as the image's COPY --chmod makes them: the
+        # checkout keeps its scripts at 0644.
+        bin_dir = self.root / "bin"
+        bin_dir.mkdir()
+        for name, source in (
+            ("code", FIXTURES / "fake_code.py"),
+            ("curl", FIXTURES / "fake_marketplace_curl.py"),
+            ("hardcode-verify-extensions", VSCODE / "verify-extensions.sh"),
+        ):
+            shutil.copyfile(source, bin_dir / name)
+            (bin_dir / name).chmod(0o755)
+        self.path = f"{bin_dir}:{os.environ['PATH']}"
+
+    def want(self, *lines: str, complete: bool = True) -> None:
+        """
+        Write the profile's list, as the CLI does: in place, ending with the
+        end marker unless it is caught half-written.
+        """
+        text = "# the profile's extensions\n" + "".join(f"{line}\n" for line in lines)
+        if complete:
+            text += "# end\n"
+
+        with open(self.wanted, "w", encoding="utf-8") as handle:
+            handle.write(text)
+
+    def environment(self, **variables: str) -> dict:
+        """
+        The scripts' environment in this world, with *variables* added.
+        """
+        return {
+            **os.environ,
+            "PATH": self.path,
+            "HOME": str(self.home),
+            "FAKE_MARKETPLACE": str(self.market),
+            "FAKE_CODE_LOG": str(self.log),
+            "FAKE_UNVERIFIED": UNVERIFIED,
+            "HARDCODE_EXTENSIONS_WANTED": str(self.wanted),
+            **variables,
+        }
+
+    def sync(self, **variables: str) -> harness.Output:
+        """
+        One pass of the sync, as a start does.
+        """
+        self.log.write_text("")
+        return harness.run(["bash", VSCODE / "sync-extensions.sh"], env=self.environment(**variables))
+
+    def installed(self) -> set[str]:
+        """
+        What the home has now.
+        """
+        extensions = self.home / ".vscode-server" / "extensions"
+        found = set()
+
+        for manifest in extensions.glob("*/package.json"):
+            data = json.loads(manifest.read_text())
+            found.add(f"{data['publisher']}.{data['name']}")
+
+        return found
+
+    def calls(self) -> list[str]:
+        """
+        The installs and uninstalls of the last pass.
+        """
+        return [line for line in self.log.read_text().splitlines() if line]
+
+    def status(self) -> dict:
+        """
+        What the sync last said about how far it got.
+        """
+        path = self.home / ".vscode-server" / ".hardcode-extensions-status.json"
+        return json.loads(path.read_text()) if path.exists() else {}
+
+    def install_by_hand(self, extension_id: str) -> None:
+        """
+        Install an extension the way someone would in VS Code itself.
+        """
+        harness.run(
+            [
+                sys.executable,
+                FIXTURES / "fake_code.py",
+                "--extensions-dir",
+                self.home / ".vscode-server" / "extensions",
+                "--install-extension",
+                extension_id,
+            ],
+            env=self.environment(),
+        )
+
+
+def check_extension_sync(suite: Suite, world: ExtensionWorld) -> None:
+    """
+    Each pass brings the home in step with the profile's list, and only
+    touches what it answers for.
+    """
+    everything = {"core.one", "py.one", "py.dep", "go.pack", "go.member"}
+
+    world.want("core.one", "py.one", "go.pack")
+    first = world.sync()
+    suite.check(
+        "the first start installs the list, with dependencies and pack members",
+        first.ok and world.installed() == everything,
+        f"{first.text}\n{sorted(world.installed())}",
+    )
+    suite.check(
+        "and says so",
+        world.status().get("state") == "done"
+        and world.status().get("installed") == 3
+        and world.status().get("total") == 3,
+        world.status(),
+    )
+
+    unchanged = world.sync()
+    suite.check("a pass with nothing changed touches nothing", unchanged.ok and world.calls() == [], unchanged.text)
+
+    # Something the user installed in VS Code themselves: never touched.
+    world.install_by_hand("user.own")
+
+    world.want("core.one", "py.one")
+    go_off = world.sync()
+    suite.check(
+        "a language switched off takes its extensions, pack members included",
+        go_off.ok and world.installed() == {"core.one", "py.one", "py.dep", "user.own"},
+        f"{go_off.text}\n{sorted(world.installed())}",
+    )
+
+    world.want("core.one", "py.one", "me.mine")
+    mine = world.sync()
+    suite.check(
+        "the profile's own extension is installed and checked",
+        mine.ok and {"me.mine", "me.dep"} <= world.installed(),
+        f"{mine.text}\n{sorted(world.installed())}",
+    )
+
+    world.want("core.one", "py.one", "me.mine", "bad.one", "lldb.reviewed unverified-ok")
+    bad = world.sync()
+    refused_file = world.home / ".vscode-server" / ".hardcode-extensions-refused"
+    suite.check(
+        "an extension from an unverified publisher is removed again and remembered",
+        bad.ok
+        and "bad.one" not in world.installed()
+        and refused_file.read_text().split() == ["bad.one"]
+        and world.status().get("refused") == ["bad.one"],
+        f"{bad.text}\n{sorted(world.installed())}\n{world.status()}",
+    )
+    suite.check(
+        "...never installed, not even while it is checked: VS Code is running",
+        "install bad.one" not in world.calls(),
+        "\n".join(world.calls()),
+    )
+    suite.check("a reviewed exception is installed", "lldb.reviewed" in world.installed(), sorted(world.installed()))
+
+    # Every question to the Marketplace has a time limit, so a stalled one
+    # can't hold the sync up.
+    curl_log = world.root / "curl.log"
+    curl_log.write_text("")
+    world.want("core.one", "py.one", "me.mine", "user.two")
+    world.sync(FAKE_CURL_LOG=str(curl_log))
+    queries = [line for line in curl_log.read_text().splitlines() if line]
+    suite.check(
+        "every Marketplace query has a time limit",
+        bool(queries) and all("--connect-timeout" in query and "--max-time" in query for query in queries),
+        "\n".join(queries) or "no queries",
+    )
+    world.want("core.one", "py.one", "me.mine", "bad.one", "lldb.reviewed unverified-ok")
+    world.sync()
+
+    again = world.sync()
+    suite.check("a refused extension isn't fetched again", again.ok and world.calls() == [], again.text)
+
+    world.want("core.one", "py.one", "go.pack")
+    down = world.sync(FAKE_MARKETPLACE_DOWN="1")
+    suite.check(
+        "with the Marketplace unreachable, what can't be checked doesn't stay, and is to be tried again",
+        down.ok and "go.pack" not in world.installed() and world.status().get("failed") == ["go.pack"],
+        f"{down.text}\n{sorted(world.installed())}\n{world.status()}",
+    )
+
+    back = world.sync()
+    suite.check(
+        "and the next pass brings it",
+        back.ok and {"go.pack", "go.member"} <= world.installed() and world.status().get("failed") == [],
+        f"{back.text}\n{sorted(world.installed())}",
+    )
+    suite.check(
+        "extensions dropped from the list are removed; the one the user added stays",
+        not {"me.mine", "me.dep", "lldb.reviewed"} & world.installed() and "user.own" in world.installed(),
+        sorted(world.installed()),
+    )
+
+    # The CLI caught mid-write: the list has no end marker yet.
+    world.want("core.one", complete=False)
+    half = world.sync()
+    suite.check(
+        "a list caught half-written changes nothing",
+        half.ok and world.calls() == [] and {"py.one", "go.pack"} <= world.installed(),
+        f"{half.text}\n{sorted(world.installed())}",
+    )
+
+
+def check_extension_watch(suite: Suite, world: ExtensionWorld) -> None:
+    """
+    Watching, the sync follows a change to the list within seconds, with
+    VS Code already up; nothing restarts.
+    """
+    world.want("core.one", "py.one", "go.pack")
+    world.sync()
+
+    watcher = subprocess.Popen(
+        ["bash", VSCODE / "sync-extensions.sh", "--watch"],
+        env=world.environment(HARDCODE_EXTENSIONS_POLL="0.2"),
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+
+    try:
+        world.want("core.one", "py.one", "go.pack", "me.mine")
+
+        deadline = time.time() + 30
+        while time.time() < deadline and "me.mine" not in world.installed():
+            time.sleep(0.2)
+
+        suite.check(
+            "a change to the list is installed by the watcher, within seconds",
+            "me.mine" in world.installed() and watcher.poll() is None,
+            sorted(world.installed()),
+        )
+    finally:
+        watcher.terminate()
+        watcher.wait(timeout=10)
+
+
+def run_checks(suite: Suite) -> None:
+    with harness.scratch_directory("hc-images-") as scratch, Docker() as docker:
+        suite.section("ssh proxy configuration")
+        check_ssh_proxy_stanza(suite, scratch)
+
+        suite.section("seeding a home onto a root-owned volume")
+        check_home_seeding(suite, docker, scratch)
+
+        suite.section("VS Code extensions, installed by the running container")
+        world = ExtensionWorld(scratch)
+        check_extension_sync(suite, world)
+        check_extension_watch(suite, ExtensionWorld(scratch / "watch"))
+
+
+if __name__ == "__main__":
+    harness.main("images", run_checks)
