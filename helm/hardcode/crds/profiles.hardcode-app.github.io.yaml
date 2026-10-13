@@ -1,0 +1,165 @@
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: profiles.hardcode-app.github.io
+spec:
+  group: hardcode-app.github.io
+  scope: Namespaced
+  names:
+    kind: Profile
+    listKind: ProfileList
+    plural: profiles
+    singular: profile
+    shortNames: [hcp]
+  versions:
+    - name: v1alpha1
+      served: true
+      storage: true
+      subresources:
+        status: {}
+      additionalPrinterColumns:
+        - name: Phase
+          type: string
+          jsonPath: .status.phase
+        - name: Image
+          type: string
+          jsonPath: .spec.image
+        - name: Suspended
+          type: boolean
+          jsonPath: .spec.suspended
+        - name: DNS
+          type: string
+          jsonPath: .status.dnsClusterIP
+          priority: 1
+        - name: Age
+          type: date
+          jsonPath: .metadata.creationTimestamp
+      schema:
+        openAPIV3Schema:
+          type: object
+          # The admin's name rule: the name is a prefix of every Service and
+          # pod name the profile gets, and a Service name is a DNS-1035 label,
+          # so it starts with a letter. (The CLI's local profiles may start
+          # with a digit: Compose has no such limit.)
+          x-kubernetes-validations:
+            - rule: "self.metadata.name.matches('^[a-z]([a-z0-9-]{0,30}[a-z0-9])?$')"
+              message: "name: a-z, 0-9 and -, up to 32 characters, starting with a letter and not ending in -"
+          description: >-
+            A HardCode sandbox: a VS Code container pod (VS Code in the browser with Claude
+            Code and a rootless Docker sidecar), its own inspecting Squid proxy
+            and filtering CoreDNS, and NetworkPolicies that leave the VS Code container no
+            other path. The operator keeps the resources in step with this spec.
+          properties:
+            spec:
+              type: object
+              properties:
+                allowlist:
+                  type: string
+                  description: >-
+                    The profile's own allowlist, in the format of a profile's allowlist.txt:
+                    its own entries, and an "off <entry>" line for each entry HardCode
+                    provides that it switches off. The provided entries (every profile's,
+                    and those of its languages and tools) are added by the operator, as
+                    the version running provides them.
+                # The keys are hardcode_cli.langs.LANGS, in its order; the
+                # admin's tests check that they agree.
+                languages:
+                  type: array
+                  x-kubernetes-list-type: set
+                  description: >-
+                    The languages and tools the profile is built around (unset: the
+                    operator's profileDefaults.languages, or all of them; empty: none).
+                    On Kubernetes the image decides which toolchains exist (the default
+                    image has them all); a language here decides which VS Code
+                    extensions the VS Code container keeps installed (the operator's
+                    <profile>-vscode-extensions ConfigMap, followed by the running
+                    container without a restart) and which entries the allowlist gets
+                    from it.
+                  items:
+                    type: string
+                    enum: [python, node, java, dotnet, go, rust, cpp, ruby, perl, build_essentials, docker, claude_cli, codex_cli]
+                # The pattern is hardcode_cli.langs.EXTENSION_ID and maxItems the
+                # admin's MAX_EXTENSIONS; the admin's tests check both.
+                extensions:
+                  type: array
+                  x-kubernetes-list-type: set
+                  maxItems: 100
+                  description: >-
+                    VS Code extensions of the profile's own (publisher.name, as the
+                    Marketplace shows it), kept installed besides those every VS Code
+                    container has and those of its languages (the same ConfigMap; the
+                    running container installs and removes them in the background). Only
+                    publishers with a domain the Marketplace has verified are installed.
+                  items:
+                    type: string
+                    pattern: '^[a-z0-9][a-z0-9-]*\.[a-z0-9][a-z0-9-]*$'
+                image:
+                  type: string
+                  description: The VS Code image (defaults to the operator's profileDefaults.image).
+                squidImage: { type: string }
+                dockerImage: { type: string }
+                corednsImage: { type: string }
+                imagePullPolicy: { type: string, enum: [Always, IfNotPresent, Never] }
+                imagePullSecrets:
+                  type: array
+                  items: { type: object, properties: { name: { type: string } } }
+                suspended:
+                  type: boolean
+                  description: Scale the VS Code container (and its proxy and DNS) to zero, keeping volumes.
+                user: { type: string, description: The VS Code container user name (default dev). }
+                upstreamDNS: { type: string, description: Where allowlisted names resolve; a resolv.conf path or server IPs. }
+                internalRanges: { type: string, description: Space-separated address ranges an allowlisted name must never resolve to (empty means the operator's default). }
+                clientRanges: { type: string, description: Space-separated ranges the proxy accepts clients from (empty means the operator's default). }
+                vscodeHost:
+                  type: string
+                  description: Host name for an Ingress to VS Code; empty means port-forward only.
+                  pattern: '^$|^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$'
+                vscodeToken: { type: string, description: Fixed VS Code connection token; empty means generated. }
+                home:
+                  type: object
+                  properties: { size: { type: string }, storageClass: { type: string } }
+                shared:
+                  type: object
+                  properties: { size: { type: string }, storageClass: { type: string } }
+                docker:
+                  type: object
+                  properties:
+                    enabled: { type: boolean }
+                    privileged: { type: boolean }
+                    size: { type: string }
+                    storageClass: { type: string }
+                resources:
+                  type: object
+                  description: The VS Code container's resources. A memory limit is always applied (the operator's default when none is given).
+                  x-kubernetes-preserve-unknown-fields: true
+                dockerResources:
+                  type: object
+                  description: The Docker sidecar's resources; same rule for the memory limit.
+                  x-kubernetes-preserve-unknown-fields: true
+                env:
+                  type: object
+                  additionalProperties: { type: string }
+                extraVolumes:
+                  type: array
+                  items: { type: object, x-kubernetes-preserve-unknown-fields: true }
+                extraVolumeMounts:
+                  type: array
+                  items: { type: object, x-kubernetes-preserve-unknown-fields: true }
+                networkPolicy:
+                  type: object
+                  properties:
+                    enabled: { type: boolean }
+                    squidEgressCIDR: { type: string }
+                    squidEgressExcept: { type: array, items: { type: string } }
+            status:
+              type: object
+              x-kubernetes-preserve-unknown-fields: true
+              properties:
+                phase: { type: string }
+                message: { type: string }
+                observedGeneration: { type: integer }
+                dnsClusterIP: { type: string }
+                proxyURL: { type: string }
+                vscodeService: { type: string }
+                tokenSecret: { type: string }
+                lastReconciled: { type: string }

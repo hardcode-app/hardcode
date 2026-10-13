@@ -1,0 +1,351 @@
+/* Additions on top of the desktop app's stylesheet (base.css). */
+.hidden {
+    display: none !important;
+}
+
+.login {
+    min-height: 100vh;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 24px;
+}
+
+.login-card {
+    width: 400px;
+    background: var(--card);
+    border: 1px solid var(--border-2);
+    border-radius: 16px;
+    padding: 26px 28px;
+    display: flex;
+    flex-direction: column;
+    gap: 14px;
+    box-shadow: 0 30px 80px rgba(0, 0, 0, .5);
+}
+
+.login-card .brand {
+    margin-bottom: 6px;
+}
+
+.login-card .field input {
+    width: 100%;
+}
+
+.login-card .btn {
+    width: 100%;
+}
+
+.qr {
+    width: 220px;
+    height: 220px;
+    border-radius: 10px;
+    background: #fff;
+    padding: 6px;
+    align-self: center;
+    display: block;
+    margin: 0 auto;
+}
+
+.profile-box {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    padding: 0 6px;
+}
+
+.chips.scope .chip.active {
+    color: var(--warn);
+    border-color: rgba(251, 191, 36, .45);
+}
+
+.modal {
+    position: fixed;
+    inset: 0;
+    background: rgba(2, 6, 16, .6);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    z-index: 40;
+    backdrop-filter: blur(3px);
+}
+
+.modal-card {
+    width: 460px;
+    max-width: 95vw;
+    background: var(--card);
+    border: 1px solid var(--border-2);
+    border-radius: 14px;
+    padding: 20px 22px;
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+    box-shadow: 0 30px 80px rgba(0, 0, 0, .5);
+}
+
+.modal-actions {
+    display: flex;
+    justify-content: flex-end;
+    gap: 8px;
+}
+
+.tabs {
+    display: flex;
+    gap: 4px;
+    border-bottom: 1px solid var(--border);
+    margin-bottom: 16px;
+}
+
+.tab {
+    background: none;
+    border: 0;
+    color: var(--muted);
+    font: inherit;
+    padding: 8px 14px;
+    cursor: pointer;
+    border-bottom: 2px solid transparent;
+}
+
+.tab.active {
+    color: var(--text);
+    border-bottom-color: var(--accent);
+}
+
+.phase {
+    display: inline-block;
+    width: 9px;
+    height: 9px;
+    border-radius: 50%;
+    margin-right: 8px;
+    background: #475569;
+}
+
+.phase.Ready {
+    background: var(--ok);
+    box-shadow: 0 0 0 3px rgba(52, 211, 153, .15);
+}
+
+.phase.Pending {
+    background: var(--warn);
+}
+
+.phase.Error {
+    background: var(--danger);
+}
+
+.phase.Suspended {
+    background: #64748b;
+}
+
+.phase.Deleting {
+    background: var(--muted);
+}
+
+tr.clickable {
+    cursor: pointer;
+}
+
+tr.clickable:hover td {
+    background: var(--card-2);
+}
+
+textarea {
+    font: 12.5px/1.5 var(--mono);
+    color: var(--text);
+    background: var(--bg-2);
+    border: 1px solid var(--border-2);
+    border-radius: 9px;
+    padding: 10px;
+    width: 100%;
+    min-height: 360px;
+    resize: vertical;
+}
+
+.kv {
+    display: grid;
+    grid-template-columns: 180px 1fr;
+    gap: 6px 14px;
+    font-size: 13.5px;
+}
+
+.kv .k {
+    color: var(--muted);
+}
+
+.topbar-actions .btn {
+    white-space: nowrap;
+}
+
+/* The view scrolls, not the page: the sidebar and the header with a profile's actions stay put. Without a row height, the grid's one row grows with the view. */
+.app {
+    grid-template-rows: minmax(0, 1fr);
+}
+
+@media (max-width: 900px) {
+    .app {
+        grid-template-columns: 1fr;
+    }
+
+    .sidebar {
+        display: none;
+    }
+}
+
+textarea {
+    width: 100%;
+    min-height: 420px;
+    font-family: var(--mono);
+    font-size: 12px;
+    line-height: 1.5;
+    resize: vertical;
+    white-space: pre;
+    overflow: auto;
+}
+
+.modal-card:has(textarea) {
+    width: min(900px, 92vw);
+    max-width: 900px;
+}
+
+/* Languages: the list's badges, the tab's cards, the new-profile picker. */
+.language-badges {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px;
+}
+
+.badge.language {
+    color: var(--accent);
+    border-color: rgba(56, 189, 248, .3);
+}
+
+.group-head {
+    display: flex;
+    align-items: baseline;
+    gap: 10px;
+    margin: 18px 0 10px;
+}
+
+.group-head h2 {
+    margin: 0;
+}
+
+.language-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
+    gap: 12px;
+}
+
+.language-card {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+}
+
+.language-card.on {
+    border-color: rgba(56, 189, 248, .35);
+}
+
+.language-head {
+    display: flex;
+    justify-content: space-between;
+    align-items: flex-start;
+    gap: 12px;
+}
+
+.language-head .switch {
+    flex-shrink: 0;
+    margin-top: 2px;
+}
+
+.language-part {
+    display: flex;
+    gap: 10px;
+    align-items: baseline;
+}
+
+.language-label {
+    width: 48px;
+    flex-shrink: 0;
+    font-size: 11px;
+    letter-spacing: .04em;
+    text-transform: uppercase;
+    color: var(--muted);
+}
+
+.value-chips {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px;
+    min-width: 0;
+}
+
+/* A domain or an extension id; one longer than the row is cut short with
+   an ellipsis (its tooltip has it whole). */
+.value-chip {
+    font-size: 11px;
+    padding: 1px 7px;
+    border-radius: 6px;
+    background: var(--bg-2);
+    border: 1px solid var(--border-2);
+    color: var(--text);
+    white-space: nowrap;
+    max-width: 100%;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.language-picker {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 0 12px;
+}
+
+.language-picker .check {
+    padding-bottom: 4px;
+    font-size: 12.5px;
+}
+
+.modal-card:has(.language-picker) {
+    width: 580px;
+}
+
+.language-card:not(.on) .value-chip {
+    color: var(--muted);
+}
+
+td.nowrap {
+    white-space: nowrap;
+}
+
+.source-row {
+    display: flex;
+    gap: 12px;
+    align-items: baseline;
+    padding: 6px 0;
+    border-top: 1px solid var(--border);
+}
+
+.source-row:first-of-type {
+    border-top: 0;
+}
+
+.source-name {
+    width: 190px;
+    flex-shrink: 0;
+    font-size: 13px;
+    color: var(--muted);
+}
+
+table.own-extensions {
+    margin-top: 4px;
+}
+
+/* The extensions' status, once every one of them is in place. */
+.callout.ok {
+    border-color: var(--ok);
+    background: rgba(52, 211, 153, .07);
+}
+
+table.own-extensions td {
+    padding: 7px 0;
+}

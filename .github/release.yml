@@ -1,0 +1,10 @@
+# How GitHub sorts a release's generated notes (the pull requests merged
+# since the last release): Dependabot's updates apart from the rest.
+changelog:
+  categories:
+    - title: Changes
+      labels: ["*"]
+      exclude:
+        labels: [dependencies]
+    - title: Dependencies
+      labels: [dependencies]

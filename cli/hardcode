@@ -1,0 +1,20 @@
+#!/usr/bin/env python3
+"""
+The hardcode command, runnable straight from a checkout:
+
+    cli/hardcode allow github.com/myuser
+
+Needs Python 3.9 or later. YAML goes through yq, PyYAML or Docker, whichever
+is there. (`pipx install ./cli` puts the same command on your PATH.)
+"""
+
+import sys
+from pathlib import Path
+
+# The package sits beside this script. Putting it first on the import path
+# makes the checkout's own copy win over any installed one.
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+from hardcode_cli.cli import main  # noqa: E402
+
+sys.exit(main())

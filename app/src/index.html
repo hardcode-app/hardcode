@@ -1,0 +1,111 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>HardCode</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <div class="app">
+    <aside class="sidebar">
+      <div class="brand">
+        <img src="assets/icon.png" alt="" class="brand-icon">
+        <div>
+          <div class="brand-name">HardCode</div>
+        </div>
+      </div>
+      <div class="profile-box">
+        <div class="muted small">Profile</div>
+        <div class="profile-row">
+          <select id="profile-select" title="Switch profile"></select>
+          <button class="btn small" id="btn-new-profile" title="New profile">＋</button>
+        </div>
+      </div>
+      <nav>
+        <button class="nav-item active" data-view="overview"><span class="nav-ico">◉</span>Overview</button>
+        <button class="nav-item" data-view="langs"><span class="nav-ico">⌘</span>Languages / Tools</button>
+        <button class="nav-item" data-view="extensions"><span class="nav-ico">⊞</span>Extensions</button>
+        <button class="nav-item" data-view="allowlist"><span class="nav-ico">⛨</span>Allowlist</button>
+        <button class="nav-item" data-view="blocked"><span class="nav-ico">⊘</span>Blocked traffic</button>
+        <button class="nav-item" data-view="forwards"><span class="nav-ico">⇄</span>Port forwards</button>
+        <button class="nav-item" data-view="mounts"><span class="nav-ico">▤</span>Mounts</button>
+      </nav>
+      <div class="sidebar-foot">
+        <div id="update" class="update" hidden>
+          <div class="small"><strong id="update-version"></strong> is out</div>
+          <div class="update-actions">
+            <button class="btn primary small" id="btn-update" title="Download it, check its signature, install it, and start it; the sandboxes keep running">Install and restart</button>
+            <button class="btn ghost small" id="btn-update-notes" title="The release's page">What's new</button>
+          </div>
+        </div>
+        <div class="muted small">Profiles in</div>
+        <div id="home-path" class="mono small home-path" title=""></div>
+        <button class="btn ghost small" id="btn-home" title="Show the folder, to edit a profile's files by hand">Show folder</button>
+      </div>
+    </aside>
+    <main>
+      <header class="topbar">
+        <div class="topbar-left">
+          <h1 id="view-title">Overview</h1>
+          <span id="status-pill" class="pill">checking…</span>
+        </div>
+        <div class="topbar-actions">
+          <button class="btn" id="btn-start" title="docker compose up -d">▶ Start</button>
+          <button class="btn" id="btn-stop" title="docker compose stop">■ Stop</button>
+          <button class="btn primary" id="btn-vscode">Open VS Code ↗</button>
+        </div>
+      </header>
+      <section id="view" class="view"></section>
+      <div class="console collapsed" id="console">
+        <div class="console-head">
+          <button class="console-toggle" id="console-toggle">▴ Console</button>
+          <span id="console-status" class="muted small"></span>
+          <span class="spacer"></span>
+          <button class="btn small danger" id="console-stop" hidden title="Stop the running command">■ Stop</button>
+          <button class="btn ghost small" id="console-clear">Clear</button>
+        </div>
+        <pre id="console-out"></pre>
+      </div>
+    </main>
+  </div>
+  <div id="toasts"></div>
+  <div id="modal" class="modal hidden">
+    <div class="modal-card new-profile-card">
+      <h2 id="np-title">New profile</h2>
+      <p class="muted small">A profile is a separate environment: its own languages and tools, allowlist, extensions, ports, mounts, containers and volumes. Its languages and tools come first: they open the allowlist entries their package registries need, bring their VS Code extensions and decide what its image installs.</p>
+      <div class="form-row">
+        <div class="field grow"><label>Name</label><input type="text" id="np-name" class="mono" placeholder="old-node" autocomplete="off"></div>
+        <div class="field"><label>Start from</label><select id="np-from"></select></div>
+      </div>
+      <div class="field"><label>Languages</label><div class="picker" id="np-langs"></div></div>
+      <div class="field"><label>Tools</label><div class="picker" id="np-tools"></div></div>
+      <div class="muted small" id="np-summary"></div>
+      <div class="form-error" id="np-error"></div>
+      <div class="modal-actions"><button class="btn" id="np-cancel">Cancel</button><button class="btn primary" id="np-create">Create</button></div>
+    </div>
+  </div>
+  <div id="port-modal" class="modal hidden">
+    <div class="modal-card port-card">
+      <h2>VS Code's port</h2>
+      <p class="muted small">Where this profile publishes VS Code on this machine. Pick one nothing else listens on; a running profile moves at once (only its gateway restarts).</p>
+      <div class="field"><label>Port</label><input type="number" id="pm-port" class="mono" min="1" max="65535"></div>
+      <div class="form-error" id="pm-error"></div>
+      <div class="modal-actions"><button class="btn" id="pm-cancel">Cancel</button><button class="btn primary" id="pm-save">Move</button></div>
+    </div>
+  </div>
+  <div id="logs-modal" class="modal hidden">
+    <div class="modal-card logs-card">
+      <div class="logs-head">
+        <h2 id="logs-title">Logs</h2>
+        <span id="logs-status" class="muted small"></span>
+        <span class="spacer"></span>
+        <button class="btn small" id="logs-refresh">Refresh</button>
+        <button class="btn small" id="logs-close">Close</button>
+      </div>
+      <pre id="logs-out" class="logs-out"></pre>
+    </div>
+  </div>
+  <script src="bridge.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>

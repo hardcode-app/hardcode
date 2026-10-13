@@ -1,0 +1,43 @@
+{{- range .Values.profiles }}
+{{- /* Its own allowlist, or the bundled template's: the profile's own
+     entries, and the provided ones it switches off. The operator adds the
+     entries HardCode provides to its languages. */ -}}
+{{- $allowlist := .allowlist | default ($.Files.Get "files/allowlist.txt") }}
+---
+apiVersion: hardcode-app.github.io/v1alpha1
+kind: Profile
+metadata:
+  name: {{ required "each profile needs a name" .name }}
+  labels:
+    {{- include "hardcode.labels" $ | nindent 4 }}
+spec:
+  allowlist: |
+{{ $allowlist | indent 4 }}
+  {{- with .languages }}
+  languages: {{ toYaml . | nindent 4 }}
+  {{- end }}
+  {{- with .extensions }}
+  extensions: {{ toYaml . | nindent 4 }}
+  {{- end }}
+  {{- with .image }}
+  image: {{ . | quote }}
+  {{- end }}
+  {{- with .vscodeHost }}
+  vscodeHost: {{ . | quote }}
+  {{- end }}
+  {{- if .suspended }}
+  suspended: true
+  {{- end }}
+  {{- with .home }}
+  home: {{ toYaml . | nindent 4 }}
+  {{- end }}
+  {{- with .docker }}
+  docker: {{ toYaml . | nindent 4 }}
+  {{- end }}
+  {{- with .resources }}
+  resources: {{ toYaml . | nindent 4 }}
+  {{- end }}
+  {{- with .env }}
+  env: {{ toYaml . | nindent 4 }}
+  {{- end }}
+{{- end }}

@@ -1,0 +1,21 @@
+# This profile's mounts and extra ports, merged into compose.yaml.
+# Maintained by `hardcode mount`, `hardcode forward` and the HardCode app;
+# this is what they write, if you'd rather edit by hand:
+#
+#   services:
+#     vscode:
+#       volumes:
+#         - ${HOME}/Git:/home/${DEV_USER:-dev}/git        # a host folder (append :ro for read-only)
+#     docker:
+#       volumes:
+#         - ${HOME}/Git:/home/${DEV_USER:-dev}/git        # the same path, so `docker run -v` works
+#     gateway:
+#       environment:
+#         GATEWAY_FORWARDS: 8000:vscode:8000 3000:vscode:3000 8080:docker:8080
+#       ports:
+#         - ${VSCODE_BIND:-127.0.0.1}:3000:3000
+#         - ${VSCODE_BIND:-127.0.0.1}:8080:8080
+#
+# A writable host mount is a way out of the sandbox: anything inside, Claude
+# included, can change files your host later runs (.git/hooks, build scripts).
+services: {}

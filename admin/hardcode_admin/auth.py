@@ -1,0 +1,420 @@
+"""
+Who may use the admin: accounts (email, scrypt password and TOTP) kept in a
+Kubernetes Secret, in-memory sessions, and a throttle for failed sign-ins.
+"""
+
+from __future__ import annotations
+
+import base64
+import hashlib
+import hmac
+import re
+import secrets
+import threading
+import time
+from dataclasses import dataclass, field
+from datetime import datetime, timezone
+from typing import Callable, Optional
+
+from . import totp
+
+EMAIL = re.compile(r"^[^\s@]+@[^\s@]+\.[^\s@]+$")
+MIN_PASSWORD = 12
+
+# scrypt at 2^15 iterations: about 100 ms and 32 MB per check on a server.
+# maxmem has to allow for that, as the default is lower.
+SCRYPT = {"n": 2**15, "r": 8, "p": 1, "dklen": 32, "maxmem": 64 * 1024 * 1024}
+
+# How many hashes run at once; the others wait their turn. The server has 8
+# threads and the admin's container 256 MiB (the chart's limit): 8 sign-ins
+# at once, hashing together, were 256 MB of scrypt, and anyone who can reach
+# the sign-in page could have the admin and its operator killed.
+HASHES_AT_ONCE = 2
+_hashing = threading.BoundedSemaphore(HASHES_AT_ONCE)
+
+
+class AuthError(ValueError):
+    """
+    An account operation that can't be done.
+    """
+
+
+class StoreConflict(Exception):
+    """
+    The store changed since it was read; read it again and retry.
+    """
+
+
+def canonical(email: object) -> str:
+    """
+    The one spelling of an address used for lookups, throttling and sessions.
+    """
+    return str(email or "").strip().lower()
+
+
+def hash_password(password: str, salt: Optional[bytes] = None) -> dict:
+    """
+    A salted scrypt hash of *password*, as the account stores it; no more
+    than ``HASHES_AT_ONCE`` at a time.
+    """
+    salt = secrets.token_bytes(16) if salt is None else salt
+    with _hashing:
+        digest = hashlib.scrypt(password.encode(), salt=salt, **SCRYPT)
+
+    return {"salt": base64.b64encode(salt).decode(), "hash": base64.b64encode(digest).decode()}
+
+
+def check_password(password: str, user: Optional[dict]) -> bool:
+    """
+    Whether *password* is *user*'s. Without a user (or a hash), never.
+    """
+    if not user or not user.get("salt") or not user.get("hash"):
+        return False
+
+    computed = hash_password(password, base64.b64decode(user["salt"]))["hash"]
+
+    # Constant-time, so the comparison doesn't leak how close a guess was.
+    return hmac.compare_digest(base64.b64decode(computed), base64.b64decode(user["hash"]))
+
+
+class Users:
+    """
+    The admin accounts, behind a versioned store.
+
+    The store has ``load() -> (accounts, version)`` and
+    ``save(accounts, version)``, and ``save`` raises ``StoreConflict`` when
+    the store moved since that ``load``. The version travels with the
+    snapshot it belongs to, never through shared state. Writes from this
+    process are serialised, and the compare-and-set still catches writers
+    elsewhere.
+
+    Every account carries a ``sessionVersion``. A password change or a TOTP
+    reset bumps it, and sessions created under an older version stop working.
+    """
+
+    RETRIES = 4
+
+    def __init__(self, store):
+        self.store = store
+        self._lock = threading.Lock()
+
+    def list(self) -> list[dict]:
+        return self.store.load()[0]
+
+    def find(self, email: str) -> Optional[dict]:
+        wanted = canonical(email)
+        return next((user for user in self.list() if user["email"] == wanted), None)
+
+    def _modify(self, mutate: Callable[[list[dict]], object]) -> object:
+        """
+        Load the accounts, let *mutate* edit them, and save them under the
+        version that was loaded; returns what *mutate* returned.
+
+        If the store changed in between, everything starts over from a fresh
+        load, so two admins working at once don't lose each other's edits.
+        """
+        with self._lock:
+            for attempt in range(self.RETRIES):
+                users, version = self.store.load()
+                result = mutate(users)
+
+                try:
+                    self.store.save(users, version)
+                except StoreConflict:
+                    if attempt == self.RETRIES - 1:
+                        raise
+                    continue
+
+                return result
+
+        return None  # pragma: no cover - the loop returns or raises
+
+    @staticmethod
+    def _one(users: list[dict], email: str) -> dict:
+        """
+        The account for *email* in *users*; an error if there is none.
+        """
+        user = next((user for user in users if user["email"] == canonical(email)), None)
+        if user is None:
+            raise AuthError("no such user")
+
+        return user
+
+    def add(self, email: str, password: str, must_enrol: bool = True) -> dict:
+        """
+        Create an account. Unless *must_enrol* is false, its owner sets up
+        TOTP at the first sign-in.
+        """
+        address = canonical(email)
+        if not EMAIL.match(address):
+            raise AuthError("not an email address")
+        if len(str(password or "")) < MIN_PASSWORD:
+            raise AuthError(f"password must be at least {MIN_PASSWORD} characters")
+
+        def mutate(users: list[dict]) -> dict:
+            if any(user["email"] == address for user in users):
+                raise AuthError("that user already exists")
+
+            user = {
+                "email": address,
+                **hash_password(password),
+                "totpSecret": totp.generate_secret(),
+                "totpEnrolled": not must_enrol,
+                "totpLastStep": -1,
+                "sessionVersion": 0,
+                "createdAt": datetime.now(timezone.utc).isoformat(),
+            }
+            users.append(user)
+            return user
+
+        return self._modify(mutate)  # type: ignore[return-value]
+
+    def remove(self, email: str) -> None:
+        """
+        Delete an account. The last one stays, so the admin can't lock
+        everyone out.
+        """
+        address = canonical(email)
+
+        def mutate(users: list[dict]) -> None:
+            if len(users) <= 1:
+                raise AuthError("the last admin can't be removed")
+
+            self._one(users, address)
+            users[:] = [user for user in users if user["email"] != address]
+
+        self._modify(mutate)
+
+    def update(self, email: str, **fields) -> dict:
+        """
+        Change fields of an account.
+        """
+
+        def mutate(users: list[dict]) -> dict:
+            user = self._one(users, email)
+            user.update(fields)
+            return user
+
+        return self._modify(mutate)  # type: ignore[return-value]
+
+    def _bump(self, email: str, **fields) -> dict:
+        """
+        Change fields of an account and end its existing sessions.
+        """
+
+        def mutate(users: list[dict]) -> dict:
+            user = self._one(users, email)
+            user.update(fields)
+            user["sessionVersion"] = int(user.get("sessionVersion", 0)) + 1
+            return user
+
+        return self._modify(mutate)  # type: ignore[return-value]
+
+    def set_password(self, email: str, password: str) -> dict:
+        """
+        Set a new password, signing the account out everywhere.
+        """
+        if len(str(password or "")) < MIN_PASSWORD:
+            raise AuthError(f"password must be at least {MIN_PASSWORD} characters")
+
+        return self._bump(email, **hash_password(password))
+
+    def reset_totp(self, email: str) -> dict:
+        """
+        Make the account enrol in TOTP again with a new secret, signing it
+        out everywhere.
+        """
+        return self._bump(email, totpSecret=totp.generate_secret(), totpEnrolled=False, totpLastStep=-1)
+
+    def consume_totp_step(self, email: str, step: int, version: int) -> dict:
+        """
+        Accept a code for time step *step*, exactly once.
+
+        The check and the record are one write against the current account,
+        so two requests carrying the same code can't both get in. *version* is
+        the session's, in case the credentials changed since the password step.
+        """
+
+        def mutate(users: list[dict]) -> dict:
+            user = self._one(users, email)
+
+            if int(user.get("sessionVersion", 0)) != version:
+                raise AuthError("session revoked; sign in again")
+            if int(user.get("totpLastStep", -1)) >= step:
+                raise AuthError("code already used")
+
+            user.update(totpLastStep=step, totpEnrolled=True)
+            return user
+
+        return self._modify(mutate)  # type: ignore[return-value]
+
+
+@dataclass
+class Session:
+    """
+    One signed-in browser.
+
+    ``stage`` is "password" after the first factor and "full" after TOTP.
+    ``version`` is the account's ``sessionVersion`` when the session began;
+    ``attempts`` counts wrong second-factor codes.
+    """
+
+    email: str
+    stage: str
+    created: float
+    seen: float
+    version: int = 0
+    attempts: int = 0
+
+
+@dataclass
+class Sessions:
+    """
+    Sessions by random id, with a bounded lifetime, an idle timeout, and a
+    short life for the password-only stage (the second-factor challenge).
+
+    gunicorn serves requests from several threads, hence the lock.
+    """
+
+    ttl: float = 12 * 3600
+    idle: float = 2 * 3600
+    challenge_ttl: float = 5 * 60
+    clock: Callable[[], float] = time.time
+    _map: dict = field(default_factory=dict)
+    _lock: threading.Lock = field(default_factory=threading.Lock)
+
+    def _expired(self, session: Session, now: float) -> bool:
+        too_old = now - session.created > self.ttl
+        idle_too_long = now - session.seen > self.idle
+        challenge_timed_out = session.stage == "password" and now - session.created > self.challenge_ttl
+
+        return too_old or idle_too_long or challenge_timed_out
+
+    def create(self, email: str, stage: str, version: int = 0) -> str:
+        """
+        Start a session and return its id. Expired sessions are cleared out
+        on the way.
+        """
+        now = self.clock()
+        session_id = secrets.token_urlsafe(32)
+
+        with self._lock:
+            for stale in [sid for sid, session in self._map.items() if self._expired(session, now)]:
+                del self._map[stale]
+
+            self._map[session_id] = Session(email, stage, now, now, version)
+
+        return session_id
+
+    def get(self, session_id: Optional[str], touch: bool = True) -> Optional[Session]:
+        """
+        The live session with this id; ``None`` if there is none or it expired.
+
+        With *touch* (a request someone made) the session is marked as just
+        seen, which holds off the idle timeout. Without it (the page's own
+        background refresh) it isn't: an open tab nobody looks at still
+        times out.
+        """
+        now = self.clock()
+
+        with self._lock:
+            session = self._map.get(session_id or "")
+            if session is None:
+                return None
+
+            if self._expired(session, now):
+                del self._map[session_id]
+                return None
+
+            if touch:
+                session.seen = now
+
+            return session
+
+    def upgrade(self, session_id: str, stage: str) -> None:
+        """
+        Move a session to *stage*: "full" once the second factor checks out.
+        """
+        with self._lock:
+            if session_id in self._map:
+                self._map[session_id].stage = stage
+
+    def fail(self, session_id: Optional[str]) -> int:
+        """
+        Count a wrong second-factor code; returns the total so far.
+        """
+        with self._lock:
+            session = self._map.get(session_id or "")
+            if session is None:
+                return 0
+
+            session.attempts += 1
+            return session.attempts
+
+    def destroy(self, session_id: Optional[str]) -> None:
+        """
+        End one session.
+        """
+        with self._lock:
+            self._map.pop(session_id or "", None)
+
+    def revoke(self, email: str) -> int:
+        """
+        End every session of an account; returns how many there were.
+        """
+        with self._lock:
+            doomed = [sid for sid, session in self._map.items() if canonical(session.email) == canonical(email)]
+            for sid in doomed:
+                del self._map[sid]
+
+        return len(doomed)
+
+
+@dataclass
+class Throttle:
+    """
+    Blocks a key (an address, an account) after *limit* failures within
+    *window* seconds of the first.
+    """
+
+    limit: int = 8
+    window: float = 15 * 60
+    clock: Callable[[], float] = time.time
+    _hits: dict = field(default_factory=dict)
+    _lock: threading.Lock = field(default_factory=threading.Lock)
+
+    def blocked(self, key: str) -> bool:
+        """
+        Whether *key* has used up its failures for the current window.
+        """
+        with self._lock:
+            hit = self._hits.get(key)
+            if not hit:
+                return False
+
+            return hit["count"] >= self.limit and self.clock() - hit["first"] < self.window
+
+    def fail(self, key: str) -> None:
+        """
+        Count a failure for *key*.
+        """
+        now = self.clock()
+
+        with self._lock:
+            # Windows that have passed are forgotten, so the map doesn't grow
+            # with every address that ever tried.
+            for stale in [key for key, hit in self._hits.items() if now - hit["first"] > self.window]:
+                del self._hits[stale]
+
+            hit = self._hits.get(key)
+            if hit is None:
+                self._hits[key] = {"first": now, "count": 1}
+            else:
+                hit["count"] += 1
+
+    def clear(self, key: str) -> None:
+        """
+        Forget *key*'s failures, after a success.
+        """
+        with self._lock:
+            self._hits.pop(key, None)

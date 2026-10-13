@@ -1,0 +1,129 @@
+# HardCode on Kubernetes: an operator that turns Profile objects into
+# sandboxes (vscode + rootless Docker, inspecting squid, filtering CoreDNS,
+# NetworkPolicies), plus an admin UI to manage them.
+
+admin:
+  image:
+    repository: hardcode-admin
+    tag: latest
+    pullPolicy: IfNotPresent
+  # The first admin. Created on first start if no admins exist yet; they
+  # enrol their authenticator app at first sign-in. Either set both here or
+  # point existingSecret at a Secret with keys "email" and "password".
+  email: ""
+  password: ""
+  existingSecret: ""
+  # The web UI. The operator part runs regardless.
+  ui:
+    enabled: true
+  service:
+    type: ClusterIP
+    port: 80
+  ingress:
+    enabled: false
+    className: ""
+    annotations: {}
+    host: hardcode-admin.example.com
+    tls: []
+    #  - secretName: hardcode-admin-tls
+    #    hosts: [hardcode-admin.example.com]
+  # "auto": the session cookie is marked Secure when the request arrived over
+  # HTTPS (X-Forwarded-Proto); "always" or "never" to force.
+  cookieSecure: auto
+  # Addresses or CIDRs of the proxies in front of the admin (the Ingress
+  # controller's pods or nodes). Only their X-Forwarded-For is believed when
+  # the login throttle keys on the client address, read from the right: the
+  # first address no listed proxy added is the client. From anyone else the
+  # header is ignored.
+  trustedProxies: []
+  resources:
+    requests: { cpu: 50m, memory: 96Mi }
+    limits: { memory: 256Mi }
+  nodeSelector: {}
+  tolerations: []
+imagePullSecrets: []
+
+# Defaults every Profile inherits unless its spec says otherwise.
+profileDefaults:
+  # Built with `hardcode build` and pushed to a registry the cluster
+  # can pull from; see ../README.md.
+  image: hardcode-vscode:latest
+  squidImage: hardcode-squid:latest
+  dockerImage: docker:29-dind-rootless
+  corednsImage: coredns/coredns:1.14.7
+  imagePullPolicy: IfNotPresent
+  imagePullSecrets: []
+  # The languages and tools of a profile that doesn't list its own
+  # (spec.languages); empty means all of them. Keys: python, node, java,
+  # dotnet, go, rust, cpp, ruby, perl, build_essentials, docker, claude_cli,
+  # codex_cli.
+  # The image decides which toolchains a VS Code container has (the default image has
+  # them all); a profile's languages decide which VS Code extensions its
+  # VS Code container keeps installed (changed without a restart) and which
+  # allowlist entries HardCode provides it.
+  languages: []
+  upstreamDNS: /etc/resolv.conf
+  home: { size: 20Gi, storageClass: "" }
+  shared: { size: 5Gi, storageClass: "" }
+  docker:
+    enabled: true
+    # Rootless dockerd creates user namespaces and a tun device; on most
+    # clusters that needs a privileged container. The daemon itself still
+    # runs as an unprivileged user inside it.
+    privileged: true
+    size: 30Gi
+    storageClass: ""
+  # Hard memory limits on the VS Code container and its Docker sidecar (squid 512Mi and
+  # CoreDNS 128Mi are built in). Raise them per profile or here; a profile
+  # that leaves the memory limit out still gets this one.
+  resources:
+    requests: { cpu: 250m, memory: 1Gi }
+    limits: { memory: 8Gi }
+  dockerResources:
+    requests: { cpu: 100m, memory: 256Mi }
+    limits: { memory: 4Gi }
+  networkPolicy:
+    # Needs a CNI that enforces NetworkPolicy (Calico, Cilium, ...). Without
+    # enforcement the VS Code container has normal pod networking and the allowlist only
+    # applies to traffic that chooses to use the proxy.
+    enabled: true
+    # A policy the chart itself installs, denying everything to and from
+    # every pod the operator creates in this namespace. It is there before
+    # any sandbox exists and stays whatever happens to a profile's own
+    # policies (which then allow exactly what each pod needs). A profile with
+    # networkPolicy.enabled=false is fully isolated while this is on.
+    defaultDeny: true
+    squidEgressCIDR: 0.0.0.0/0
+    # Private, shared, link-local (cloud metadata) and loopback ranges are
+    # excluded so the sandbox can't reach cluster, LAN or node services
+    # through the proxy; relax for an internal registry (and see
+    # internalRanges below, which squid itself enforces by resolved address).
+    squidEgressExcept: [10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 100.64.0.0/10, 169.254.0.0/16, 127.0.0.0/8]
+  # Address ranges an allowlisted name must never resolve to (squid refuses
+  # the request); empty means loopback, link-local, private and shared
+  # space. Narrow it for a registry on an internal address.
+  internalRanges: ""
+  # Who may use a profile's proxy; empty means private, shared and local
+  # IPv6 ranges, which covers common pod networks.
+  clientRanges: ""
+  # For profiles with a vscodeHost: the Ingress they get.
+  ingressClassName: ""
+  ingressAnnotations: {}
+  ingressTLSSecret: ""
+
+# Profiles to create with the chart (the admin UI and kubectl can add more).
+# allowlist: the profile's own part (its own entries, and "off <entry>" for
+# provided ones it switches off); "" means the bundled one (files/allowlist.txt,
+# the template's); pass the repo's with
+# --set-file profiles[0].allowlist=template/allowlist.txt. The
+# operator adds the entries HardCode provides to the profile's languages.
+# languages: empty means profileDefaults.languages.
+# extensions: VS Code extensions of the profile's own (publisher.name).
+profiles: []
+#  - name: default
+#    allowlist: ""
+#    languages: [python, node, build_essentials, docker, claude_cli]
+#    extensions: []
+#    image: ""
+#    vscodeHost: ""
+#    suspended: false

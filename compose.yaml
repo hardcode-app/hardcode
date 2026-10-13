@@ -1,0 +1,344 @@
+# Sandboxed development environment.
+#
+#   browser ─► gateway ─┐
+#                       │      devnet (internal: no route to anywhere)
+#                       ├─► vscode (VS Code web, user "dev")
+#                       │      │ docker CLI, TLS :2376
+#                       │      ▼
+#                       ├─► docker (rootless dockerd) ── /shared volume shared with vscode
+#                       │
+#                       ├─► squid ───► egress ─► allowlisted URLs only (HTTPS inspected)
+#                       └─► coredns ─► egress ─► allowlisted DNS names only
+#
+# vscode and docker are attached to devnet only. Their only ways out are squid
+# and CoreDNS, which both enforce the profile's allowlist: the entries
+# HardCode provides and the profile's own allowlist.txt. Squid decrypts
+# HTTPS with a CA the "pki" service generates and the VS Code container trusts.
+#
+# Profiles: each is a separate environment, a folder in the user's HardCode
+# home (~/.config/hardcode/profiles/NAME on Linux) with its own .env (what
+# differs from the defaults below), allowlist.txt and compose.override.yaml,
+# run as its own Compose project. This file comes with the HardCode that runs
+# it, and isn't meant to be edited: a profile's compose.override.yaml is
+# merged over it. Use `hardcode [-p NAME] compose <args>` (or up/down/logs/...),
+# which runs
+#   HARDCODE_PROJECT=hardcode-NAME HARDCODE_PROFILE_DIR=<home>/profiles/NAME \
+#   HARDCODE_VSCODE_TAG=NAME HARDCODE_SQUID_TAG=... HARDCODE_GATEWAY_TAG=... \
+#   COMPOSE_PROFILES=docker \
+#   docker compose -p hardcode-NAME --project-directory <this folder> \
+#     --env-file <profile>/.env -f compose.yaml -f <profile>/compose.override.yaml <args>
+# (COMPOSE_PROFILES is empty when the profile's .env says ENABLE_DOCKER=false;
+# outside the default home, the project and the VS Code image's tag carry a
+# short id of the home, so two homes' profiles of one name stay apart.)
+
+name: ${HARDCODE_PROJECT:?run docker compose through hardcode (hardcode compose <args>), which names the profile}
+
+x-proxy-env: &proxy-env
+  HTTP_PROXY: http://squid:3128
+  HTTPS_PROXY: http://squid:3128
+  NO_PROXY: localhost,127.0.0.1,::1,vscode,docker,squid
+  http_proxy: http://squid:3128
+  https_proxy: http://squid:3128
+  no_proxy: localhost,127.0.0.1,::1,vscode,docker,squid
+
+# The profile's languages and tools: what the VS Code image is built with.
+# Their extensions come from the profile's extension list instead (below).
+x-languages: &languages
+  INSTALL_PYTHON: ${INSTALL_PYTHON:-false}
+  INSTALL_NODE: ${INSTALL_NODE:-false}
+  INSTALL_JAVA: ${INSTALL_JAVA:-false}
+  INSTALL_DOTNET: ${INSTALL_DOTNET:-false}
+  INSTALL_GO: ${INSTALL_GO:-false}
+  INSTALL_RUST: ${INSTALL_RUST:-false}
+  INSTALL_CPP: ${INSTALL_CPP:-false}
+  INSTALL_RUBY: ${INSTALL_RUBY:-false}
+  INSTALL_PERL: ${INSTALL_PERL:-false}
+  INSTALL_BUILD_ESSENTIALS: ${INSTALL_BUILD_ESSENTIALS:-false}
+  INSTALL_DOCKER: ${INSTALL_DOCKER:-false}
+  INSTALL_CLAUDE_CLI: ${INSTALL_CLAUDE_CLI:-false}
+  INSTALL_CODEX_CLI: ${INSTALL_CODEX_CLI:-false}
+
+x-dns: &dns
+  dns:
+    - ${DNS_IP:-172.31.253.53}
+  # Don't inherit the host's search domains.
+  dns_search:
+    - .
+
+# For containers on devnet and a routable network: never route between them.
+x-no-forwarding: &no-forwarding
+  sysctls:
+    net.ipv4.ip_forward: 0
+
+# Every service's log, rotated: at most 3 files of 10 MB. The sandbox fills
+# squid's log just by making requests; rotated, neither the disk nor a read
+# of the logs (Blocked traffic, hardcode logs) grows without bound.
+x-logging: &logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "3"
+
+services:
+  # One-shot: renders the profile's allowlist into the CoreDNS and squid rule
+  # files. It is given proxy-allowlist.txt, which the hardcode command
+  # writes: the profile's own allowlist.txt with the entries HardCode
+  # provides (every profile's, and its languages' and tools').
+  allowlist:
+    build: &squid-build ./images/squid
+    image: hardcode-squid:${HARDCODE_SQUID_TAG:-latest}
+    logging: *logging
+    entrypoint: ["/usr/local/bin/allowlist-render"]
+    user: root
+    environment:
+      UPSTREAM_DNS: ${UPSTREAM_DNS:-/etc/resolv.conf}
+      CLIENT_RANGES: ${SQUID_CLIENT_RANGES:-}
+      INTERNAL_RANGES: ${EGRESS_INTERNAL_RANGES:-}
+    volumes:
+      - ${HARDCODE_PROFILE_DIR:?run docker compose through hardcode}/proxy-allowlist.txt:/config/allowlist.txt:ro
+      - egress-config:/out
+    network_mode: none
+    deploy: { resources: { limits: { memory: 128m } } }
+    restart: "no"
+
+  # One-shot: creates the proxy CA (once) and publishes its certificate.
+  pki:
+    build: *squid-build
+    image: hardcode-squid:${HARDCODE_SQUID_TAG:-latest}
+    logging: *logging
+    entrypoint: ["/usr/local/bin/squid-make-ca"]
+    user: root
+    volumes:
+      - proxy-ca:/proxy-ca
+      - proxy-ca-pub:/proxy-ca-pub
+    network_mode: none
+    deploy: { resources: { limits: { memory: 128m } } }
+    restart: "no"
+
+  # DNS for devnet: allowlisted names are resolved upstream, the rest get
+  # NXDOMAIN, so DNS can't be used as an exfiltration channel.
+  coredns:
+    image: coredns/coredns:1.14.7
+    logging: *logging
+    command: ["-conf", "/etc/coredns/Corefile"]
+    depends_on:
+      allowlist:
+        condition: service_completed_successfully
+    volumes:
+      - egress-config:/etc/coredns:ro
+    networks:
+      devnet:
+        ipv4_address: ${DNS_IP:-172.31.253.53}
+      egress: {}
+    <<: *no-forwarding
+    read_only: true
+    cap_drop: [ALL]
+    # The coredns binary carries this file capability; it won't exec without it.
+    cap_add: [NET_BIND_SERVICE]
+    security_opt: [no-new-privileges:true]
+    deploy: { resources: { limits: { memory: 128m } } }
+    restart: unless-stopped
+
+  # HTTP/HTTPS egress proxy. Inspects HTTPS, so rules apply to URLs and
+  # methods (read-only unless an entry says "rw"), ports 80/443 only.
+  # squid.conf is baked into the image: after editing it, run
+  # hardcode build squid && hardcode up squid
+  squid:
+    build: *squid-build
+    image: hardcode-squid:${HARDCODE_SQUID_TAG:-latest}
+    logging: *logging
+    depends_on:
+      allowlist:
+        condition: service_completed_successfully
+      pki:
+        condition: service_completed_successfully
+    volumes:
+      - type: volume
+        source: egress-config
+        target: /etc/squid/generated
+        read_only: true
+        volume:
+          subpath: squid
+      - proxy-ca:/proxy-ca:ro
+      # Cache for the per-host certificates squid generates; squid runs as "proxy".
+      - type: tmpfs
+        target: /var/spool/squid
+        tmpfs:
+          mode: 01777
+    networks: [devnet, egress]
+    <<: *no-forwarding
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    healthcheck:
+      # A real (refused) request: a bare TCP connect would be logged as an error.
+      test: ["CMD", "bash", "-c", "exec 3<>/dev/tcp/127.0.0.1/3128 && printf 'GET http://squid/ HTTP/1.0\\r\\n\\r\\n' >&3 && head -c 12 <&3 | grep -q HTTP"]
+      interval: 10s
+      timeout: 3s
+      retries: 6
+      start_period: 5s
+    # Hard cap (the descriptor cap in squid.conf covers one allocation
+    # pattern; this covers the rest).
+    deploy: { resources: { limits: { memory: 512m } } }
+    restart: unless-stopped
+
+  # Rootless Docker for the VS Code container. Its containers share devnet's restrictions
+  # (pulls and their HTTP(S) traffic go through squid).
+  docker:
+    image: docker:29-dind-rootless
+    logging: *logging
+    # Only with the "docker" Compose profile, which `hardcode` activates unless
+    # the profile's .env says ENABLE_DOCKER=false (a harder sandbox: nothing
+    # privileged, no Docker).
+    profiles: [docker]
+    hostname: docker
+    <<: *dns
+    environment:
+      <<: *proxy-env
+      DOCKER_TLS_CERTDIR: /certs
+      DOCKER_TLS_SAN: DNS:docker
+      # dockerd's pulls go through squid, so it must trust the proxy CA.
+      SSL_CERT_FILE: /proxy-ca/ca-bundle.pem
+    # Rootless dockerd needs to create user namespaces. These options are
+    # enough; --privileged is not used. On Ubuntu 23.10+ hosts unprivileged
+    # user namespaces are AppArmor-restricted, and Ubuntu's stock "rootlesskit"
+    # profile allows them. On hosts without that profile set
+    # DOCKER_APPARMOR_PROFILE=unconfined.
+    security_opt:
+      - apparmor=${DOCKER_APPARMOR_PROFILE:-rootlesskit}
+      - seccomp=unconfined
+      - systempaths=unconfined
+    devices:
+      - /dev/net/tun
+    volumes:
+      - docker-data:/home/rootless/.local/share/docker
+      - docker-certs:/certs
+      - docker-certs-client:/certs/client
+      - shared:/shared
+      - proxy-ca-pub:/proxy-ca:ro
+    networks: [devnet]
+    depends_on: [squid, coredns]
+    healthcheck:
+      test: ["CMD-SHELL", "DOCKER_HOST=unix:///run/user/1000/docker.sock docker info >/dev/null 2>&1"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      start_period: 10s
+    # Everything the inner daemon and its containers use counts against
+    # these: memory (no swap on top), and the number of processes.
+    mem_limit: ${DOCKER_MEMORY:-4g}
+    memswap_limit: ${DOCKER_MEMORY:-4g}
+    pids_limit: ${DOCKER_PIDS:-2048}
+    restart: unless-stopped
+
+  # One image per profile, so profiles can carry different toolchains.
+  vscode:
+    build:
+      context: ./images/vscode
+      args:
+        <<: *languages
+        USERNAME: ${DEV_USER:-dev}
+        USER_UID: ${DEV_UID:-1000}
+        USER_GID: ${DEV_GID:-1000}
+        VSCODE_VERSION: ${VSCODE_VERSION:-latest}
+        GRADLE_VERSION: ${GRADLE_VERSION:-latest}
+        CODEX_VERSION: ${CODEX_VERSION:-latest}
+    image: hardcode-vscode:${HARDCODE_VSCODE_TAG:?run docker compose through hardcode}
+    logging: *logging
+    hostname: vscode
+    <<: *dns
+    environment:
+      <<: *proxy-env
+      DOCKER_HOST: tcp://docker:2376
+      DOCKER_TLS_VERIFY: "1"
+      DOCKER_CERT_PATH: /certs/client
+      TESTCONTAINERS_HOST_OVERRIDE: docker
+      # Off: the entrypoint drops the DOCKER_* variables, so `docker` says so
+      # instead of waiting on a daemon that isn't there.
+      ENABLE_DOCKER: ${ENABLE_DOCKER:-true}
+      VSCODE_CONNECTION_TOKEN: ${VSCODE_CONNECTION_TOKEN:-}
+      VSCODE_PUBLISHED_PORT: ${VSCODE_PORT:-11111}
+      VSCODE_DEFAULT_FOLDER: ${VSCODE_DEFAULT_FOLDER:-}
+      # Claude Code: telemetry hosts and the claude.ai connector proxy
+      # (mcp-proxy.anthropic.com) aren't allowlisted.
+      DISABLE_TELEMETRY: "1"
+      DISABLE_ERROR_REPORTING: "1"
+      ENABLE_CLAUDEAI_MCP_SERVERS: "false"
+      # Trust the proxy CA. The entrypoint adds it to the system store, which
+      # covers apt, git, curl, Go, Rust, Ruby, .NET and Java; these cover the
+      # tools that keep their own bundle.
+      SSL_CERT_FILE: /etc/ssl/certs/ca-certificates.crt
+      NODE_EXTRA_CA_CERTS: /usr/local/share/ca-certificates/hardcode-proxy-ca.crt
+      REQUESTS_CA_BUNDLE: /etc/ssl/certs/ca-certificates.crt
+      PIP_CERT: /etc/ssl/certs/ca-certificates.crt
+      # Codex reads this one for its WebSocket connections too, which
+      # SSL_CERT_FILE doesn't cover.
+      CODEX_CA_CERTIFICATE: /etc/ssl/certs/ca-certificates.crt
+    volumes:
+      - home:/home/${DEV_USER:-dev}
+      - shared:/shared
+      - docker-certs-client:/certs/client:ro
+      - proxy-ca-pub:/proxy-ca:ro
+      # The VS Code extensions the profile wants (its languages' and tools',
+      # and its own), which `hardcode` keeps written. The container watches
+      # it and installs or removes extensions in the background, so a change
+      # needs no restart.
+      - ${HARDCODE_PROFILE_DIR:?run docker compose through hardcode}/vscode-extensions.txt:/etc/hardcode/extensions/wanted:ro
+    networks: [devnet]
+    # No raw sockets: stops ARP/packet spoofing against the other containers.
+    cap_drop: [NET_RAW]
+    shm_size: 1gb
+    # A runaway build, a fork bomb: killed before it takes the machine down.
+    mem_limit: ${VSCODE_MEMORY:-8g}
+    memswap_limit: ${VSCODE_MEMORY:-8g}
+    pids_limit: ${VSCODE_PIDS:-4096}
+    depends_on:
+      squid:
+        condition: service_healthy
+      coredns:
+        condition: service_started
+      docker:
+        condition: service_started
+        required: false
+    restart: unless-stopped
+
+  # Publishes VS Code to the host. Add more ports with `hardcode forward`.
+  gateway:
+    build: ./images/gateway
+    image: hardcode-gateway:${HARDCODE_GATEWAY_TAG:-latest}
+    logging: *logging
+    init: true
+    environment:
+      GATEWAY_FORWARDS: 8000:vscode:8000
+    ports:
+      - ${VSCODE_BIND:-127.0.0.1}:${VSCODE_PORT:-11111}:8000
+    networks: [devnet, frontend]
+    <<: *no-forwarding
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    deploy: { resources: { limits: { memory: 64m } } }
+    restart: unless-stopped
+
+networks:
+  devnet:
+    internal: true
+    driver_opts:
+      # No address on the host's side of the bridge (Docker 28+): containers
+      # on devnet can't reach services bound on the host, not even through
+      # the bridge itself. They have no default route either.
+      com.docker.network.bridge.gateway_mode_ipv4: isolated
+    ipam:
+      config:
+        - subnet: ${DEVNET_SUBNET:-172.31.253.0/24}
+  egress: {}
+  frontend: {}
+
+volumes:
+  home:
+  shared:
+  docker-data:
+  docker-certs:
+  docker-certs-client:
+  egress-config:
+  proxy-ca:
+  proxy-ca-pub:
