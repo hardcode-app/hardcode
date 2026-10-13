@@ -292,7 +292,7 @@ Like everything here, the app is built in the **build image**
 libraries from the archive, the Tauri CLI and PyInstaller pinned).
 `app/build.sh` runs each step there through `images/build/run.sh`, which
 builds the image on first use, mounts the checkout, caps the container
-(`BUILD_MEMORY`, 6g; `BUILD_CPUS`, 4) and keeps cargo's and linuxdeploy's
+(`BUILD_MEMORY`, 6g; `BUILD_CPUS`, 4 or what the machine has) and keeps cargo's and linuxdeploy's
 caches in `~/.cache/hardcode-build`, so later runs take seconds:
 
 | Command | Does | Output |

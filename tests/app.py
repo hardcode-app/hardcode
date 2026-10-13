@@ -28,7 +28,7 @@ APP = ROOT / "app" / "src-tauri"
 BINARY = APP / "target" / "debug" / "hardcode-app"
 
 # Where Tauri keeps the app's settings: a folder named after its identifier.
-APP_IDENTIFIER = json.loads((APP / "tauri.conf.json").read_text())["identifier"]
+APP_IDENTIFIER = json.loads((APP / "tauri.conf.json").read_text(encoding="utf-8"))["identifier"]
 
 
 def check_unit_tests(suite: Suite) -> None:
@@ -86,7 +86,7 @@ def check_headless_launch(suite: Suite) -> None:
         # though there is a default too.
         settings = Path(temporary) / "config" / APP_IDENTIFIER / "settings.json"
         settings.parent.mkdir(parents=True)
-        settings.write_text(json.dumps({"profile": profile}))
+        settings.write_text(json.dumps({"profile": profile}), encoding="utf-8")
 
         output = launch()
 
@@ -111,7 +111,7 @@ def check_launcher(suite: Suite) -> None:
         output = harness.run(["bash", ROOT / "app" / "build.sh", "desktop"], env=environment)
 
         launcher = Path(data) / "applications" / "HardCode.desktop"
-        text = launcher.read_text() if launcher.exists() else ""
+        text = launcher.read_text(encoding="utf-8") if launcher.exists() else ""
         fields = dict(line.split("=", 1) for line in text.splitlines() if "=" in line)
 
         suite.check(

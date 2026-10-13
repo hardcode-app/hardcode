@@ -8,29 +8,37 @@ multi-ecosystem-groups:
   images:
     schedule: { interval: weekly }
 
+# Its commits follow Conventional Commits like everyone's (tests/commits.py):
+# build(deps): bump ..., and ci(deps) for the actions.
 updates:
   - package-ecosystem: cargo
     directory: /app/src-tauri
+    commit-message: { prefix: build, include: scope }
     schedule: { interval: weekly }
     groups:
       app: { patterns: ["*"] }
   - package-ecosystem: pip
     directories: ["/admin", "/cli", "/images/build"]
+    commit-message: { prefix: build, include: scope }
     schedule: { interval: weekly }
   # Local composite actions aren't followed from the workflows that use them:
   # each one's folder is listed.
   - package-ecosystem: github-actions
     directories: ["/", "/.github/actions/build-image"]
+    commit-message: { prefix: ci, include: scope }
     schedule: { interval: weekly }
   - package-ecosystem: docker-compose
     directory: /
+    commit-message: { prefix: build, include: scope }
     patterns: ["*"]
     multi-ecosystem-group: images
   - package-ecosystem: helm
     directory: /helm/hardcode
+    commit-message: { prefix: build, include: scope }
     patterns: ["*"]
     multi-ecosystem-group: images
   # The images' base: ubuntu.
   - package-ecosystem: docker
     directories: ["/images/vscode", "/images/squid", "/images/gateway", "/images/admin", "/images/build"]
+    commit-message: { prefix: build, include: scope }
     schedule: { interval: weekly }

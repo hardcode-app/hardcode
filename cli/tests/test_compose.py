@@ -96,7 +96,9 @@ class ComposeTests(HomeTestCase):
         )
 
         project = self.make()
-        project.profile.env_file.write_text(project.profile.env_file.read_text() + "ENABLE_DOCKER=false\n")
+        project.profile.env_file.write_text(
+            project.profile.env_file.read_text(encoding="utf-8") + "ENABLE_DOCKER=false\n", encoding="utf-8"
+        )
         self.assertFalse(project.docker_enabled())
         self.assertEqual(project.environment()["COMPOSE_PROFILES"], "")
 

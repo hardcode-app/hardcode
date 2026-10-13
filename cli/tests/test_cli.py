@@ -51,7 +51,7 @@ class CliTests(HomeTestCase):
         return code, "\n".join(out), "\n".join(err)
 
     def allowlist_of(self, profile):
-        return profiles.get(self.root, profile).allowlist_file.read_text()
+        return profiles.get(self.root, profile).allowlist_file.read_text(encoding="utf-8")
 
     # -- general ---------------------------------------------------------------
 
@@ -80,7 +80,7 @@ class CliTests(HomeTestCase):
         self.assertEqual(code, 1)
         self.assertIn("no profiles yet", err)
 
-        (self.root.parent / "a-file").write_text("")
+        (self.root.parent / "a-file").write_text("", encoding="utf-8")
         code, _, err = self.run_cli("profiles", config=self.root.parent / "a-file")
         self.assertEqual(code, 1)
         self.assertIn("is a file", err)
@@ -305,15 +305,15 @@ class CliTests(HomeTestCase):
 
     def test_a_broken_override_is_an_error_not_a_traceback(self):
         self.run_cli("profile", "add", "b", "--lang", "")
-        profiles.get(self.root, "b").override_file.write_text("services:\n  gateway:\n    ports: [\n")
+        profiles.get(self.root, "b").override_file.write_text("services:\n  gateway:\n    ports: [\n", encoding="utf-8")
 
         code, _, err = self.run_cli("forward", "3000")
         self.assertEqual(code, 0, "the other profile's damaged file is a warning here, not a stop")
-        self.assertRegex(err, r"warning: .*profiles/b/compose.override.yaml: invalid YAML")
+        self.assertRegex(err, r"warning: .*profiles[/\\]b[/\\]compose.override.yaml: invalid YAML")
 
         code, _, err = self.run_cli("-p", "b", "forward", "3001")
         self.assertEqual(code, 1, "the damaged profile itself can't be edited")
-        self.assertRegex(err, r"error: .*profiles/b/compose.override.yaml: invalid YAML")
+        self.assertRegex(err, r"error: .*profiles[/\\]b[/\\]compose.override.yaml: invalid YAML")
 
         code, _, _ = self.run_cli("--all", "allow", "x.org")
         self.assertEqual(code, 0, "an allowlist edit doesn't read overrides")
@@ -399,7 +399,7 @@ class CliTests(HomeTestCase):
         self.assertIn("exec vscode bash -l", " ".join(self.runner.calls[-1]))
 
     def test_a_start_gives_the_proxy_what_an_update_provides(self):
-        given = lambda: profiles.get(self.root, "default").proxy_allowlist_file.read_text()  # noqa: E731
+        given = lambda: profiles.get(self.root, "default").proxy_allowlist_file.read_text(encoding="utf-8")  # noqa: E731
         newer = mock.patch.object(langs, "CATALOGUE", updated_catalogue(added=["newrustsite.com"]))
 
         code, _, err = self.run_cli("up")

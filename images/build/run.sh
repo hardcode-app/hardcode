@@ -25,7 +25,8 @@
 #   BUILD_IMAGE            the image (hardcode-build:local, built when missing)
 #   BUILD_IMAGE_REBUILD=1  build it again first, after editing the Dockerfile
 #   BUILD_MEMORY           the memory cap (6g)
-#   BUILD_CPUS             the CPU cap (4)
+#   BUILD_CPUS             the CPU cap (4, or what the Docker daemon has
+#                          if that is less: a CI runner may have 2)
 #   HARDCODE_BUILD_CACHE   cargo's registry, helm's and Tauri's caches
 #                          (~/.cache/hardcode-build)
 #
@@ -71,11 +72,16 @@ case "$PWD/" in
   *) workdir="$ROOT" ;;
 esac
 
+# The CPU cap, never above what the daemon has: Docker refuses a larger one.
+cpus="${BUILD_CPUS:-4}"
+available="$(docker info --format '{{.NCPU}}' 2>/dev/null || true)"
+cpus="$(awk -v want="$cpus" -v have="$available" 'BEGIN { print (have != "" && have + 0 < want + 0) ? have : want }')"
+
 args=(
   --rm --init -i
   --network host
   --memory "${BUILD_MEMORY:-6g}"
-  --cpus "${BUILD_CPUS:-4}"
+  --cpus "$cpus"
   --ulimit core=0
   # The entrypoint runs the command as the caller, in the socket's group.
   -e BUILD_UID="$(id -u)"

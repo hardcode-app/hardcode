@@ -159,7 +159,7 @@ def main(stage: Path) -> None:
         "blocked": blocked_items,
     }
     (stage / "app").mkdir(parents=True, exist_ok=True)
-    (stage / "app" / "fixture-data.json").write_text(json.dumps(app_data))
+    (stage / "app" / "fixture-data.json").write_text(json.dumps(app_data), encoding="utf-8")
 
     # The admin: three profiles in different states, one of them in detail.
     # team-a is built around Python, TypeScript and Go, with two extensions of
@@ -243,7 +243,7 @@ def main(stage: Path) -> None:
         "qr": qr,
     }
     (stage / "admin").mkdir(parents=True, exist_ok=True)
-    (stage / "admin" / "fixture-data.json").write_text(json.dumps(admin_data))
+    (stage / "admin" / "fixture-data.json").write_text(json.dumps(admin_data), encoding="utf-8")
 
     print(
         f"fixture data: {len(entries)} allowlist entries, {len(blocked_items)} blocked targets, "

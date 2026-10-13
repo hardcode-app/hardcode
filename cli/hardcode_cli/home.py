@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import hashlib
 import os
+import posixpath
 import sys
 from pathlib import Path
 from typing import Mapping, Optional
@@ -46,10 +47,10 @@ def _xdg(env: Mapping[str, str], variable: str, fallback: str) -> Path:
     """
     An XDG base directory: *variable* when it is set to an absolute path (the
     specification ignores a relative one), else *fallback* under the home
-    directory.
+    directory. XDG is a Unix convention: its paths are read as Unix paths.
     """
     configured = env.get(variable, "")
-    if configured and os.path.isabs(configured):
+    if configured and posixpath.isabs(configured):
         return Path(configured)
 
     return _user_home(env) / fallback

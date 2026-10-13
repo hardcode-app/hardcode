@@ -774,8 +774,8 @@ class SeedHomeTests(unittest.TestCase):
         self.volume = Path(self.tmp.name) / "pvc"
 
         (self.home / ".local" / "bin").mkdir(parents=True)
-        (self.home / ".local" / "bin" / "claude").write_text("#!/bin/sh\n")
-        (self.home / ".bashrc").write_text("# rc\n")
+        (self.home / ".local" / "bin" / "claude").write_text("#!/bin/sh\n", encoding="utf-8")
+        (self.home / ".bashrc").write_text("# rc\n", encoding="utf-8")
         (self.home / "shared").symlink_to("/shared")
 
         # A fresh ext4 volume isn't empty.
@@ -794,13 +794,15 @@ class SeedHomeTests(unittest.TestCase):
 
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertTrue((self.volume / ".local" / "bin" / "claude").exists())
-        self.assertEqual((self.volume / ".bashrc").read_text(), "# rc\n")
+        self.assertEqual((self.volume / ".bashrc").read_text(encoding="utf-8"), "# rc\n")
         self.assertEqual(os.readlink(self.volume / "shared"), "/shared")
         self.assertTrue((self.volume / ".hardcode-seeded").exists())
 
-        (self.volume / ".bashrc").write_text("# mine\n")
+        (self.volume / ".bashrc").write_text("# mine\n", encoding="utf-8")
         self.assertEqual(self.seed().returncode, 0)
-        self.assertEqual((self.volume / ".bashrc").read_text(), "# mine\n", "an established home is left alone")
+        self.assertEqual(
+            (self.volume / ".bashrc").read_text(encoding="utf-8"), "# mine\n", "an established home is left alone"
+        )
 
     def test_an_interrupted_seeding_is_redone(self):
         # Half a copy from last time, that never got as far as the marker.

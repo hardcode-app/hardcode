@@ -51,7 +51,7 @@ class OpsTests(HomeTestCase):
         result = ops.allow("github.com/me")
 
         self.assertEqual((result.message, result.changed, result.applied), ("allowed github.com/me", True, False))
-        self.assertIn("github.com/me", ops.profile.allowlist_file.read_text())
+        self.assertIn("github.com/me", ops.profile.allowlist_file.read_text(encoding="utf-8"))
         if os.name != "nt":
             self.assertEqual(ops.profile.allowlist_file.stat().st_mode & 0o777, 0o644)
         self.assertEqual(self.runner.commands("allowlist squid"), [], "nothing reloaded when stopped")
@@ -66,8 +66,8 @@ class OpsTests(HomeTestCase):
 
         denied = ops.deny("crates.io")
         self.assertEqual((denied.message, denied.applied), ("denied crates.io", True))
-        self.assertIn("\noff crates.io\n", ops.profile.allowlist_file.read_text())
-        self.assertIn("\n#crates.io ", ops.profile.proxy_allowlist_file.read_text())
+        self.assertIn("\noff crates.io\n", ops.profile.allowlist_file.read_text(encoding="utf-8"))
+        self.assertIn("\n#crates.io ", ops.profile.proxy_allowlist_file.read_text(encoding="utf-8"))
         self.assertFalse(next(item for item in ops.allowlist_entries() if item.entry == "crates.io").enabled)
 
         with self.assertRaisesRegex(allowlist.AllowlistError, "comes with Rust and can't be deleted"):
@@ -75,7 +75,7 @@ class OpsTests(HomeTestCase):
 
         enabled = ops.set_entry_enabled("crates.io", True)
         self.assertEqual(enabled.message, "enabled crates.io")
-        self.assertNotIn("off crates.io", ops.profile.allowlist_file.read_text())
+        self.assertNotIn("off crates.io", ops.profile.allowlist_file.read_text(encoding="utf-8"))
         self.assertEqual(len(self.runner.commands("up -d allowlist squid")), 2, "each change reloaded the proxy")
 
     def test_allow_reloads_a_running_profile(self):
@@ -92,7 +92,11 @@ class OpsTests(HomeTestCase):
 
         with self.assertRaisesRegex(ComposeError, "written, but squid didn't come back healthy"):
             ops.allow("x.org")
-        self.assertIn("x.org", ops.profile.allowlist_file.read_text(), "the edit is kept; what failed is the reload")
+        self.assertIn(
+            "x.org",
+            ops.profile.allowlist_file.read_text(encoding="utf-8"),
+            "the edit is kept; what failed is the reload",
+        )
 
         with self.assertRaisesRegex(ComposeError, "didn't come back healthy"):
             ops.reload()
@@ -115,7 +119,7 @@ class OpsTests(HomeTestCase):
         ops.allow("x.org")
 
         def entry():
-            return allowlist.find(ops.profile.allowlist_file.read_text(), "x.org")[0]
+            return allowlist.find(ops.profile.allowlist_file.read_text(encoding="utf-8"), "x.org")[0]
 
         self.assertEqual(ops.deny("x.org").message, "denied x.org")
         self.assertFalse(entry().enabled)
@@ -131,7 +135,7 @@ class OpsTests(HomeTestCase):
         ops.allow("github.com", "ssh")
 
         self.assertEqual(ops.deny("github.com").message, "denied github.com")
-        text = ops.profile.allowlist_file.read_text()
+        text = ops.profile.allowlist_file.read_text(encoding="utf-8")
         self.assertTrue(allowlist.find(text, "github.com", ssh=True)[0].enabled, "the SSH entry is still on")
         self.assertFalse(ops.deny("github.com").changed, "already denied")
 
@@ -150,7 +154,7 @@ class OpsTests(HomeTestCase):
 
         self.assertEqual(ops.remove_entry("x.org").message, "removed x.org")
         self.assertFalse(ops.remove_entry("x.org").changed)
-        self.assertEqual(allowlist.find(ops.profile.allowlist_file.read_text(), "x.org"), [])
+        self.assertEqual(allowlist.find(ops.profile.allowlist_file.read_text(encoding="utf-8"), "x.org"), [])
 
     def test_reload(self):
         ops = self.ops()
@@ -164,7 +168,7 @@ class OpsTests(HomeTestCase):
         edited = ops.reload()
         self.assertEqual(edited.message, "allowlist: Custom: + hand.example; profile isn't running")
         self.assertEqual(edited.data["changes"], ["Custom: + hand.example"])
-        self.assertIn("\nhand.example\n", ops.profile.proxy_allowlist_file.read_text())
+        self.assertIn("\nhand.example\n", ops.profile.proxy_allowlist_file.read_text(encoding="utf-8"))
 
         # ...as does an update of HardCode's provided entries.
         with mock.patch.object(langs, "CATALOGUE", updated_catalogue(added=["newrustsite.com"])):
@@ -309,8 +313,8 @@ class OpsTests(HomeTestCase):
         profiles.create(self.root, "y", languages=[])
 
         # With VSCODE_PORT unset, both use compose.yaml's default of 11111.
-        profiles.get(self.root, "x").env_file.write_text("DEV_USER=dev\n")
-        profiles.get(self.root, "y").env_file.write_text("DEV_USER=dev\n")
+        profiles.get(self.root, "x").env_file.write_text("DEV_USER=dev\n", encoding="utf-8")
+        profiles.get(self.root, "y").env_file.write_text("DEV_USER=dev\n", encoding="utf-8")
 
         ops = self.ops("z")
         with self.assertRaisesRegex(override.OverrideError, "port 11111 is used by profile 'x', 'y'"):
@@ -319,7 +323,9 @@ class OpsTests(HomeTestCase):
     def test_forward_warns_about_an_unreadable_override_and_goes_on(self):
         ops = self.ops()
         profiles.create(self.root, "broken", languages=[])
-        profiles.get(self.root, "broken").override_file.write_text("services:\n  gateway:\n    ports: [\n")
+        profiles.get(self.root, "broken").override_file.write_text(
+            "services:\n  gateway:\n    ports: [\n", encoding="utf-8"
+        )
 
         warnings: list[str] = []
         ops.warn = warnings.append
@@ -331,20 +337,20 @@ class OpsTests(HomeTestCase):
     def test_forward_restores_file_when_compose_rejects_it(self):
         ops = self.ops()
         ops.forward(3000)
-        before = ops.profile.override_file.read_text()
+        before = ops.profile.override_file.read_text(encoding="utf-8")
 
         self.runner.fail_on.add("config --quiet")
         with self.assertRaisesRegex(override.OverrideError, "restored"):
             ops.forward(3001)
 
-        self.assertEqual(ops.profile.override_file.read_text(), before)
+        self.assertEqual(ops.profile.override_file.read_text(encoding="utf-8"), before)
 
     def test_a_forward_the_gateway_cannot_take_is_undone(self):
         # Compose accepts the file, but the gateway can't start with it (the
         # port is taken on this machine). The old file goes back and the
         # gateway is started again from it, VS Code's port with it.
         ops = self.ops(running=True)
-        before = ops.profile.override_file.read_text()
+        before = ops.profile.override_file.read_text(encoding="utf-8")
         self.runner.fail_on.add("up -d gateway")
 
         warnings: list[str] = []
@@ -353,20 +359,20 @@ class OpsTests(HomeTestCase):
         with self.assertRaisesRegex(ComposeError, "simulated failure for up -d gateway; the change was undone"):
             ops.forward(3000)
 
-        self.assertEqual(ops.profile.override_file.read_text(), before)
+        self.assertEqual(ops.profile.override_file.read_text(encoding="utf-8"), before)
         self.assertEqual(len(self.runner.commands("up -d gateway")), 2, "with the change, then as before")
         self.assertIn("couldn't be started again as before", warnings[0], "the fake fails both times")
 
     def test_an_override_edit_is_undone_when_it_cannot_be_checked(self):
         local = self.make_folder()
         ops = self.ops()
-        before = ops.profile.override_file.read_text()
+        before = ops.profile.override_file.read_text(encoding="utf-8")
 
         with mock.patch.object(ops.compose, "config_check", side_effect=ComposeError("docker not found on the PATH")):
             with self.assertRaisesRegex(ComposeError, "docker not found"):
                 ops.mount(str(local), "work")
 
-        self.assertEqual(ops.profile.override_file.read_text(), before)
+        self.assertEqual(ops.profile.override_file.read_text(encoding="utf-8"), before)
 
     def test_unforward(self):
         ops = self.ops()
@@ -398,7 +404,7 @@ class OpsTests(HomeTestCase):
     def test_mount_without_dev_user_uses_compose_yamls_default(self):
         local = self.make_folder()
         ops = self.ops()
-        ops.profile.env_file.write_text("VSCODE_PORT=11111\n")
+        ops.profile.env_file.write_text("VSCODE_PORT=11111\n", encoding="utf-8")
 
         self.assertIn("at /home/dev/work", ops.mount(str(local), "work").message)
 
@@ -409,7 +415,7 @@ class OpsTests(HomeTestCase):
 
         ops.mount(str(local), "work")
 
-        self.assertTrue(ops.profile.override_file.read_text().startswith("# This profile's mounts"))
+        self.assertTrue(ops.profile.override_file.read_text(encoding="utf-8").startswith("# This profile's mounts"))
 
     # -- languages ------------------------------------------------------------
 
@@ -436,7 +442,7 @@ class OpsTests(HomeTestCase):
 
     def test_languages_switch_the_proxys_entries_and_reload(self):
         ops = self.ops(running=True)
-        own = ops.profile.allowlist_file.read_text()
+        own = ops.profile.allowlist_file.read_text(encoding="utf-8")
 
         result = ops.set_languages({"python": True, "go": False}, build=False)
 
@@ -445,10 +451,12 @@ class OpsTests(HomeTestCase):
         self.assertEqual(len(self.runner.commands("up -d allowlist squid")), 1)
         self.assertEqual(self.runner.commands(" build"), [])
 
-        given = ops.profile.proxy_allowlist_file.read_text()
+        given = ops.profile.proxy_allowlist_file.read_text(encoding="utf-8")
         self.assertIn("\npypi.org\n", given)
         self.assertNotIn("proxy.golang.org", given)
-        self.assertEqual(ops.profile.allowlist_file.read_text(), own, "the profile's own allowlist isn't touched")
+        self.assertEqual(
+            ops.profile.allowlist_file.read_text(encoding="utf-8"), own, "the profile's own allowlist isn't touched"
+        )
 
         again = ops.set_languages({"python": True, "go": False}, build=False)
         self.assertFalse(again.changed)
@@ -461,7 +469,7 @@ class OpsTests(HomeTestCase):
         self.assertEqual(envfile.read(ops.profile.env_file)["VSCODE_EXTENSIONS"], "me.mine")
 
         # The running container installs it from its list, by itself.
-        self.assertIn("me.mine\n", ops.profile.extensions_file.read_text())
+        self.assertIn("me.mine\n", ops.profile.extensions_file.read_text(encoding="utf-8"))
         self.assertEqual(self.runner.commands(" up -d"), [], "nothing is recreated")
 
         self.assertFalse(ops.add_extension("me.mine").changed)
@@ -484,11 +492,11 @@ class OpsTests(HomeTestCase):
         ops = self.ops(running=True)
         path = ops.profile.extensions_file
         inode = path.stat().st_ino
-        self.assertIn("openai.chatgpt", path.read_text(), "Codex is on in the template")
+        self.assertIn("openai.chatgpt", path.read_text(encoding="utf-8"), "Codex is on in the template")
 
         result = ops.set_languages({"codex_cli": False}, build=False)
 
-        self.assertNotIn("openai.chatgpt", path.read_text())
+        self.assertNotIn("openai.chatgpt", path.read_text(encoding="utf-8"))
         self.assertEqual(path.stat().st_ino, inode, "the container's bind mount follows the same file")
         self.assertTrue(result.applied)
 

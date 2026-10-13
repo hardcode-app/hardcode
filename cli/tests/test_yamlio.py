@@ -138,9 +138,12 @@ class BackendTests(unittest.TestCase):
         empty = yamlio.yq_backend(["yq"], lambda argv, **_: FakeProcess(""))
         self.assertIsNone(empty.load("# only a comment"))
 
+        # Said as PyYAML says it, whichever tool read the file.
         failing = yamlio.yq_backend(["yq"], lambda argv, **_: FakeProcess("", 1, "bad yaml"))
-        with self.assertRaisesRegex(YamlError, "bad yaml"):
+        with self.assertRaisesRegex(YamlError, "^invalid YAML: bad yaml$"):
             failing.load("x: [")
+        with self.assertRaisesRegex(YamlError, "^can't write YAML: bad yaml$"):
+            failing.dump({})
 
         def timeout(argv, **_):
             raise subprocess.TimeoutExpired(argv, 60)
@@ -168,7 +171,28 @@ class PyYamlErrorTests(unittest.TestCase):
         self.assertEqual(backend.load("a: 1"), {"a": 1})
 
 
-@unittest.skipUnless(shutil.which("docker"), "needs docker")
+def linux_docker() -> bool:
+    """
+    Whether there is a Docker daemon running Linux containers, as yq's image
+    is (Windows' runners have one running Windows containers).
+    """
+    if not shutil.which("docker"):
+        return False
+
+    try:
+        info = subprocess.run(
+            ["docker", "info", "--format", "{{.OSType}}"],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+
+    return info.returncode == 0 and info.stdout.strip() == "linux"
+
+
+@unittest.skipUnless(linux_docker(), "needs a Docker daemon running Linux containers")
 class DockerYqRoundTrip(unittest.TestCase):
     """
     The real last-resort backend: yq's image. Pulls mikefarah/yq:4 if absent.

@@ -485,7 +485,7 @@ class WebTests(unittest.TestCase):
         self.assertEqual(self.client.delete("/api/profiles/team-b", headers=JSON).status_code, 200)
         self.assertEqual(self.client.get("/api/profiles/team-b").status_code, 404)
 
-        self.assertEqual(self.client.get("/api/template").json["allowlist"], Path(TEMPLATE).read_text())
+        self.assertEqual(self.client.get("/api/template").json["allowlist"], Path(TEMPLATE).read_text(encoding="utf-8"))
 
     def test_empty_image_means_inherit(self):
         self.sign_in()
@@ -787,7 +787,7 @@ class WebTests(unittest.TestCase):
 
     def test_creating_with_languages(self):
         self.sign_in()
-        template = Path(TEMPLATE).read_text()
+        template = Path(TEMPLATE).read_text(encoding="utf-8")
 
         response = self.client.post("/api/profiles", json={"name": "team-a", "languages": ["go", "docker"]})
         self.assertEqual((response.status_code, response.json["languages"]), (201, ["go", "docker"]))

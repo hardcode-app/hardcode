@@ -15,7 +15,7 @@ cli/hardcode_cli/           the Python package; cli/tests/ its unit tests; cli/p
 app/src/                    the desktop app's page; app/src-tauri/ the Rust shell
 admin/hardcode_admin/       the operator and admin API (Flask); admin/tests/
 helm/hardcode/              the chart: CRD, operator, profiles
-tests/                      the test suites, in Python (lint.py, cli.py, app.py, admin.py, proxy.py, images.py, helm.py, release.py, e2e_kind.py, run_all.py), their shared harness.py and their fixtures/
+tests/                      the test suites, in Python (commits.py, lint.py, cli.py, app.py, admin.py, proxy.py, images.py, helm.py, release.py, e2e_kind.py, run_all.py), their shared harness.py and their fixtures/
 release/                    a release's steps (release.py), its notes (notes.md), and the updater's public key (updater.pub, once there is one)
 docs/                       this documentation; docs/images/ the screenshots; docs/tools/ how they are made
 assets/                     the icon

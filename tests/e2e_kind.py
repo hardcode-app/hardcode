@@ -187,7 +187,7 @@ def kind_cluster(suite: Suite) -> Iterator[Kubectl]:
         if not output.ok:
             suite.abort("kind could not create the cluster", output.text)
     else:
-        kubeconfig.write_text(harness.run(["kind", "get", "kubeconfig", "--name", CLUSTER]).text)
+        kubeconfig.write_text(harness.run(["kind", "get", "kubeconfig", "--name", CLUSTER]).text, encoding="utf-8")
 
     try:
         # Whatever runs in the test cluster, it can't take more than this from
@@ -479,7 +479,7 @@ def check_policies_enforced(suite: Suite, kubectl: Kubectl, docker: Docker) -> N
                     "imagePullPolicy": "Never",
                     "resources": {"requests": {"cpu": "10m", "memory": "16Mi"}, "limits": {"memory": "64Mi"}},
                     "env": [{"name": "TARGETS", "value": targets}],
-                    "command": ["python3", "-c", (FIXTURES / "network_probe.py").read_text()],
+                    "command": ["python3", "-c", (FIXTURES / "network_probe.py").read_text(encoding="utf-8")],
                 }
             ],
         },

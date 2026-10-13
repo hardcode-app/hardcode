@@ -14,6 +14,8 @@ The VS Code image's start-up scripts, run for real without the 12 GB image.
   (hardcode-verify-extensions). Both run for real against a fake VS Code
   CLI and a fake Marketplace (tests/fixtures/fake_code.py and
   fake_marketplace_curl.py).
+- The build image's runner, images/build/run.sh: the caps it starts the
+  container with, against a fake ``docker`` (tests/fixtures/fake_docker.py).
 
 Every container is memory-capped.
 """
@@ -103,9 +105,9 @@ def check_home_seeding(suite: Suite, docker: Docker, scratch: Path) -> None:
     home = scratch / "home"
     (home / ".local" / "bin").mkdir(parents=True)
     claude = home / ".local" / "bin" / "claude"
-    claude.write_text("#!/bin/sh\n")
+    claude.write_text("#!/bin/sh\n", encoding="utf-8")
     claude.chmod(0o755)
-    (home / ".bashrc").write_text("# rc\n")
+    (home / ".bashrc").write_text("# rc\n", encoding="utf-8")
     (home / "shared").symlink_to("/shared")
 
     # The volume root as a provisioner leaves it: root's, mode 777, with
@@ -168,7 +170,7 @@ class ExtensionWorld:
         for extension_id, needs in MARKETPLACE.items():
             publisher, name = extension_id.split(".")
             manifest = {"publisher": publisher, "name": name, **needs}
-            (self.market / f"{extension_id}.json").write_text(json.dumps(manifest))
+            (self.market / f"{extension_id}.json").write_text(json.dumps(manifest), encoding="utf-8")
 
         # Copies, made executable as the image's COPY --chmod makes them: the
         # checkout keeps its scripts at 0644.
@@ -214,7 +216,7 @@ class ExtensionWorld:
         """
         One pass of the sync, as a start does.
         """
-        self.log.write_text("")
+        self.log.write_text("", encoding="utf-8")
         return harness.run(["bash", VSCODE / "sync-extensions.sh"], env=self.environment(**variables))
 
     def installed(self) -> set[str]:
@@ -225,7 +227,7 @@ class ExtensionWorld:
         found = set()
 
         for manifest in extensions.glob("*/package.json"):
-            data = json.loads(manifest.read_text())
+            data = json.loads(manifest.read_text(encoding="utf-8"))
             found.add(f"{data['publisher']}.{data['name']}")
 
         return found
@@ -234,14 +236,14 @@ class ExtensionWorld:
         """
         The installs and uninstalls of the last pass.
         """
-        return [line for line in self.log.read_text().splitlines() if line]
+        return [line for line in self.log.read_text(encoding="utf-8").splitlines() if line]
 
     def status(self) -> dict:
         """
         What the sync last said about how far it got.
         """
         path = self.home / ".vscode-server" / ".hardcode-extensions-status.json"
-        return json.loads(path.read_text()) if path.exists() else {}
+        return json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
 
     def install_by_hand(self, extension_id: str) -> None:
         """
@@ -311,7 +313,7 @@ def check_extension_sync(suite: Suite, world: ExtensionWorld) -> None:
         "an extension from an unverified publisher is removed again and remembered",
         bad.ok
         and "bad.one" not in world.installed()
-        and refused_file.read_text().split() == ["bad.one"]
+        and refused_file.read_text(encoding="utf-8").split() == ["bad.one"]
         and world.status().get("refused") == ["bad.one"],
         f"{bad.text}\n{sorted(world.installed())}\n{world.status()}",
     )
@@ -325,10 +327,10 @@ def check_extension_sync(suite: Suite, world: ExtensionWorld) -> None:
     # Every question to the Marketplace has a time limit, so a stalled one
     # can't hold the sync up.
     curl_log = world.root / "curl.log"
-    curl_log.write_text("")
+    curl_log.write_text("", encoding="utf-8")
     world.want("core.one", "py.one", "me.mine", "user.two")
     world.sync(FAKE_CURL_LOG=str(curl_log))
-    queries = [line for line in curl_log.read_text().splitlines() if line]
+    queries = [line for line in curl_log.read_text(encoding="utf-8").splitlines() if line]
     suite.check(
         "every Marketplace query has a time limit",
         bool(queries) and all("--connect-timeout" in query and "--max-time" in query for query in queries),
@@ -402,6 +404,51 @@ def check_extension_watch(suite: Suite, world: ExtensionWorld) -> None:
         watcher.wait(timeout=10)
 
 
+def check_build_runner_cpus(suite: Suite, scratch: Path) -> None:
+    """
+    images/build/run.sh caps the container's CPUs at BUILD_CPUS (4), but
+    never above what the Docker daemon has: Docker refuses a larger cap, and
+    a CI runner may have 2.
+    """
+    bin_dir = scratch / "fake-docker"
+    bin_dir.mkdir()
+    shutil.copyfile(FIXTURES / "fake_docker.py", bin_dir / "docker")
+    (bin_dir / "docker").chmod(0o755)
+
+    # As on a machine: outside the build image, with the real socket path.
+    environment = {
+        key: value
+        for key, value in os.environ.items()
+        if key not in ("HARDCODE_BUILD_IMAGE", "BUILD_CPUS", "BUILD_IMAGE_REBUILD")
+    }
+    environment.update(
+        {
+            "PATH": f"{bin_dir}:{os.environ['PATH']}",
+            "DOCKER_HOST": "unix:///var/run/docker.sock",
+            "HARDCODE_BUILD_CACHE": str(scratch / "build-cache"),
+            "TMPDIR": str(scratch),
+        }
+    )
+
+    def cpus(**variables: str) -> str:
+        output = harness.run(
+            ["bash", ROOT / "images" / "build" / "run.sh", "true"],
+            env={**environment, **variables},
+        )
+        lines = output.text.splitlines()
+        return lines[lines.index("--cpus") + 1] if "--cpus" in lines else output.text.strip()
+
+    cases = [
+        ("a daemon with 2 CPUs: 2", {"FAKE_DOCKER_CPUS": "2"}, "2"),
+        ("with 8: the cap, 4", {"FAKE_DOCKER_CPUS": "8"}, "4"),
+        ("a smaller BUILD_CPUS as it is", {"FAKE_DOCKER_CPUS": "2", "BUILD_CPUS": "1.5"}, "1.5"),
+        ("a daemon that can't say: the cap", {}, "4"),
+    ]
+    for name, variables, expected in cases:
+        got = cpus(**variables)
+        suite.check(f"run.sh's CPU cap, {name}", got == expected, f"wanted {expected}, got {got}")
+
+
 def run_checks(suite: Suite) -> None:
     with harness.scratch_directory("hc-images-") as scratch, Docker() as docker:
         suite.section("ssh proxy configuration")
@@ -414,6 +461,9 @@ def run_checks(suite: Suite) -> None:
         world = ExtensionWorld(scratch)
         check_extension_sync(suite, world)
         check_extension_watch(suite, ExtensionWorld(scratch / "watch"))
+
+        suite.section("the build image's runner")
+        check_build_runner_cpus(suite, scratch)
 
 
 if __name__ == "__main__":

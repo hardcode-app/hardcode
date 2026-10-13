@@ -450,7 +450,7 @@ def run_checks(suite: Suite) -> None:
             "172.16.0.0/12" in internal and "169.254.0.0/16" in internal,
             "\n".join(internal),
         )
-        (rendered / "squid" / "internal.txt").write_text(INTERNAL_RANGES)
+        (rendered / "squid" / "internal.txt").write_text(INTERNAL_RANGES, encoding="utf-8")
 
         ca_private, ca_public = test.make_proxy_ca()
         test.start_squid(f"{NETWORK}-squid", rendered / "squid", ca_private, tls)

@@ -132,7 +132,7 @@ def check_rendered_objects(suite: Suite, documents: list[dict]) -> None:
     profiles = {document["metadata"]["name"]: document for document in documents if document["kind"] == "Profile"}
     suite.check(
         "a profile carries the allowlist it was given, as it is",
-        profiles["default"]["spec"]["allowlist"] == (ROOT / "template" / "allowlist.txt").read_text(),
+        profiles["default"]["spec"]["allowlist"] == (ROOT / "template" / "allowlist.txt").read_text(encoding="utf-8"),
     )
     team_a = profiles["team-a"]["spec"]
     suite.check(

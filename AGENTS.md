@@ -156,8 +156,10 @@ compact loses to plain and spaced out.
   testability, exceptions with messages a user can act on, no bare `except`
   (the operator's loops are the documented exception, and they log). A call
   that doesn't fit on one line gets one argument per line, with a trailing
-  comma. Formatted by `tests/lint.py --fix` (ruff, then isort, as
-  `pyproject.toml` says, at 120 columns); `tests/lint.py` must pass.
+  comma. Every text file is read and written with `encoding="utf-8"`:
+  Windows' default isn't UTF-8 (`tests/lint.py` checks). Formatted by
+  `tests/lint.py --fix` (ruff, then isort, as `pyproject.toml` says, at 120
+  columns); `tests/lint.py` must pass.
 - **JavaScript**: plain JS, no build step. A `/** */` comment on every
   function, braces around every `if` and loop body, `esc()` on every value
   put into HTML. In HTML templates, whitespace between inline elements
@@ -184,6 +186,15 @@ compact loses to plain and spaced out.
   `profiles/`, no build output. Don't rewrite history.
 - Commit messages say what and why, with the test evidence; mention policy
   changes (allowlist defaults, security settings) explicitly.
+- **Conventional Commits.** The subject is `type(scope): summary`: types
+  `feat`, `fix`, `docs`, `test`, `ci`, `build`, `refactor`, `perf`,
+  `chore`, `revert`, `style`; the scope, when there is one, the part
+  changed (`cli`, `app`, `admin`, `chart`, `images`, `proxy`, `release`,
+  `ci`, `deps`). A breaking change gets `!` after the type and a
+  `BREAKING CHANGE:` footer saying how to move over. A commit that bundles
+  several changes lists them in its body, a line each in the same form,
+  so that changelog tools can split it. `tests/commits.py` checks every
+  commit, in CI too.
 - **No attribution.** Agents never add `Co-Authored-By`, "Generated with"
   or any other attribution line to a commit message or a pull request's
   description; the commits are the owner's.
