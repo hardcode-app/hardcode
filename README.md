@@ -393,6 +393,7 @@ tests/lint.py --fix       # format the Python (ruff, then isort) and the Rust (r
 
 | Suite | What it covers |
 |---|---|
+| `tests/commits.py` | commit messages: Conventional Commits subjects, no attribution |
 | `tests/lint.py` | formatting and lint: the Python (`pyproject.toml`: ruff with relaxed settings, then isort) and the Rust (rustfmt) |
 | `tests/cli.py` | the `hardcode` command: unit tests for every function (`docker compose` faked), then the whole command against a throwaway home with real `docker compose config` |
 | `tests/app.py` | the desktop app: Rust unit tests (`--config`, CLI resolution, settings), a build, then headless launches against the real CLI: on an empty home (the first-profile dialog), then rendering every view, the Languages / Tools and Extensions views included; and a build with a release's updater configuration, which must offer a newer release it is served |

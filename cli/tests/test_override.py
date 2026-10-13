@@ -81,14 +81,14 @@ class FileTests(OverrideFileTestCase):
         self.assertEqual(document, {"services": {}})
 
     def test_load_keeps_header_and_repairs_services(self):
-        self.path.write_text("# keep me\n# and me\n\nservices: 5\n")
+        self.path.write_text("# keep me\n# and me\n\nservices: 5\n", encoding="utf-8")
 
         header, document = override.load(self.path)
 
         self.assertEqual(header, "# keep me\n# and me\n")
         self.assertEqual(document["services"], {})
 
-        self.path.write_text("")
+        self.path.write_text("", encoding="utf-8")
         self.assertEqual(override.load(self.path)[1], {"services": {}})
 
     def test_get_forwards_skips_malformed_items(self):
@@ -103,7 +103,7 @@ class FileTests(OverrideFileTestCase):
 
         override.save(self.path, "# h\n", document)
 
-        self.assertEqual(self.path.read_text(), "# h\nservices: {}\n")
+        self.assertEqual(self.path.read_text(encoding="utf-8"), "# h\nservices: {}\n")
         self.assertEqual(
             override.tidy({"services": {"a": {"volumes": ["v"]}, "b": {}}}),
             {"services": {"a": {"volumes": ["v"]}}},
@@ -113,7 +113,9 @@ class FileTests(OverrideFileTestCase):
 class ForwardTests(OverrideFileTestCase):
     def setUp(self):
         super().setUp()
-        self.path.write_text(f"# keep me\nservices:\n  vscode:\n    volumes:\n      - ${{HOME}}/Git:{DEV_HOME}/git\n")
+        self.path.write_text(
+            f"# keep me\nservices:\n  vscode:\n    volumes:\n      - ${{HOME}}/Git:{DEV_HOME}/git\n", encoding="utf-8"
+        )
 
     def test_add_and_remove_round_trip(self):
         self.assertEqual(override.add_forward(self.path, 3000), Forward(3000, "vscode", 3000))
@@ -194,6 +196,17 @@ class MountTests(OverrideFileTestCase):
             override.normalise_local(str(self.base / "nope"), home=home)
         with self.assertRaisesRegex(OverrideError, "required"):
             override.normalise_local("")
+
+    def test_a_home_reached_through_a_symlink(self):
+        # macOS's /var is /private/var: the folder resolves, and so must the
+        # home it is compared with.
+        linked = self.base / "linked-home"
+        try:
+            linked.symlink_to(self.base, target_is_directory=True)
+        except OSError:
+            self.skipTest("no symlinks here (Windows without the privilege)")
+
+        self.assertEqual(override.normalise_local(str(self.local), home=str(linked), windows=False), "${HOME}/src")
 
     def test_add_get_remove(self):
         mount = override.add_mount(self.path, str(self.local), "work")

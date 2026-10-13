@@ -2,6 +2,7 @@
 """
 Every test suite, one after the other, in the build image.
 
+    tests/commits.py   the commit messages: Conventional Commits subjects, no attribution
     tests/lint.py      formatting and lint: Python (ruff, then isort) and Rust (rustfmt)
     tests/cli.py       the hardcode command: unit tests, then a scenario against a throwaway copy
     tests/app.py       the desktop app: unit tests, a build, and a headless launch
@@ -22,7 +23,7 @@ import sys
 import harness
 from harness import ROOT
 
-SUITES = ["lint", "cli", "app", "admin", "proxy", "images", "helm", "release"]
+SUITES = ["commits", "lint", "cli", "app", "admin", "proxy", "images", "helm", "release"]
 
 
 def main() -> int:

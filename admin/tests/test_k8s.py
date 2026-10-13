@@ -44,9 +44,9 @@ class TokenTests(unittest.TestCase):
     def test_the_service_account_token_is_read_as_the_kubelet_rotates_it(self):
         with tempfile.TemporaryDirectory() as tmp:
             account = Path(tmp)
-            (account / "token").write_text("old-token\n")
-            (account / "ca.crt").write_text("")
-            (account / "namespace").write_text("sandbox")
+            (account / "token").write_text("old-token\n", encoding="utf-8")
+            (account / "ca.crt").write_text("", encoding="utf-8")
+            (account / "namespace").write_text("sandbox", encoding="utf-8")
 
             with (
                 mock.patch.object(k8s, "SERVICE_ACCOUNT", account),
@@ -57,7 +57,7 @@ class TokenTests(unittest.TestCase):
 
                 # The kubelet rewrites the file; a later mtime, whatever the
                 # file system's clock resolution.
-                (account / "token").write_text("rotated-token\n")
+                (account / "token").write_text("rotated-token\n", encoding="utf-8")
                 os.utime(account / "token", (1, 1 + 10**9))
                 self.assertEqual(client.token, "rotated-token")
 

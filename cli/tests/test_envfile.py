@@ -21,12 +21,12 @@ class EnvFileTests(unittest.TestCase):
         self.assertEqual(envfile.read(self.path), {})
 
     def test_read_skips_comments_blanks_and_junk(self):
-        self.path.write_text("# c\n\nA=1\n B = two \nnot a pair\nB=3\nURL=http://x?y=1\n")
+        self.path.write_text("# c\n\nA=1\n B = two \nnot a pair\nB=3\nURL=http://x?y=1\n", encoding="utf-8")
 
         self.assertEqual(envfile.read(self.path), {"A": "1", "B": "3", "URL": "http://x?y=1"})
 
     def test_read_strips_matching_quotes(self):
-        self.path.write_text("A=\"8080\"\nB='two words'\nC=\"unbalanced\nD=''\n")
+        self.path.write_text("A=\"8080\"\nB='two words'\nC=\"unbalanced\nD=''\n", encoding="utf-8")
 
         self.assertEqual(envfile.read(self.path), {"A": "8080", "B": "two words", "C": '"unbalanced', "D": ""})
 
@@ -39,7 +39,8 @@ class EnvFileTests(unittest.TestCase):
             "TOKEN='a b' # quoted\n"
             "PASSWORD=pa#ss\n"
             "ENABLE_DOCKER=true\n"
-            "ENABLE_DOCKER=false\n"
+            "ENABLE_DOCKER=false\n",
+            encoding="utf-8",
         )
 
         self.assertEqual(
@@ -49,11 +50,13 @@ class EnvFileTests(unittest.TestCase):
 
     def test_set_changes_every_line_for_the_key(self):
         # Compose reads the last line; changing only the first would change nothing.
-        self.path.write_text("ENABLE_DOCKER=true\n# ENABLE_DOCKER=x\nexport ENABLE_DOCKER=true\n")
+        self.path.write_text("ENABLE_DOCKER=true\n# ENABLE_DOCKER=x\nexport ENABLE_DOCKER=true\n", encoding="utf-8")
 
         envfile.set_value(self.path, "ENABLE_DOCKER", "false")
 
-        self.assertEqual(self.path.read_text(), "ENABLE_DOCKER=false\n# ENABLE_DOCKER=x\nENABLE_DOCKER=false\n")
+        self.assertEqual(
+            self.path.read_text(encoding="utf-8"), "ENABLE_DOCKER=false\n# ENABLE_DOCKER=x\nENABLE_DOCKER=false\n"
+        )
         self.assertEqual(envfile.read(self.path), {"ENABLE_DOCKER": "false"})
 
     def test_get_defaults(self):
@@ -63,31 +66,31 @@ class EnvFileTests(unittest.TestCase):
         self.assertEqual(envfile.get(self.path, "DNS_IP"), "172.31.253.53")
         self.assertEqual(envfile.get(self.path, "OTHER"), "")
 
-        self.path.write_text("VSCODE_PORT=8080\nDNS_IP=\n")
+        self.path.write_text("VSCODE_PORT=8080\nDNS_IP=\n", encoding="utf-8")
         self.assertEqual(envfile.get(self.path, "VSCODE_PORT"), "8080")
         self.assertEqual(envfile.get(self.path, "DNS_IP"), "172.31.253.53", "an empty value falls back to the default")
 
     def test_set_replaces_in_place_keeping_order_and_comments(self):
-        self.path.write_text("# top\nA=1\nB=2\n")
+        self.path.write_text("# top\nA=1\nB=2\n", encoding="utf-8")
 
         envfile.set_value(self.path, "A", "x")
 
-        self.assertEqual(self.path.read_text(), "# top\nA=x\nB=2\n")
+        self.assertEqual(self.path.read_text(encoding="utf-8"), "# top\nA=x\nB=2\n")
 
     def test_set_appends_and_fixes_missing_trailing_newline(self):
-        self.path.write_text("VSCODE_PORT=8080")
+        self.path.write_text("VSCODE_PORT=8080", encoding="utf-8")
 
         envfile.set_value(self.path, "INSTALL_DOTNET", "false")
 
-        self.assertEqual(self.path.read_text(), "VSCODE_PORT=8080\nINSTALL_DOTNET=false\n")
+        self.assertEqual(self.path.read_text(encoding="utf-8"), "VSCODE_PORT=8080\nINSTALL_DOTNET=false\n")
 
     def test_set_creates_file(self):
         envfile.set_value(self.path, "K", "v")
 
-        self.assertEqual(self.path.read_text(), "K=v\n")
+        self.assertEqual(self.path.read_text(encoding="utf-8"), "K=v\n")
 
     def test_set_does_not_match_prefixes(self):
-        self.path.write_text("INSTALL_GO=true\n")
+        self.path.write_text("INSTALL_GO=true\n", encoding="utf-8")
 
         envfile.set_value(self.path, "INSTALL_G", "x")
 

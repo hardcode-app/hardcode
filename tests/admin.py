@@ -19,7 +19,7 @@ def admin_memory_limit() -> str:
     The chart's memory limit for the admin's container, as Docker writes it
     (``256Mi`` is ``256m``).
     """
-    values = yaml.safe_load((ROOT / "helm" / "hardcode" / "values.yaml").read_text())
+    values = yaml.safe_load((ROOT / "helm" / "hardcode" / "values.yaml").read_text(encoding="utf-8"))
     limit = values["admin"]["resources"]["limits"]["memory"]
 
     return limit.replace("Mi", "m").replace("Gi", "g")

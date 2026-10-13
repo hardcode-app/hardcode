@@ -125,7 +125,7 @@ class CatalogueAgreementTests(unittest.TestCase):
     """
 
     def test_the_vscode_container_is_handed_the_extension_list(self):
-        compose = (REPO / "compose.yaml").read_text()
+        compose = (REPO / "compose.yaml").read_text(encoding="utf-8")
 
         self.assertIn("/vscode-extensions.txt:/etc/hardcode/extensions/wanted:ro", compose)
         self.assertFalse((REPO / "images" / "vscode" / "extensions.txt").exists(), "no extensions in the image")
@@ -140,7 +140,7 @@ class CatalogueAgreementTests(unittest.TestCase):
             REPO / "template" / "allowlist.txt",
             REPO / "helm" / "hardcode" / "files" / "allowlist.txt",
         ):
-            text = path.read_text()
+            text = path.read_text(encoding="utf-8")
 
             self.assertEqual([entry.entry for entry in allowlist.parse(text) if entry.enabled], [], path)
             self.assertIn(allowlist.CUSTOM_HEADER, text)
@@ -170,7 +170,7 @@ class CatalogueAgreementTests(unittest.TestCase):
         self.assertEqual(set(langs.NOTES) - provided, set(), "notes are for provided entries")
 
     def test_the_proxy_is_handed_the_rendered_allowlist(self):
-        compose = (REPO / "compose.yaml").read_text()
+        compose = (REPO / "compose.yaml").read_text(encoding="utf-8")
 
         self.assertIn("/proxy-allowlist.txt:/config/allowlist.txt:ro", compose)
 
@@ -178,14 +178,14 @@ class CatalogueAgreementTests(unittest.TestCase):
         template = REPO / "template" / "allowlist.txt"
         chart = REPO / "helm" / "hardcode" / "files" / "allowlist.txt"
 
-        self.assertEqual(chart.read_text(), template.read_text())
+        self.assertEqual(chart.read_text(encoding="utf-8"), template.read_text(encoding="utf-8"))
 
     def test_every_language_is_a_build_arg_and_reaches_the_vscode(self):
         # The image built on its own has every toolchain (Kubernetes' default
         # image); a profile's languages are off unless its .env says so.
-        dockerfile = (REPO / "images" / "vscode" / "Dockerfile").read_text()
-        compose = (REPO / "compose.yaml").read_text()
-        env = (REPO / "template" / ".env").read_text()
+        dockerfile = (REPO / "images" / "vscode" / "Dockerfile").read_text(encoding="utf-8")
+        compose = (REPO / "compose.yaml").read_text(encoding="utf-8")
+        env = (REPO / "template" / ".env").read_text(encoding="utf-8")
 
         for lang in langs.CATALOGUE:
             self.assertIn(f"ARG {lang.env_key}=true", dockerfile)
@@ -198,8 +198,8 @@ class CatalogueAgreementTests(unittest.TestCase):
     def test_the_templates_env_is_a_reference_of_compose_yamls_defaults(self):
         # A profile's .env holds only what it changes: the template's is all
         # comments, each setting with compose.yaml's default.
-        compose = (REPO / "compose.yaml").read_text()
-        env = (REPO / "template" / ".env").read_text()
+        compose = (REPO / "compose.yaml").read_text(encoding="utf-8")
+        env = (REPO / "template" / ".env").read_text(encoding="utf-8")
 
         settings = [line for line in env.splitlines() if line and not line.startswith("#")]
         self.assertEqual(settings, [], "nothing set")

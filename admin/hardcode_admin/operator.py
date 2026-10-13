@@ -73,7 +73,7 @@ def generate_ca(name: str, openssl: str = "openssl") -> tuple[str, str]:
             capture_output=True,
         )  # fmt: skip
 
-        return cert.read_text(), key.read_text()
+        return cert.read_text(encoding="utf-8"), key.read_text(encoding="utf-8")
 
 
 def _b64(text: str) -> str:

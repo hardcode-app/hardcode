@@ -97,17 +97,17 @@ def make_stack(path: Path) -> Path:
     image build contexts compose.yaml refers to.
     """
     path.mkdir(parents=True, exist_ok=True)
-    (path / "compose.yaml").write_text(TEMPLATE_COMPOSE)
+    (path / "compose.yaml").write_text(TEMPLATE_COMPOSE, encoding="utf-8")
 
     for image in ("squid", "gateway", "vscode"):
         (path / "images" / image).mkdir(parents=True)
-        (path / "images" / image / "Dockerfile").write_text(f"FROM scratch  # {image}\n")
+        (path / "images" / image / "Dockerfile").write_text(f"FROM scratch  # {image}\n", encoding="utf-8")
 
     template = path / "template"
     template.mkdir(parents=True)
-    (template / ".env").write_text(TEMPLATE_ENV)
-    (template / "allowlist.txt").write_text(TEMPLATE_ALLOWLIST)
-    (template / "compose.override.yaml").write_text(TEMPLATE_OVERRIDE)
+    (template / ".env").write_text(TEMPLATE_ENV, encoding="utf-8")
+    (template / "allowlist.txt").write_text(TEMPLATE_ALLOWLIST, encoding="utf-8")
+    (template / "compose.override.yaml").write_text(TEMPLATE_OVERRIDE, encoding="utf-8")
 
     return path
 
@@ -195,7 +195,9 @@ class HomeTestCase(unittest.TestCase):
         if not yaml_available():
             self.skipTest("no YAML backend (yq, PyYAML or Docker); the command needs one too")
 
-        self._tmp = tempfile.mkdtemp(prefix="hardcode-test-")
+        # Resolved, as the command resolves a home: Windows hands out short
+        # names (RUNNER~1), and macOS's temporary folder is under /private.
+        self._tmp = str(Path(tempfile.mkdtemp(prefix="hardcode-test-")).resolve())
         self.root = Path(self._tmp) / "home"
         self.root.mkdir()
         self.stack = make_stack(Path(self._tmp) / "stack")

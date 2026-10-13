@@ -3,6 +3,7 @@ Tests for where HardCode keeps profiles (hardcode_cli.home) and for the
 stack it runs them with (hardcode_cli.stack).
 """
 
+import ntpath
 import os
 import tempfile
 import unittest
@@ -54,10 +55,17 @@ class HomeTests(unittest.TestCase):
             with self.assertRaisesRegex(HomeError, "is a file"):
                 home.resolve(file.name, {})
 
-    def test_only_other_homes_have_an_id(self):
-        environment = {"HOME": "/home/me"}
+    def test_xdg_paths_are_unix_paths_wherever_this_runs(self):
+        # The XDG variables are a Unix convention: "/cfg" is absolute, even
+        # read where os.path is Windows' (the tests run there too).
+        with mock.patch.object(home.os, "path", ntpath):
+            xdg = home.default_home({"HOME": "/home/me", "XDG_CONFIG_HOME": "/cfg"}, "linux")
+        self.assertEqual(xdg, Path("/cfg/hardcode"))
 
-        self.assertEqual(home.home_id(Path("/home/me/.config/hardcode"), environment), "")
+    def test_only_other_homes_have_an_id(self):
+        environment = {"HOME": "/home/me", "LOCALAPPDATA": "C:/Users/me/AppData/Local"}
+
+        self.assertEqual(home.home_id(home.default_home(environment), environment), "", "the default home has none")
 
         other = home.home_id(Path("/Apps/hardcode"), environment)
         self.assertRegex(other, r"^[0-9a-f]{6}$")
@@ -88,11 +96,14 @@ class StackTests(unittest.TestCase):
             with mock.patch.object(stack, "BUNDLED", bundle):
                 first = stack.locate(cache)
                 self.assertEqual(first, cache / "stack" / stack.digest(bundle))
-                self.assertEqual((first / "compose.yaml").read_text(), (bundle / "compose.yaml").read_text())
+                self.assertEqual(
+                    (first / "compose.yaml").read_text(encoding="utf-8"),
+                    (bundle / "compose.yaml").read_text(encoding="utf-8"),
+                )
                 self.assertEqual(stack.locate(cache), first, "written once")
 
                 # A newer stack gets a folder of its own; the old one is left as it is.
-                (bundle / "compose.yaml").write_text("name: newer\n")
+                (bundle / "compose.yaml").write_text("name: newer\n", encoding="utf-8")
                 second = stack.locate(cache)
 
         self.assertNotEqual(second, first)
@@ -119,7 +130,7 @@ class StackTests(unittest.TestCase):
         # The sandbox fills the proxy's log just by making requests. Rotated,
         # neither the disk nor a read of the logs (Blocked traffic, hardcode
         # logs) grows without bound.
-        services = yamlio.load((REPO / "compose.yaml").read_text())["services"]
+        services = yamlio.load((REPO / "compose.yaml").read_text(encoding="utf-8"))["services"]
 
         for name, service in services.items():
             with self.subTest(service=name):
@@ -133,7 +144,9 @@ class StackTests(unittest.TestCase):
         gateway = stack.image_tag("gateway")
 
         self.assertNotEqual(squid, gateway)
-        (stack.current() / "images" / "gateway" / "Dockerfile").write_text("FROM scratch  # changed\n")
+        (stack.current() / "images" / "gateway" / "Dockerfile").write_text(
+            "FROM scratch  # changed\n", encoding="utf-8"
+        )
         self.assertEqual(stack.image_tag("squid"), squid)
         self.assertNotEqual(stack.image_tag("gateway"), gateway)
 

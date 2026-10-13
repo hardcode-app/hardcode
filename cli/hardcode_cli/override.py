@@ -337,13 +337,15 @@ def normalise_local(local: str, home: Optional[str] = None, windows: Optional[bo
     if not folder.is_dir():
         raise OverrideError(f"'{local}' is not a folder on this machine")
 
-    resolved = str(folder.resolve())
+    resolved = folder.resolve()
 
-    home_prefix = home.rstrip("/") + "/"
-    if not windows and home and resolved.startswith(home_prefix):
-        resolved = "${HOME}" + resolved[len(home.rstrip("/")) :]
+    # Compared with the home as it resolves too: a home reached through a
+    # symlink (macOS's /var is /private/var) still holds the folder.
+    home_dir = Path(home).resolve() if home else None
+    if not windows and home_dir and resolved != home_dir and resolved.is_relative_to(home_dir):
+        return "${HOME}/" + resolved.relative_to(home_dir).as_posix()
 
-    return resolved
+    return str(resolved)
 
 
 # How a path in the VS Code container may name the VS Code container user, for Compose to fill in.

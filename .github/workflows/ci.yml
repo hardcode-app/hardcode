@@ -19,6 +19,18 @@ permissions:
   contents: read
 
 jobs:
+  commits:
+    name: Commit messages
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # The whole history: every commit's message is checked.
+          fetch-depth: 0
+      - uses: ./.github/actions/build-image
+      - run: tests/commits.py
+
   lint:
     name: Python formatting and lint
     runs-on: ubuntu-latest

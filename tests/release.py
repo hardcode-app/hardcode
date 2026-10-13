@@ -45,7 +45,7 @@ def check_versions(suite: Suite) -> None:
     with tempfile.TemporaryDirectory(prefix="hc-stamp-") as temporary:
         root = Path(temporary)
         copy_versioned(root)
-        before = {name: (root / name).read_text() for name, _ in release.VERSIONED}
+        before = {name: (root / name).read_text(encoding="utf-8") for name, _ in release.VERSIONED}
 
         changes = release.stamp("12.34.56-7", root)
         stamped = release.versions(root)
@@ -59,11 +59,12 @@ def check_versions(suite: Suite) -> None:
         # files are as they were (Cargo.lock's other packages included).
         old = next(iter(found.values()))
         unchanged = all(
-            (root / name).read_text().replace("12.34.56-7", old) == before[name] for name, _ in release.VERSIONED
+            (root / name).read_text(encoding="utf-8").replace("12.34.56-7", old) == before[name]
+            for name, _ in release.VERSIONED
         )
         suite.check("...and nothing else", unchanged)
 
-        config = json.loads((root / "app/src-tauri/tauri.conf.json").read_text())
+        config = json.loads((root / "app/src-tauri/tauri.conf.json").read_text(encoding="utf-8"))
         suite.check("...and tauri.conf.json is still JSON", config["version"] == "12.34.56-7", str(config)[:200])
 
     refused = []
@@ -88,13 +89,13 @@ def check_updater_config(suite: Suite) -> None:
             release.updater_config(REPOSITORY, key) == {},
         )
 
-        key.write_text("dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk=\n")
+        key.write_text("dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk=\n", encoding="utf-8")
         config = release.updater_config(REPOSITORY, key)
         updater = config.get("plugins", {}).get("updater", {})
 
         suite.check(
             "with it, the updater trusts that key and only the newest release",
-            updater.get("pubkey") == key.read_text().strip()
+            updater.get("pubkey") == key.read_text(encoding="utf-8").strip()
             and updater.get("endpoints") == [f"https://github.com/{REPOSITORY}/releases/latest/download/latest.json"],
             json.dumps(config, indent=2),
         )
@@ -129,7 +130,10 @@ def check_updater_config(suite: Suite) -> None:
         expected = "no updater" if not release.UPDATER_KEY.exists() else "the updater, checking"
         suite.check(
             f"release.py updater-config: {output.text.strip()}",
-            output.ok and expected in output.text and out.exists() and isinstance(json.loads(out.read_text()), dict),
+            output.ok
+            and expected in output.text
+            and out.exists()
+            and isinstance(json.loads(out.read_text(encoding="utf-8")), dict),
             output.text,
         )
 
@@ -209,7 +213,7 @@ def check_manifest(suite: Suite) -> None:
         suite.check(
             "...with its own signature",
             all(
-                platforms[key]["signature"] == (directory / f"{name}.sig").read_text().strip()
+                platforms[key]["signature"] == (directory / f"{name}.sig").read_text(encoding="utf-8").strip()
                 for (key, _), name in zip(release.INSTALLERS, names)
             ),
         )
@@ -258,7 +262,7 @@ def check_notes_and_checksums(suite: Suite) -> None:
 
     with tempfile.TemporaryDirectory(prefix="hc-notes-") as temporary:
         template = Path(temporary) / "notes.md"
-        template.write_text("{{version}} and {{nonsense}}")
+        template.write_text("{{version}} and {{nonsense}}", encoding="utf-8")
         try:
             release.notes("2.3.4", REPOSITORY, template)
             suite.check("a name a release doesn't have is refused", False)
@@ -267,7 +271,7 @@ def check_notes_and_checksums(suite: Suite) -> None:
 
     with tempfile.TemporaryDirectory(prefix="hc-sums-") as temporary:
         directory = Path(temporary)
-        (directory / "a.txt").write_text("a")
+        (directory / "a.txt").write_text("a", encoding="utf-8")
         (directory / "b.bin").write_bytes(bytes(range(256)) * 5000)
 
         output = harness.run([sys.executable, ROOT / "release" / "release.py", "checksums", directory])

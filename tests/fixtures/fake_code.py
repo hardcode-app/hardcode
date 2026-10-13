@@ -27,7 +27,7 @@ def installed(extensions: Path) -> dict[str, Path]:
     found = {}
 
     for manifest in extensions.glob("*/package.json"):
-        data = json.loads(manifest.read_text())
+        data = json.loads(manifest.read_text(encoding="utf-8"))
         found[f"{data['publisher']}.{data['name']}".lower()] = manifest.parent
 
     return found
@@ -53,7 +53,7 @@ def install(extensions: Path, market: Path, extension_id: str) -> bool:
         print(f"Extension '{extension_id}' not found.", file=sys.stderr)
         return False
 
-    data = json.loads(manifest.read_text())
+    data = json.loads(manifest.read_text(encoding="utf-8"))
     for needed in data.get("extensionDependencies", []) + data.get("extensionPack", []):
         if not install(extensions, market, needed.lower()):
             return False

@@ -93,17 +93,19 @@ class ProfileTests(HomeTestCase):
     def test_the_proxys_allowlist_is_there_but_written_only_where_it_is_given(self):
         self.make("default")
         default = self.profile("default")
-        given = default.proxy_allowlist_file.read_text()
+        given = default.proxy_allowlist_file.read_text(encoding="utf-8")
         self.assertIn("update.code.visualstudio.com", given, "every profile's entries")
 
         # Compose mounts it, so a missing one comes back...
         default.proxy_allowlist_file.unlink()
-        self.assertEqual(self.profile("default").proxy_allowlist_file.read_text(), given)
+        self.assertEqual(self.profile("default").proxy_allowlist_file.read_text(encoding="utf-8"), given)
 
         # ...but one that is there stays what the running proxy was given,
         # until something gives the proxy the new one too.
-        default.allowlist_file.write_text(default.allowlist_file.read_text() + "hand.example\n")
-        self.assertEqual(self.profile("default").proxy_allowlist_file.read_text(), given)
+        default.allowlist_file.write_text(
+            default.allowlist_file.read_text(encoding="utf-8") + "hand.example\n", encoding="utf-8"
+        )
+        self.assertEqual(self.profile("default").proxy_allowlist_file.read_text(encoding="utf-8"), given)
 
         before, after = profiles.write_proxy_allowlist(default)
         self.assertEqual(before, given)
@@ -126,7 +128,7 @@ class ProfileTests(HomeTestCase):
 
     def test_a_new_env_sets_only_the_port_the_subnet_and_the_languages(self):
         self.make("default", languages=["python", "docker"])
-        text = self.profile("default").env_file.read_text()
+        text = self.profile("default").env_file.read_text(encoding="utf-8")
 
         settings = [line for line in text.splitlines() if line and not line.startswith("#")]
         self.assertEqual(
@@ -145,11 +147,11 @@ class ProfileTests(HomeTestCase):
 
         # A setting written later goes with the others, above the reference.
         envfile.set_value(self.profile("default").env_file, "VSCODE_MEMORY", "12g")
-        text = self.profile("default").env_file.read_text()
+        text = self.profile("default").env_file.read_text(encoding="utf-8")
         self.assertLess(text.index("VSCODE_MEMORY=12g"), text.index(envfile.REFERENCE))
 
         envfile.unset(self.profile("default").env_file, "VSCODE_MEMORY")
-        self.assertNotIn("VSCODE_MEMORY=", self.profile("default").env_file.read_text())
+        self.assertNotIn("VSCODE_MEMORY=", self.profile("default").env_file.read_text(encoding="utf-8"))
 
     # -- ports and subnets ----------------------------------------------------
 
@@ -169,7 +171,7 @@ class ProfileTests(HomeTestCase):
 
     def test_unset_keys_occupy_the_defaults(self):
         self.make("default")
-        self.profile("default").env_file.write_text("VSCODE_PORT=8080\n")
+        self.profile("default").env_file.write_text("VSCODE_PORT=8080\n", encoding="utf-8")
 
         created = self.make("next")
 
@@ -204,8 +206,8 @@ class ProfileTests(HomeTestCase):
         for name in ("default", "a", "b"):
             self.make(name)
         override.add_forward(self.profile("a").override_file, 3000)
-        self.profile("b").override_file.write_text(BROKEN_OVERRIDE)
-        self.profile("b").env_file.write_text("VSCODE_PORT=11113\n")
+        self.profile("b").override_file.write_text(BROKEN_OVERRIDE, encoding="utf-8")
+        self.profile("b").env_file.write_text("VSCODE_PORT=11113\n", encoding="utf-8")
 
         warnings: list[str] = []
         ports = profiles.ports_by_profile(self.root, exclude="default", warn=warnings.append)
@@ -216,7 +218,7 @@ class ProfileTests(HomeTestCase):
             "the broken override's forwards are unknown; its VS Code port still counts",
         )
         self.assertEqual(len(warnings), 1)
-        self.assertIn("profiles/b/compose.override.yaml", warnings[0])
+        self.assertIn(str(Path("profiles") / "b" / "compose.override.yaml"), warnings[0])
 
         with self.assertRaises(yamlio.YamlError):
             profiles.ports_by_profile(self.root, exclude="default")
@@ -294,12 +296,12 @@ class ProfileTests(HomeTestCase):
     def test_every_profile_has_a_current_extension_list(self):
         self.make("default", languages=["claude_cli"])
         profile = self.profile("default")
-        self.assertIn("anthropic.claude-code", profile.extensions_file.read_text())
+        self.assertIn("anthropic.claude-code", profile.extensions_file.read_text(encoding="utf-8"))
 
         # Edited behind the CLI's back (by hand, or by a catalogue that changed
         # with an upgrade): the next command writes it again.
         envfile.set_value(profile.env_file, "VSCODE_EXTENSIONS", "me.mine")
-        self.assertIn("me.mine", self.profile("default").extensions_file.read_text())
+        self.assertIn("me.mine", self.profile("default").extensions_file.read_text(encoding="utf-8"))
 
         # Unchanged, it isn't rewritten: the container's watcher sees no change.
         before = profile.extensions_file.stat().st_mtime_ns
@@ -324,12 +326,12 @@ class ProfileTests(HomeTestCase):
 
         # The proxy gets their entries; the profile's own allowlist is the
         # template's, untouched.
-        given = self.profile("py").proxy_allowlist_file.read_text()
+        given = self.profile("py").proxy_allowlist_file.read_text(encoding="utf-8")
         self.assertIn("\npypi.org\n", given)
         self.assertNotIn("proxy.golang.org", given)
 
-        template = (self.stack / "template" / "allowlist.txt").read_text()
-        self.assertEqual(self.profile("py").allowlist_file.read_text(), template)
+        template = (self.stack / "template" / "allowlist.txt").read_text(encoding="utf-8")
+        self.assertEqual(self.profile("py").allowlist_file.read_text(encoding="utf-8"), template)
 
     def test_create_without_languages_keeps_the_sources(self):
         self.make("go", languages=["go"])
@@ -343,13 +345,15 @@ class ProfileTests(HomeTestCase):
     def test_create_copies_the_source_files(self):
         self.make("default")
         source = self.profile("default")
-        source.allowlist_file.write_text(source.allowlist_file.read_text() + "github.com/x\n")
-        source.override_file.write_text("services:\n  vscode:\n    volumes:\n      - /a:/b\n")
+        source.allowlist_file.write_text(
+            source.allowlist_file.read_text(encoding="utf-8") + "github.com/x\n", encoding="utf-8"
+        )
+        source.override_file.write_text("services:\n  vscode:\n    volumes:\n      - /a:/b\n", encoding="utf-8")
 
         copy = self.copy_of("default")
 
-        self.assertIn("github.com/x", copy.allowlist_file.read_text())
-        self.assertIn("/a:/b", copy.override_file.read_text())
+        self.assertIn("github.com/x", copy.allowlist_file.read_text(encoding="utf-8"))
+        self.assertIn("/a:/b", copy.override_file.read_text(encoding="utf-8"))
         if os.name != "nt":
             self.assertEqual(copy.allowlist_file.stat().st_mode & 0o777, 0o644)
 
@@ -380,7 +384,8 @@ class ProfileTests(HomeTestCase):
             "    environment:\n"
             "      GATEWAY_FORWARDS: 8000:vscode:8000 3000:vscode:3000\n"
             "    ports:\n"
-            "      - 127.0.0.1:3000:3000\n"
+            "      - 127.0.0.1:3000:3000\n",
+            encoding="utf-8",
         )
 
         copy = self.copy_of("default")
@@ -389,7 +394,7 @@ class ProfileTests(HomeTestCase):
         self.assertEqual(override.get_forwards(document), [])
         self.assertNotIn("gateway", document["services"])
         self.assertEqual([mount.local for mount in override.get_mounts(document)], ["/a"])
-        self.assertTrue(copy.override_file.read_text().startswith("# header\n"))
+        self.assertTrue(copy.override_file.read_text(encoding="utf-8").startswith("# header\n"))
 
         _, source_document = override.load(source.override_file)
         self.assertEqual(len(override.get_forwards(source_document)), 1, "the source keeps its forward")
@@ -422,6 +427,23 @@ class ProfileTests(HomeTestCase):
         self.assertFalse(profiles.exists(self.root, "x"))
         with self.assertRaisesRegex(ProfileError, "no profile"):
             profiles.remove(self.root, "x")
+
+    def test_a_profile_removed_under_its_lock_keeps_the_lock_until_it_is_released(self):
+        # `hardcode profile remove` holds the profile's lock while it removes
+        # the profile. Windows can't delete a file that is open, so the lock
+        # file stays until the lock is let go, and goes with the folder then.
+        self.make("x")
+        profile = self.profile("x")
+        lock_file = profile.dir / ".lock"
+
+        with profiles.lock(profile):
+            profiles.remove(self.root, "x")
+
+            self.assertFalse(profiles.exists(self.root, "x"))
+            self.assertTrue(lock_file.exists(), "the lock file is open: not deleted")
+            self.assertEqual([path.name for path in profile.dir.iterdir()], [".lock"])
+
+        self.assertFalse(profile.dir.exists(), "released, the lock file goes, and the folder with it")
 
 
 if __name__ == "__main__":

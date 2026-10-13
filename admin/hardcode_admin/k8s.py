@@ -73,7 +73,9 @@ class K8s:
             self.token_file = SERVICE_ACCOUNT / "token"
             ca_file = str(SERVICE_ACCOUNT / "ca.crt")
             namespace = (
-                namespace or environment.get("K8S_NAMESPACE") or (SERVICE_ACCOUNT / "namespace").read_text().strip()
+                namespace
+                or environment.get("K8S_NAMESPACE")
+                or (SERVICE_ACCOUNT / "namespace").read_text(encoding="utf-8").strip()
             )
 
         self.base = base.rstrip("/")
@@ -92,7 +94,7 @@ class K8s:
             try:
                 stamp = self.token_file.stat().st_mtime
                 if stamp != self._token_stamp:
-                    self._token = self.token_file.read_text().strip()
+                    self._token = self.token_file.read_text(encoding="utf-8").strip()
                     self._token_stamp = stamp
             except OSError:
                 pass

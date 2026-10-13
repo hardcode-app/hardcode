@@ -45,17 +45,29 @@ class Backend:
     dump: Callable[[Any], str]
 
 
-def _run_yq(command: list[str], stdin: str, run: Callable = subprocess.run) -> str:
+# The exit codes of a `docker run` that never got to run yq.
+DOCKER_RUN_FAILED = (125, 126, 127)
+
+
+def _run_yq(command: list[str], stdin: str, failure: str, run: Callable = subprocess.run) -> str:
     """
     Run a yq command line over *stdin* and return what it printed.
+
+    When yq turns the input down, the error starts with *failure*, the words
+    PyYAML's backend uses too ("invalid YAML"), so the message is the same
+    whichever tool read the file. yq that couldn't run at all (not there,
+    timed out, its image not pulled) is "yq failed".
     """
     try:
         result = run(command, input=stdin, capture_output=True, text=True, timeout=60)
     except (OSError, subprocess.TimeoutExpired) as error:
         raise YamlError(f"yq failed: {error}") from error
 
+    detail = (result.stderr or result.stdout).strip()
+    if result.returncode in DOCKER_RUN_FAILED:
+        raise YamlError(f"yq failed: {detail}")
     if result.returncode != 0:
-        raise YamlError(f"yq failed: {(result.stderr or result.stdout).strip()}")
+        raise YamlError(f"{failure}: {detail}")
 
     return result.stdout
 
@@ -70,12 +82,12 @@ def yq_backend(command: list[str], run: Callable = subprocess.run, name: str = "
 
     def load(text: str) -> Any:
         to_json = [*command, "-p", "yaml", "-o", "json", "-I", "0", "."]
-        output = _run_yq(to_json, text, run).strip()
+        output = _run_yq(to_json, text, "invalid YAML", run).strip()
         return json.loads(output) if output else None
 
     def dump(document: Any) -> str:
         to_yaml = [*command, "-p", "json", "-o", "yaml", "."]
-        return _run_yq(to_yaml, json.dumps(document), run)
+        return _run_yq(to_yaml, json.dumps(document), "can't write YAML", run)
 
     return Backend(name, load, dump)
 

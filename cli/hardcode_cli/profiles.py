@@ -152,12 +152,24 @@ def list_profiles(root: Path) -> list[str]:
     if not base.is_dir():
         return []
 
-    names = [path.name for path in base.iterdir() if path.is_dir() and valid_name(path.name)]
+    names = [path.name for path in base.iterdir() if _is_profile(path) and valid_name(path.name)]
     return sorted(names, key=lambda name: (name != "default", name))
 
 
+# The file a profile's lock is taken on, in its folder.
+LOCK_FILE = ".lock"
+
+
+def _is_profile(folder: Path) -> bool:
+    """
+    Whether *folder* holds a profile: anything but a lock file. A profile
+    removed under its lock keeps that file until the lock is let go.
+    """
+    return folder.is_dir() and any(path.name != LOCK_FILE for path in folder.iterdir())
+
+
 def exists(root: Path, name: str) -> bool:
-    return valid_name(name) and (profiles_dir(root) / name).is_dir()
+    return valid_name(name) and _is_profile(profiles_dir(root) / name)
 
 
 def ports_by_profile(root: Path, exclude: str = "", warn: Optional[Warn] = None) -> dict[str, set[int]]:
@@ -457,25 +469,30 @@ def lock(
     operating system's on ``.lock`` in the profile's directory, so it goes
     with the process that held it, however that process ends.
     """
-    path = profile.dir / ".lock"
+    path = profile.dir / LOCK_FILE
     deadline = clock() + timeout
     told = False
 
-    with open(path, "a+b") as handle:
-        while not _try_lock(handle):
-            if clock() >= deadline:
-                raise ProfileError(f"profile '{profile.name}' is still being changed by another command; try again")
+    try:
+        with open(path, "a+b") as handle:
+            while not _try_lock(handle):
+                if clock() >= deadline:
+                    raise ProfileError(f"profile '{profile.name}' is still being changed by another command; try again")
 
-            if waiting and not told:
-                waiting(f"waiting for another change to profile '{profile.name}' to finish...")
-                told = True
+                if waiting and not told:
+                    waiting(f"waiting for another change to profile '{profile.name}' to finish...")
+                    told = True
 
-            sleep(0.2)
+                sleep(0.2)
 
-        try:
-            yield
-        finally:
-            _unlock(handle)
+            try:
+                yield
+            finally:
+                _unlock(handle)
+    finally:
+        # Removed while it was held: what is left is the lock file, which
+        # Windows couldn't delete while it was open.
+        _remove_if_only_the_lock(profile.dir)
 
 
 def _try_lock(handle) -> bool:
@@ -603,8 +620,43 @@ def write_extension_list(profile: Profile) -> bool:
 def remove(root: Path, name: str) -> None:
     """
     Delete the profile's directory. Its containers and volumes are the caller's job.
+
+    A lock file someone holds (the command removing the profile, usually)
+    stays: Windows can't delete a file that is open. ``lock`` deletes it,
+    and the folder, as it lets go.
     """
     if not exists(root, name):
         raise ProfileError(f"no profile '{name}'")
 
-    shutil.rmtree(profiles_dir(root) / name)
+    folder = profiles_dir(root) / name
+    for path in folder.iterdir():
+        if path.name == LOCK_FILE:
+            continue
+        if path.is_dir() and not path.is_symlink():
+            shutil.rmtree(path)
+        else:
+            path.unlink()
+
+    _remove_if_only_the_lock(folder)
+
+
+def _remove_if_only_the_lock(folder: Path) -> None:
+    """
+    Delete *folder* when all it holds is a lock file nobody holds; leave it
+    otherwise, for the lock's holder to delete as it lets go.
+    """
+    lock_file = folder / LOCK_FILE
+    if not folder.is_dir() or [path.name for path in folder.iterdir()] != [LOCK_FILE]:
+        return
+
+    try:
+        with open(lock_file, "a+b") as handle:
+            if not _try_lock(handle):
+                return
+            _unlock(handle)
+
+        lock_file.unlink()
+        folder.rmdir()
+    except OSError:
+        # Opened by another command meanwhile (Windows): it deletes them.
+        pass
