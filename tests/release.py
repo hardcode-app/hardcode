@@ -13,6 +13,7 @@ from __future__ import annotations
 import base64
 import importlib.util
 import json
+import os
 import shutil
 import sys
 import tempfile
@@ -148,8 +149,8 @@ def check_updater_config(suite: Suite) -> None:
             json.dumps(config, indent=2),
         )
         suite.check(
-            "...and the build makes the signed update files",
-            config.get("bundle") == {"createUpdaterArtifacts": True},
+            "...and nothing in the build signs: the key goes only to release.py sign",
+            "bundle" not in config,
             json.dumps(config, indent=2),
         )
         suite.check(
@@ -221,27 +222,6 @@ def check_gather(suite: Suite) -> None:
             )
 
 
-def sign(key: Path, path: Path, version: str) -> harness.Output:
-    """
-    Sign *path* with *key* for *version*, as a release's build does: *path*.sig.
-    """
-    return harness.run(
-        [
-            "cargo",
-            "tauri",
-            "signer",
-            "sign",
-            "--private-key-path",
-            key,
-            "--password",
-            "",
-            "--app-version",
-            version,
-            path,
-        ]
-    )
-
-
 def check_manifest(suite: Suite) -> None:
     version = "2.3.4"
 
@@ -266,10 +246,29 @@ def check_manifest(suite: Suite) -> None:
         ]
         for name in names:
             (directory / name).write_bytes(f"the {name} installer".encode())
-            signed = sign(key, directory / name, version)
-            if not signed.ok:
-                suite.abort(f"signing {name}", signed.text)
         (directory / "hardcode-linux-x64").write_bytes(b"not an installer")
+
+        # The release's own signing step, the key given as the workflow gives it.
+        try:
+            release.sign(version, directory, {**os.environ, "TAURI_SIGNING_PRIVATE_KEY": ""})
+            suite.check("release.py sign refuses to run without the key", False)
+        except release.ReleaseError as error:
+            suite.check("release.py sign refuses to run without the key", "TAURI_SIGNING_PRIVATE_KEY" in str(error))
+
+        environment = {
+            **os.environ,
+            "TAURI_SIGNING_PRIVATE_KEY": key.read_text(encoding="utf-8"),
+            "TAURI_SIGNING_PRIVATE_KEY_PASSWORD": "",
+        }
+        try:
+            signed = release.sign(version, directory, environment)
+        except release.ReleaseError as error:
+            suite.abort("release.py sign", str(error))
+        suite.check(
+            "release.py sign signs every installer, and nothing else",
+            sorted(signed) == sorted(names) and not (directory / "hardcode-linux-x64.sig").exists(),
+            ", ".join(signed),
+        )
 
         published = datetime(2026, 10, 13, 1, 2, 3, 456, tzinfo=timezone.utc)
         latest = release.manifest(version, REPOSITORY, directory, now=published)

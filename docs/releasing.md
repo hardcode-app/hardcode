@@ -106,6 +106,15 @@ the configuration that sets it up is added by the release workflow only
 (`release/release.py updater-config`), and a test keeps it out of the
 checkout's.
 
+**The signing key is in one job only.** The app's builds run every crate's
+build script and proc macro, so none of them holds the key: they make the
+installers unsigned (and, on macOS, the update archive,
+`HardCode_aarch64.app.tar.gz`). After them, *Sign the app's updates*, a job
+that builds nothing, downloads the installers and runs only the Tauri CLI's
+signer over them (`release/release.py sign`, in the build image, whose
+Tauri CLI is checksum-pinned), and the release publishes the `.sig` files
+it makes beside them.
+
 ### Setting it up, once
 
 Until `release/updater.pub` exists, releases are published without the
@@ -124,7 +133,7 @@ Until `release/updater.pub` exists, releases are published without the
    security change, and its commit says why.
 3. In the repository's settings (Secrets and variables → Actions), add the
    secrets `TAURI_SIGNING_PRIVATE_KEY` (the content of `updater.key`) and
-   `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`.
+   `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`. Only the signing job is given them.
 4. Keep `updater.key` and its password somewhere safe (a password
    manager), and delete the scratch copy.
 
@@ -145,7 +154,7 @@ the new one.
 into every file (and nothing else), a development build's mark (and the
 checkout without one), the updater's configuration, the builds' files
 gathered out of the folders they arrive in, a `latest.json`
-assembled from installers signed with a throwaway key (each signature
+assembled from installers `release/release.py sign` signed with a throwaway key (each signature
 carrying its version), both descriptions and the checksums.
 `tests/app.py` builds the app with a release's updater configuration,
 pointed at a `latest.json` it serves, and checks that the app offers the

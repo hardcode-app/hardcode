@@ -135,7 +135,10 @@ vscode has no route out and no capability to make one.
   and was made for the version announced, so a tampered `latest.json` can't
   pass an older release off as newer; and only over HTTPS, when the user
   says so ([releasing.md](releasing.md#the-apps-updater)). Development and
-  local builds have no updater.
+  local builds have no updater. The key that signs updates is given to one
+  job, which builds nothing and runs only the Tauri CLI's signer over the
+  finished installers: the app's builds, and the hundreds of crates' build
+  scripts they run, never hold it.
 - **Releases are built from nothing cached.** Any job that runs on `main`
   can write to the repository's Actions cache: CI's, and with it any build
   script or tool those jobs run. The release workflow restores none of it

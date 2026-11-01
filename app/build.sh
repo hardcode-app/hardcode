@@ -23,7 +23,8 @@
 # The version is the one in the files (release/release.py stamp writes a
 # release's). HARDCODE_UPDATER_CONFIG names more Tauri configuration for a
 # bundle: the release workflow's, with the updater (release/release.py
-# updater-config), signed with TAURI_SIGNING_PRIVATE_KEY. The app isn't run
+# updater-config). Nothing here signs: the release signs the installers
+# afterwards, in a job that builds nothing (release/release.py sign). The app isn't run
 # from the container, since it drives Docker on the machine it runs on: start
 # it from the launcher, install the .deb, or run the AppImage.
 set -euo pipefail
@@ -90,7 +91,7 @@ bundle() {
   cp "$TMPDIR/sidecar/hardcode" "$sidecar"
   echo "sidecar: $sidecar ($("$sidecar" --version))"
 
-  # A release's configuration on top: the updater, and its signed files.
+  # A release's configuration on top: the updater.
   local configs=(--config src-tauri/tauri.release.conf.json)
   if [ -n "${HARDCODE_UPDATER_CONFIG:-}" ]; then
     configs+=(--config "$HARDCODE_UPDATER_CONFIG")

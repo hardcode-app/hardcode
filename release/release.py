@@ -11,6 +11,10 @@ The steps of a release that aren't a build: the release workflow
     release/release.py updater-config --repository OWNER/REPO OUT
         the Tauri configuration a release builds the app with: the updater,
         when release/updater.pub holds the key it trusts (else nothing)
+    release/release.py sign --version VERSION DIR
+        sign DIR's installers for the app's updater (each FILE.sig), with
+        the key in TAURI_SIGNING_PRIVATE_KEY: a job of its own, after the
+        builds, so that no build ever holds the key
     release/release.py gather DIR
         move the files in DIR's folders into DIR: the builds' files, as
         they are downloaded, into the one list a release publishes
@@ -32,11 +36,13 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
 import re
+import subprocess
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Optional
+from typing import Callable, Optional
 
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -193,9 +199,12 @@ def updater_config(repository: str, key: Path = UPDATER_KEY) -> dict:
     """
     The Tauri configuration a release adds to the app's: the updater, which
     checks the repository's newest release, trusts *key*, and refuses a
-    release signed for another version than it says it is; and the signed
-    update files the build makes for it. Nothing without *key*: that release
-    has no updater.
+    release signed for another version than it says it is. Nothing without
+    *key*: that release has no updater.
+
+    The build doesn't sign (no createUpdaterArtifacts): it runs every
+    crate's build script, and the signing key is never where they can read
+    it. ``sign`` signs the finished installers, in a job of its own.
     """
     if not key.exists():
         return {}
@@ -204,7 +213,6 @@ def updater_config(repository: str, key: Path = UPDATER_KEY) -> dict:
         raise ReleaseError(f"{repository!r} is not a GitHub repository (OWNER/REPO)")
 
     return {
-        "bundle": {"createUpdaterArtifacts": True},
         "plugins": {
             "updater": {
                 "pubkey": key.read_text(encoding="utf-8").strip(),
@@ -213,6 +221,46 @@ def updater_config(repository: str, key: Path = UPDATER_KEY) -> dict:
             },
         },
     }
+
+
+def sign(
+    version: str,
+    directory: Path,
+    environment: Optional[dict] = None,
+    runner: Callable[..., subprocess.CompletedProcess] = subprocess.run,
+) -> list[str]:
+    """
+    Sign each installer in *directory* the app's updater can apply (each
+    gets its FILE.sig), for *version*, with the Tauri CLI's signer and the
+    key in *environment*'s TAURI_SIGNING_PRIVATE_KEY (and its password in
+    TAURI_SIGNING_PRIVATE_KEY_PASSWORD); the names signed.
+
+    It runs nothing else: the release workflow gives the key to this step
+    alone, in a job that builds nothing.
+    """
+    check_version(version)
+    environment = dict(os.environ if environment is None else environment)
+
+    if not environment.get("TAURI_SIGNING_PRIVATE_KEY"):
+        raise ReleaseError("TAURI_SIGNING_PRIVATE_KEY isn't set: the updater's key signs the installers")
+    environment.setdefault("TAURI_SIGNING_PRIVATE_KEY_PASSWORD", "")
+
+    installers = sorted(path for path in directory.iterdir() if path.is_file() and _installer(path.name))
+    if not installers:
+        raise ReleaseError(f"no installer the updater can apply in {directory}")
+
+    for installer in installers:
+        signed = runner(
+            ["cargo", "tauri", "signer", "sign", "--app-version", version, str(installer)],
+            env=environment,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+        )
+        if signed.returncode != 0 or not installer.with_name(f"{installer.name}.sig").exists():
+            raise ReleaseError(f"signing {installer.name} failed: {(signed.stderr or signed.stdout).strip()[-500:]}")
+
+    return [installer.name for installer in installers]
 
 
 def gather(directory: Path) -> list[str]:
@@ -402,6 +450,10 @@ def main(argv: list[str]) -> int:
     command.add_argument("--repository", required=True)
     command.add_argument("out", type=Path)
 
+    command = commands.add_parser("sign", help="sign DIR's installers for the app's updater")
+    command.add_argument("--version", required=True)
+    command.add_argument("directory", type=Path)
+
     command = commands.add_parser("gather", help="move the files in DIR's folders into DIR")
     command.add_argument("directory", type=Path)
 
@@ -438,6 +490,10 @@ def main(argv: list[str]) -> int:
             config = updater_config(arguments.repository)
             arguments.out.write_text(json.dumps(config, indent=2) + "\n", encoding="utf-8")
             print("the updater, checking " + LATEST.format(repository=arguments.repository) if config else "no updater")
+
+        elif arguments.command == "sign":
+            signed = sign(arguments.version, arguments.directory)
+            print(f"signed {', '.join(signed)}")
 
         elif arguments.command == "gather":
             moved = gather(arguments.directory)
