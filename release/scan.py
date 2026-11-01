@@ -8,10 +8,12 @@ read-only container); these are the steps around it.
     release/scan.py databases DIR
         download OSV's databases for the ecosystems HardCode uses into DIR,
         laid out as the scanner reads them offline
-    release/scan.py images --prefix PREFIX --tag TAG
-        the images to scan, a line each ("name reference"): the proxy, the
-        gateway and the admin as this run published them, and CoreDNS and
-        the Docker sidecar as compose.yaml pins them
+    release/scan.py save --prefix PREFIX --tag TAG DIR
+        copy each image to scan, the build platform's only, from its
+        registry into DIR/NAME.tar (skopeo): the proxy, the gateway and the
+        admin as this run published them, and CoreDNS and the Docker sidecar
+        as compose.yaml pins them; SCAN_REGISTRY_USER and
+        SCAN_REGISTRY_TOKEN, when set, sign in to ghcr.io
     release/scan.py summary DIR --out FILE
         from the scanner's reports in DIR (NAME.json each), the description's
         "Known vulnerabilities" section (FILE) and every finding
@@ -27,7 +29,10 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
+import platform
 import re
+import subprocess
 import sys
 import urllib.request
 from datetime import datetime, timezone
@@ -110,6 +115,65 @@ def images(prefix: str, tag: str, compose: str) -> list[tuple[str, str]]:
         found.append((name, match.group(1)))
 
     return found
+
+
+def qualified(reference: str) -> str:
+    """
+    *reference* as skopeo takes it: with its registry (Docker Hub's
+    docker.io, its official images under library/), and by digest alone
+    when it has one (skopeo refuses a tag and a digest together).
+    """
+    name, _, digest = reference.partition("@")
+    if digest:
+        name = name.rsplit(":", 1)[0] if ":" in name.split("/")[-1] else name
+
+    first = name.split("/")[0]
+    if not ("." in first or ":" in first or first == "localhost"):
+        name = f"docker.io/{name}" if "/" in name else f"docker.io/library/{name}"
+
+    return f"{name}@{digest}" if digest else name
+
+
+def build_platform() -> str:
+    """
+    The platform this runs on, as images name theirs: linux/amd64 or
+    linux/arm64.
+    """
+    machine = platform.machine().lower()
+    return "linux/" + {"x86_64": "amd64", "aarch64": "arm64"}.get(machine, machine)
+
+
+def save(
+    references: list[tuple[str, str]],
+    directory: Path,
+    target: str,
+    credentials: str = "",
+    runner: Callable[..., subprocess.CompletedProcess] = subprocess.run,
+) -> list[Path]:
+    """
+    Copy each (name, reference), *target*'s platform only, from its registry
+    into DIRECTORY/NAME.tar, a Docker archive the scanner reads, with
+    skopeo: no Docker daemon, whose image stores save multi-platform images
+    each in their own way. *credentials* ("user:token") sign in to ghcr.io.
+    The archives written.
+    """
+    system, _, architecture = target.partition("/")
+    directory.mkdir(parents=True, exist_ok=True)
+    written = []
+
+    for name, reference in references:
+        archive = directory / f"{name}.tar"
+        command = ["skopeo", "copy", "--quiet", "--override-os", system, "--override-arch", architecture]
+        if credentials and reference.startswith("ghcr.io/"):
+            command += ["--src-creds", credentials]
+        command += [f"docker://{qualified(reference)}", f"docker-archive:{archive}:scan/{name}:latest"]
+
+        copied = runner(command, capture_output=True, text=True, encoding="utf-8")
+        if copied.returncode != 0:
+            raise ScanError(f"copying {reference}: {(copied.stderr or copied.stdout).strip()[-500:]}")
+        written.append(archive)
+
+    return written
 
 
 def severity(score: str) -> str:
@@ -259,9 +323,10 @@ def main(argv: list[str]) -> int:
     command = commands.add_parser("databases", help="download OSV's databases into DIR")
     command.add_argument("directory", type=Path)
 
-    command = commands.add_parser("images", help="the images to scan")
+    command = commands.add_parser("save", help="copy the images to scan into DIR, one platform each")
     command.add_argument("--prefix", required=True)
     command.add_argument("--tag", required=True)
+    command.add_argument("directory", type=Path)
 
     command = commands.add_parser("summary", help="the description's section, from DIR's reports")
     command.add_argument("directory", type=Path)
@@ -275,10 +340,15 @@ def main(argv: list[str]) -> int:
             for path in databases(arguments.directory, download):
                 print(f"{path} ({path.stat().st_size // 1048576} MB)")
 
-        elif arguments.command == "images":
+        elif arguments.command == "save":
             compose = (ROOT / "compose.yaml").read_text(encoding="utf-8")
-            for name, reference in images(arguments.prefix, arguments.tag, compose):
-                print(f"{name} {reference}")
+            user = os.environ.get("SCAN_REGISTRY_USER", "")
+            token = os.environ.get("SCAN_REGISTRY_TOKEN", "")
+            credentials = f"{user}:{token}" if user and token else ""
+
+            listed = images(arguments.prefix, arguments.tag, compose)
+            for archive in save(listed, arguments.directory, build_platform(), credentials):
+                print(f"{archive} ({archive.stat().st_size // 1048576} MB)")
 
         elif arguments.command == "summary":
             reports = {

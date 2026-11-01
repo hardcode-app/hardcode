@@ -15,6 +15,7 @@ import importlib.util
 import json
 import os
 import shutil
+import subprocess
 import sys
 import tempfile
 from datetime import datetime, timezone
@@ -464,6 +465,46 @@ def check_scan(suite: Suite) -> None:
         and "@sha256:" in listed["docker"],
         str(listed),
     )
+
+    suite.check(
+        "references as skopeo takes them: with their registry, by digest alone when pinned by one",
+        scan.qualified("coredns/coredns:1.15.0@sha256:abc") == "docker.io/coredns/coredns@sha256:abc"
+        and scan.qualified("docker:29.9.2-dind-rootless@sha256:def") == "docker.io/library/docker@sha256:def"
+        and scan.qualified("ghcr.io/owner/hardcode-squid:sha-2c419ae") == "ghcr.io/owner/hardcode-squid:sha-2c419ae"
+        and scan.qualified("localhost:5000/thing:1") == "localhost:5000/thing:1",
+    )
+
+    with tempfile.TemporaryDirectory(prefix="hc-scan-") as temporary:
+        directory = Path(temporary) / "images"
+        commands = []
+
+        def skopeo(command, **options):
+            commands.append(command)
+            return subprocess.CompletedProcess(command, 0, "", "")
+
+        saved = scan.save(
+            [("squid", "ghcr.io/owner/hardcode-squid:sha-2c419ae"), ("coredns", "coredns/coredns:1.15.0@sha256:abc")],
+            directory,
+            "linux/arm64",
+            "someone:token",
+            skopeo,
+        )
+        suite.check(
+            "each image is copied from its registry, one platform, into a Docker archive the scanner reads",
+            [path.name for path in saved] == ["squid.tar", "coredns.tar"]
+            and commands[0][:7] == ["skopeo", "copy", "--quiet", "--override-os", "linux", "--override-arch", "arm64"]
+            and commands[1][-2:]
+            == [
+                "docker://docker.io/coredns/coredns@sha256:abc",
+                f"docker-archive:{directory}/coredns.tar:scan/coredns:latest",
+            ],
+            "\n".join(" ".join(command) for command in commands),
+        )
+        suite.check(
+            "...the read-only token given to ghcr.io's, and to nothing else",
+            "--src-creds" in commands[0] and "--src-creds" not in commands[1],
+            "\n".join(" ".join(command) for command in commands),
+        )
 
     reports = {
         "source": report(

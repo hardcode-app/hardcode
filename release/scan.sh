@@ -9,7 +9,7 @@
 #   release/scan.sh DATABASES IMAGES REPORTS
 #
 # DATABASES is release/scan.py databases' folder; IMAGES holds NAME.tar for
-# each image to scan (docker save), and may be empty; REPORTS receives
+# each image to scan (release/scan.py save), and may be empty; REPORTS receives
 # source.json (the lock files) and NAME.json for each image. The build image
 # is hardcode-build:local, as .github/actions/build-image and
 # images/build/run.sh build it.

@@ -436,25 +436,15 @@ jobs:
       - uses: ./.github/actions/build-image
         with:
           cache: false
+      # One platform of each, the runner's, copied from its registry by
+      # skopeo (no Docker daemon), with this job's read-only token.
       - name: The images, as this run published them
         if: env.IMAGE_TAG != ''
         env:
-          TOKEN: ${{ github.token }}
-          ACTOR: ${{ github.actor }}
-        run: |
-          mkdir -p dist/scan/images
-          echo "$TOKEN" | docker login ghcr.io --username "$ACTOR" --password-stdin
-          images/build/run.sh release/scan.py images --prefix "$PREFIX" --tag "$IMAGE_TAG" > "$RUNNER_TEMP/images.txt"
-
-          # One platform, the runner's: Docker's containerd store would save
-          # a multi-platform image's whole index with only this platform's
-          # layers, an archive the scanner can't read.
-          platform="$(docker version --format '{{.Server.Os}}/{{.Server.Arch}}')"
-          while read -r name reference; do
-            docker pull --quiet --platform "$platform" "$reference"
-            docker save --platform "$platform" --output "dist/scan/images/$name.tar" "$reference"
-          done < "$RUNNER_TEMP/images.txt"
-          docker logout ghcr.io
+          SCAN_REGISTRY_USER: ${{ github.actor }}
+          SCAN_REGISTRY_TOKEN: ${{ github.token }}
+          BUILD_ENV: SCAN_REGISTRY_USER SCAN_REGISTRY_TOKEN
+        run: images/build/run.sh release/scan.py save --prefix "$PREFIX" --tag "$IMAGE_TAG" dist/scan/images
       - name: OSV's databases
         run: images/build/run.sh release/scan.py databases dist/scan/db
       - name: Scan, sealed

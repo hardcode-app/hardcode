@@ -66,8 +66,11 @@ them (squid, the gateway, the admin) and as `compose.yaml` pins them
 contains, and isn't scanned.
 
 The job holds no secret and can only read. `release/scan.py databases`
-downloads OSV's databases (crates.io, PyPI, Go, Alpine, Debian, Ubuntu), the images
-are pulled and saved as archives, and then `release/scan.sh` runs
+downloads OSV's databases (crates.io, PyPI, Go, Alpine, Debian, Ubuntu),
+`release/scan.py save` copies each image, the runner's platform only,
+from its registry into an archive (skopeo, from the archive, with the
+job's read-only token for ghcr.io; no Docker daemon, whose image stores
+each save a multi-platform image differently), and then `release/scan.sh` runs
 OSV-Scanner (the build image's, checksum-pinned) in a container with no
 network, no token, no capabilities and a read-only filesystem: a
 compromised scanner could misreport, and nothing more.
@@ -76,8 +79,10 @@ section (a count by severity for each thing scanned, and what a newer
 version fixes) and `vulnerabilities.json`. The findings are reported, not
 blocking; the job's own failure stops the release, as any job's does.
 
-To scan a checkout: `release/scan.py databases`, `docker save` the images
-into a folder, then `release/scan.sh DATABASES IMAGES REPORTS`.
+To scan a checkout: `release/scan.py databases DIR`, `release/scan.py save
+--prefix ghcr.io/<owner>/hardcode --tag <tag> IMAGES` (or any image archives
+in IMAGES), then `release/scan.sh DATABASES IMAGES REPORTS`, all but the
+last through `images/build/run.sh`.
 
 ## Development builds
 

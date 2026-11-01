@@ -26,6 +26,8 @@ RUN apt-get update \
       libwebkit2gtk-4.1-dev libgtk-3-dev librsvg2-dev libayatana-appindicator3-dev \
       # the Docker CLI, buildx and compose, talking to the host's daemon over its socket
       docker.io docker-buildx docker-compose-v2 \
+      # one platform of an image, straight from its registry, for the vulnerability scan
+      skopeo \
  && rm -rf /var/lib/apt/lists/*
 
 # Kubernetes tooling for the chart and kind suites; the archive carries none
