@@ -19,8 +19,9 @@ from hardcode_admin import manifests
 from hardcode_admin.operator import Operator, _status_only, allowlist_hash, generate_ca, profiles_path
 from hardcode_cli import langs
 
-from .helpers import FakeK8s, profile, ready_pod
+from .helpers import FakeK8s, chart_defaults, profile, ready_pod
 
+REPO = Path(__file__).resolve().parent.parent.parent
 PROFILES = profiles_path("test")
 STATEFULSETS = "/apis/apps/v1/namespaces/test/statefulsets"
 DEPLOYMENTS = "/apis/apps/v1/namespaces/test/deployments"
@@ -52,7 +53,7 @@ class EffectiveSpecTests(unittest.TestCase):
     def test_defaults_and_overrides(self):
         spec = manifests.effective_spec(
             profile("p", {"image": "mine:1", "docker": {"enabled": False}, "home": {"size": "50Gi"}}),
-            {"image": "default:1", "home": {"storageClass": "fast"}},
+            chart_defaults({"image": "default:1", "home": {"size": "", "storageClass": "fast"}}),
         )
 
         self.assertEqual(spec["image"], "mine:1")
@@ -60,19 +61,22 @@ class EffectiveSpecTests(unittest.TestCase):
         self.assertFalse(spec["docker"]["enabled"])
         self.assertTrue(spec["docker"]["privileged"])
         self.assertEqual(spec["squidResources"], manifests.SQUID_RESOURCES)
-        self.assertEqual(manifests.effective_spec({"metadata": {"name": "x"}})["image"], "hardcode-vscode:latest")
+        self.assertEqual(
+            manifests.effective_spec({"metadata": {"name": "x"}}, chart_defaults())["image"],
+            "hardcode-vscode:latest",
+        )
 
     def test_empty_strings_mean_inherit(self):
         spec = manifests.effective_spec(
             profile("p", {"image": "", "vscodeHost": "", "home": {"size": ""}}),
-            {"image": "default:1"},
+            chart_defaults({"image": "default:1", "home": {"size": ""}}),
         )
 
         self.assertEqual((spec["image"], spec["vscodeHost"], spec["home"]["size"]), ("default:1", "", "20Gi"))
 
     def test_languages_and_extensions(self):
         def languages(spec, defaults=None):
-            return manifests.effective_spec(profile("p", spec), defaults)["languages"]
+            return manifests.effective_spec(profile("p", spec), chart_defaults(defaults))["languages"]
 
         self.assertEqual(languages({}), list(langs.LANGS), "a profile that doesn't choose has them all")
         self.assertEqual(languages({}, {"languages": []}), list(langs.LANGS), "an empty chart default means all")
@@ -84,20 +88,20 @@ class EffectiveSpecTests(unittest.TestCase):
         )
         self.assertEqual(languages({"languages": []}, {"languages": ["go"]}), [], "an empty list of its own is none")
 
-        self.assertEqual(manifests.effective_spec(profile("p"))["extensions"], [])
+        self.assertEqual(manifests.effective_spec(profile("p"), chart_defaults())["extensions"], [])
         self.assertEqual(
-            manifests.effective_spec(profile("p", {"extensions": ["eamodio.gitlens"]}))["extensions"],
+            manifests.effective_spec(profile("p", {"extensions": ["eamodio.gitlens"]}), chart_defaults())["extensions"],
             ["eamodio.gitlens"],
         )
 
     def test_every_container_keeps_a_memory_limit(self):
-        spec = manifests.effective_spec(profile("p"), {})
+        spec = manifests.effective_spec(profile("p"), chart_defaults({"resources": None, "dockerResources": None}))
         self.assertEqual(spec["resources"], manifests.VSCODE_RESOURCES)
         self.assertEqual(spec["dockerResources"], manifests.DOCKER_RESOURCES)
 
         spec = manifests.effective_spec(
             profile("p", {"resources": {"requests": {"cpu": "2"}, "limits": {"cpu": "4"}}}),
-            {"dockerResources": {"limits": {"memory": "16Gi"}}},
+            chart_defaults({"resources": None, "dockerResources": {"limits": {"memory": "16Gi"}}}),
         )
         self.assertEqual(
             spec["resources"],
@@ -107,38 +111,39 @@ class EffectiveSpecTests(unittest.TestCase):
         self.assertEqual(spec["dockerResources"]["limits"]["memory"], "16Gi")
         self.assertEqual(manifests.with_memory_limit("junk", manifests.SQUID_RESOURCES)["limits"]["memory"], "512Mi")
 
-    def test_the_fallback_images_are_the_ones_compose_and_the_chart_pin(self):
-        # Dependabot moves the pin in compose.yaml only: the chart's
-        # values.yaml and the operator's fallbacks follow by hand, in its
-        # pull request.
-        repo = Path(__file__).resolve().parent.parent.parent
-        compose = (repo / "compose.yaml").read_text(encoding="utf-8")
-        values = (repo / "helm" / "hardcode" / "values.yaml").read_text(encoding="utf-8")
-        fallbacks = manifests.effective_spec(profile("p"))
+    def test_compose_and_the_chart_pin_the_same_images(self):
+        # Dependabot moves both in one pull request: compose.yaml's
+        # "image:" lines, and the chart's values keys named "image".
+        compose = (REPO / "compose.yaml").read_text(encoding="utf-8")
+        chart = chart_defaults()
 
-        for key, name in (("corednsImage", "coredns/coredns"), ("dockerImage", "docker")):
+        for key, name in (("coredns", "coredns/coredns"), ("docker", "docker")):
             with self.subTest(image=name):
-                # "    image: docker:29-dind-rootless" in compose.yaml,
-                # "  dockerImage: docker:29-dind-rootless" in values.yaml.
                 in_compose = re.search(rf"^ +image: ({re.escape(name)}:\S+)$", compose, re.MULTILINE)
-                in_values = re.search(rf"^ +{key}: (\S+)$", values, re.MULTILINE)
-                pins = {
-                    "compose.yaml": in_compose.group(1) if in_compose else None,
-                    "helm/hardcode/values.yaml": in_values.group(1) if in_values else None,
-                    "admin/hardcode_admin/manifests.py": fallbacks[key],
-                }
 
-                self.assertIsNotNone(pins["compose.yaml"], f"no {name} image in compose.yaml")
+                self.assertIsNotNone(in_compose, f"no {name} image in compose.yaml")
                 self.assertEqual(
-                    len(set(pins.values())),
-                    1,
-                    f"{name} is pinned differently, and all three follow compose.yaml: {pins}",
+                    chart[key]["image"],
+                    in_compose.group(1),
+                    f"the chart's profileDefaults.{key}.image follows compose.yaml",
                 )
+
+    def test_the_operator_has_no_images_of_its_own(self):
+        for key in ("docker", "coredns"):
+            with self.subTest(image=key):
+                chart = chart_defaults({key: {"image": ""}})
+
+                with self.assertRaisesRegex(ValueError, rf"no {key}\.image: neither the profile's spec nor the chart"):
+                    manifests.render(profile("p"), chart, {"caCert": "C", "allowlistHash": "h"})
+
+        own = manifests.effective_spec(profile("p", {"docker": {"image": "mine:1"}}), chart_defaults())
+        self.assertEqual(own["dockerImage"], "mine:1", "a profile can name its own")
 
     def test_a_profile_without_a_memory_limit_inherits_the_charts(self):
         spec = manifests.effective_spec(
             profile("p", {"resources": {"requests": {"memory": "12Gi"}}}),
-            {
+            chart_defaults()
+            | {
                 "resources": {"requests": {"memory": "1Gi"}, "limits": {"memory": "16Gi"}},
                 "dockerResources": {"requests": {"cpu": "1"}},
             },
@@ -210,7 +215,7 @@ class RenderTests(unittest.TestCase):
     def test_full_sandbox_with_owner_references(self):
         objects = manifests.render(
             profile("p1", {"vscodeHost": "p1.example.com"}),
-            {"image": "reg/vscode:1", "ingressClassName": "nginx", "ingressTLSSecret": "wild"},
+            chart_defaults({"image": "reg/vscode:1", "ingressClassName": "nginx", "ingressTLSSecret": "wild"}),
             self.CTX,
         )
 
@@ -302,7 +307,7 @@ class RenderTests(unittest.TestCase):
     def test_suspended_without_docker_policy_or_ingress(self):
         objects = manifests.render(
             profile("p2", {"suspended": True, "docker": {"enabled": False}, "networkPolicy": {"enabled": False}}),
-            {},
+            chart_defaults(),
             {"caCert": "C", "allowlistHash": "h"},
         )
 
@@ -328,11 +333,11 @@ class RenderTests(unittest.TestCase):
         self.assertEqual(pod_spec(statefulset)["dnsConfig"]["nameservers"], ["127.0.0.1"])
 
     def test_existing_claims_are_kept_verbatim(self):
-        current = manifests.claim_templates(manifests.effective_spec(profile("p2")))
+        current = manifests.claim_templates(manifests.effective_spec(profile("p2"), chart_defaults()))
 
         objects = manifests.render(
             profile("p2", {"home": {"size": "50Gi"}}),
-            {},
+            chart_defaults(),
             {**self.CTX, "existingClaims": current},
         )
 
@@ -344,7 +349,7 @@ class RenderTests(unittest.TestCase):
 
     def test_token_change_rolls_the_vscode(self):
         def template(token_hash):
-            objects = manifests.render(profile("p"), {}, {**self.CTX, "tokenHash": token_hash})
+            objects = manifests.render(profile("p"), chart_defaults(), {**self.CTX, "tokenHash": token_hash})
             return find(objects, "StatefulSet")["spec"]["template"]
 
         self.assertNotEqual(template("before"), template("after"))
@@ -353,7 +358,7 @@ class RenderTests(unittest.TestCase):
         """
         The extension list a profile's ConfigMap hands its VS Code container.
         """
-        objects = manifests.render(profile("p", spec), defaults or {}, self.CTX)
+        objects = manifests.render(profile("p", spec), chart_defaults(defaults), self.CTX)
         return find(objects, "ConfigMap", "p-vscode-extensions")["data"]
 
     def test_the_extension_list_is_its_languages_and_its_own(self):
@@ -372,7 +377,7 @@ class RenderTests(unittest.TestCase):
         self.assertEqual(self.wanted({"languages": []}), {"wanted": langs.extension_list([], [])}, "core only")
 
     def test_the_extension_list_is_mounted_as_a_directory(self):
-        objects = manifests.render(profile("p", {"extensions": ["eamodio.gitlens"]}), {}, self.CTX)
+        objects = manifests.render(profile("p", {"extensions": ["eamodio.gitlens"]}), chart_defaults(), self.CTX)
         pod = pod_spec(find(objects, "StatefulSet"))
         vscode = pod["containers"][0]
 
@@ -395,7 +400,9 @@ class RenderTests(unittest.TestCase):
     def test_a_profiles_own_variable_wins_without_a_duplicate(self):
         own = {"HTTP_PROXY": "http://mine:3128", "PIP_CERT": "", "VSCODE_DEFAULT_FOLDER": "/shared"}
         spec = {"languages": ["python"], "env": own}
-        vscode = pod_spec(find(manifests.render(profile("p", spec), {}, self.CTX), "StatefulSet"))["containers"][0]
+        vscode = pod_spec(find(manifests.render(profile("p", spec), chart_defaults(), self.CTX), "StatefulSet"))[
+            "containers"
+        ][0]
         names = [variable["name"] for variable in vscode["env"]]
 
         # Ours (the proxy, the CA bundle) and the profile's alike:
@@ -406,7 +413,7 @@ class RenderTests(unittest.TestCase):
 
     def test_new_languages_and_extensions_leave_the_pod_alone(self):
         def rendered(spec):
-            objects = manifests.render(profile("p", spec), {}, self.CTX)
+            objects = manifests.render(profile("p", spec), chart_defaults(), self.CTX)
             return find(objects, "StatefulSet")["spec"]["template"], self.wanted(spec)
 
         before, before_list = rendered({"languages": ["python"]})
@@ -425,7 +432,7 @@ class RenderTests(unittest.TestCase):
 class OperatorTests(unittest.TestCase):
     def setUp(self):
         self.k8s = FakeK8s()
-        self.operator = Operator(self.k8s, {"image": "img:1"})
+        self.operator = Operator(self.k8s, chart_defaults({"image": "img:1"}))
         self.created = self.k8s.create(PROFILES, profile("p3"))
 
     def current(self, name="p3"):
