@@ -445,9 +445,14 @@ jobs:
           mkdir -p dist/scan/images
           echo "$TOKEN" | docker login ghcr.io --username "$ACTOR" --password-stdin
           images/build/run.sh release/scan.py images --prefix "$PREFIX" --tag "$IMAGE_TAG" > "$RUNNER_TEMP/images.txt"
+
+          # One platform, the runner's: Docker's containerd store would save
+          # a multi-platform image's whole index with only this platform's
+          # layers, an archive the scanner can't read.
+          platform="$(docker version --format '{{.Server.Os}}/{{.Server.Arch}}')"
           while read -r name reference; do
-            docker pull --quiet "$reference"
-            docker save --output "dist/scan/images/$name.tar" "$reference"
+            docker pull --quiet --platform "$platform" "$reference"
+            docker save --platform "$platform" --output "dist/scan/images/$name.tar" "$reference"
           done < "$RUNNER_TEMP/images.txt"
           docker logout ghcr.io
       - name: OSV's databases
