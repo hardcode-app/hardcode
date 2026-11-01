@@ -21,17 +21,38 @@
 
 ![The HardCode app](docs/images/app-overview.png)
 
-AI coding agents and the code they pull in run with your credentials and your
-network. HardCode gives them a box instead: a full development environment
-in containers, where everything that leaves goes through a proxy that reads
-it, and only what you've allowed gets out.
+AI coding agents, the packages they install and the extensions in your
+editor all run with your credentials and your network. With supply-chain
+attacks as common as they are, one rogue dependency or extension is all it
+takes to read your keys and send them off. HardCode gives them a box
+instead: a full development environment in containers, away from your
+machine's files and secrets, where nothing leaves unless you've allowed it,
+whether by HTTP, HTTPS or a DNS lookup.
+
+There are three ways to run it:
+
+- **The desktop app**, for Linux, macOS and Windows: your sandboxes, their
+  allowlists and what they tried to reach, a click away.
+- **The `hardcode` command**, a single file, for your terminal and your
+  scripts.
+- **For teams, on Kubernetes**: a Helm chart with an operator that runs
+  everyone's sandboxes in your cluster, and an admin UI to manage them.
 
 ## Features
 
 - **An allowlist for the internet.** HTTPS is inspected, so rules apply to
   full URLs and methods: `github.com/your-org` can be cloned but not pushed
-  to unless you say `rw`, and nothing else on GitHub is reachable. DNS is
-  filtered the same way, so it can't carry data out either.
+  to unless you say `rw`, and nothing else on GitHub is reachable.
+- **No way out through DNS either.** The sandbox's only nameserver looks up
+  the names you've allowed and answers every other name itself, so a lookup
+  such as `<your-key>.attacker.example` never leaves: DNS exfiltration is
+  shut off along with HTTP.
+- **Rogue packages and extensions stay in the box.** A compromised npm, PyPI
+  or crates.io release runs inside the sandbox, not on your machine: it
+  can't read your SSH keys or cloud credentials, and it can send what it
+  finds only where you've allowed. VS Code extensions come only from
+  Marketplace publishers with a verified domain, and so does everything
+  they pull in.
 - **Built around your languages.** Python, JavaScript/TypeScript, Java,
   C#/.NET, Go, Rust, C/C++, Ruby and Perl: each one you switch on installs
   its toolchain, opens its package registries (read-only) and brings its VS
@@ -44,8 +65,6 @@ it, and only what you've allowed gets out.
   languages, allowlist, ports, mounts and volumes.
 - **See what was blocked.** Every refused request, with one click to allow
   it.
-- **Your choice of front end.** A desktop app for Linux, macOS and Windows, a
-  single-file command line, or a Helm chart for teams on Kubernetes.
 
 ## Quick start
 
