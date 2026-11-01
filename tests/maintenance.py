@@ -90,7 +90,7 @@ def check_pins_found(suite: Suite) -> None:
         and {pin.name for pin in kinds["pypi"]} >= {"pyinstaller", "ruff", "pyyaml"}
         and {pin.name for pin in kinds["image"]} >= {"coredns/coredns", "docker"}
         and {pin.name for pin in kinds["release"]}
-        == {"kubernetes-sigs/kind", "kubernetes/kubernetes", "helm/helm", "tauri-apps/tauri"},
+        == {"kubernetes-sigs/kind", "kubernetes/kubernetes", "helm/helm", "google/osv-scanner", "tauri-apps/tauri"},
         "\n".join(sorted(f"{pin.kind} {pin.name} {pin.version}" for pin in found if pin.kind != "crate")),
     )
 
@@ -232,6 +232,7 @@ def check_vendor(suite: Suite) -> None:
     answers = {}
     answers.update(releases("kubernetes-sigs/kind", [release("v0.33.0", 60)]))
     answers.update(releases("kubernetes/kubernetes", [release("v1.37.1", 40)]))
+    answers.update(releases("google/osv-scanner", [release("v2.7.0", 20)]))
     answers.update(
         releases(
             "helm/helm",
@@ -281,6 +282,9 @@ def check_vendor(suite: Suite) -> None:
                     "ARG HELM_VERSION=4.3.0",
                     "ARG HELM_SHA256_AMD64=old",
                     "ARG HELM_SHA256_ARM64=old",
+                    "ARG OSV_SCANNER_VERSION=2.7.0",
+                    "ARG OSV_SCANNER_SHA256_AMD64=old",
+                    "ARG OSV_SCANNER_SHA256_ARM64=old",
                     "ARG TAURI_CLI_VERSION=2.12.2",
                     "ARG TAURI_CLI_SHA256_AMD64=old",
                     "",

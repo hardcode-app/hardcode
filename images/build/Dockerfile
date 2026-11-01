@@ -30,7 +30,8 @@ RUN apt-get update \
 
 # Kubernetes tooling for the chart and kind suites; the archive carries none
 # of it. Published checksums, both architectures. These ARG pins (and the
-# Tauri CLI's) are bumped by hand, each version with its checksums;
+# Tauri CLI's and OSV-Scanner's) move with maintenance/pins.py vendor, each
+# version with its publisher's checksums, a week after its release;
 # Dependabot moves the base image and requirements.txt.
 ARG KIND_VERSION=0.33.0
 ARG KIND_SHA256_AMD64=aee6151561422756b764a4ae28e7f44cda5af5a9eead3cc9985112b1de8d8e0d
@@ -56,6 +57,24 @@ RUN set -eu; \
     install -m 0755 kind kubectl /usr/local/bin/; \
     tar -xzf helm.tgz --strip-components=1 -C /usr/local/bin "linux-${arch}/helm"; \
     rm -f kind kubectl helm.tgz
+
+# OSV-Scanner, for a release's known vulnerabilities (release/scan.sh runs
+# it sealed: no network, no token); the archive has no scanner. The
+# project's release binaries, checksum-pinned.
+ARG OSV_SCANNER_VERSION=2.7.0
+ARG OSV_SCANNER_SHA256_AMD64=160c6253e2922e9e0a6a9771c5c4c40a4b3c6090b34a3cdd5e80c96cc2e4218b
+ARG OSV_SCANNER_SHA256_ARM64=4061ef4c021ed3c47f203b818f337e351336cc5cd67c0274fc36bd1dfc728dd7
+RUN set -eu; \
+    arch="$(dpkg --print-architecture)"; \
+    case "$arch" in \
+      amd64) sha="$OSV_SCANNER_SHA256_AMD64" ;; \
+      arm64) sha="$OSV_SCANNER_SHA256_ARM64" ;; \
+      *) echo "no pinned OSV-Scanner for $arch" >&2; exit 1 ;; \
+    esac; \
+    curl -fsSLo /tmp/osv-scanner "https://github.com/google/osv-scanner/releases/download/v${OSV_SCANNER_VERSION}/osv-scanner_linux_${arch}"; \
+    echo "${sha}  /tmp/osv-scanner" | sha256sum -c -; \
+    install -m 0755 /tmp/osv-scanner /usr/local/bin/osv-scanner; \
+    rm /tmp/osv-scanner
 
 # The Tauri CLI, for the installers: the project's release binary for amd64,
 # checksum-pinned; other architectures build the same version from crates.io,

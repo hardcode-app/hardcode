@@ -28,6 +28,22 @@ REPOSITORY = "Example-Owner/hardcode"
 release = harness.release_steps()
 
 
+def load_scan():
+    """
+    release/scan.py, as a module (its name is taken by nothing, but loaded
+    alike).
+    """
+    spec = importlib.util.spec_from_file_location("release_scan", ROOT / "release" / "scan.py")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+
+    return module
+
+
+scan = load_scan()
+
+
 def copy_versioned(root: Path) -> None:
     """
     Copy every file that carries the version into *root*, at its own path.
@@ -399,6 +415,129 @@ def check_notes_and_checksums(suite: Suite) -> None:
         )
 
 
+def report(*packages: tuple) -> dict:
+    """
+    A scanner report (OSV-Scanner's JSON) with a finding per (package,
+    version, id, CVSS score, fixed version or None).
+    """
+    listed = []
+    for name, version, key, score, fixed in packages:
+        events = [{"introduced": "0"}] + ([{"fixed": fixed}] if fixed else [])
+        listed.append(
+            {
+                "package": {"name": name, "version": version, "ecosystem": "crates.io"},
+                "vulnerabilities": [
+                    {
+                        "id": key,
+                        "summary": f"{name} is broken",
+                        "affected": [{"package": {"name": name}, "ranges": [{"events": events}]}],
+                    }
+                ],
+                "groups": [{"ids": [key, f"GHSA-{key}"], "max_severity": score}],
+            }
+        )
+
+    return {"results": [{"source": {"path": "Cargo.lock"}, "packages": listed}]}
+
+
+def check_scan(suite: Suite) -> None:
+    with tempfile.TemporaryDirectory(prefix="hc-scan-") as temporary:
+        directory = Path(temporary)
+
+        asked = []
+        written = scan.databases(directory, lambda url: asked.append(url) or b"zip")
+        suite.check(
+            "OSV's databases, one per ecosystem, where the scanner reads them offline",
+            [path.relative_to(directory).as_posix() for path in written]
+            == [f"osv-scalibr/{ecosystem}/all.zip" for ecosystem in scan.ECOSYSTEMS]
+            and asked == [scan.DATABASES.format(ecosystem=ecosystem) for ecosystem in scan.ECOSYSTEMS],
+            "\n".join(asked),
+        )
+
+    compose = (ROOT / "compose.yaml").read_text(encoding="utf-8")
+    listed = dict(scan.images("ghcr.io/owner/hardcode", "sha-2c419ae", compose))
+    suite.check(
+        "the images scanned: ours as this run published them, CoreDNS and Docker as compose.yaml pins them",
+        listed["squid"] == "ghcr.io/owner/hardcode-squid:sha-2c419ae"
+        and set(listed) == {"squid", "gateway", "admin", "coredns", "docker"}
+        and listed["coredns"].startswith("coredns/coredns:")
+        and "@sha256:" in listed["docker"],
+        str(listed),
+    )
+
+    reports = {
+        "source": report(
+            ("zip", "4.6.1", "RUSTSEC-1", "10.0", "9.0.0"),
+            ("zip", "4.6.1", "RUSTSEC-4", "9.1", "9.0.5"),
+            ("glib", "0.18.5", "RUSTSEC-2", "6.9", "0.20.0"),
+            ("zvariant", "5.15.0", "RUSTSEC-3", "", None),
+        ),
+        "squid": report(("openssl", "3.5.0", "UBUNTU-1", "7.5", "3.5.1")),
+        "docker": report(
+            # The same module in two binaries: one issue.
+            ("github.com/moby/go-archive", "0.2.0", "GO-1", "7.5", "0.3.0"),
+            ("github.com/moby/go-archive", "0.2.0", "GO-1", "7.5", "0.3.0"),
+            # A binary whose version the scanner can't read, and a "fix"
+            # older than what is installed: neither is counted.
+            ("github.com/moby/moby/v2", "(devel)", "GO-2", "8.8", "2.0.0"),
+            ("github.com/coredns/coredns", "0.0.0-20261021021732-a6fde3fe339c", "GO-3", "7.5", "1.14.3"),
+            ("glib", "2.88.1-r1", "ALPINE-1", "7.8", "2.66.6-r0"),
+        ),
+    }
+    text, details = scan.summary(reports, "OSV-Scanner 9.9.9", datetime(2026, 11, 1, tzinfo=timezone.utc))
+    suite.check(
+        "the description's section counts each issue once, by severity, for each thing scanned",
+        "| The app's crates, and the Python packages the command and the build use | 2 | 0 | 1 | 0 | 1 | 0 |" in text
+        and "| The proxy and allowlist renderer (hardcode-squid) | 0 | 1 | 0 | 0 | 0 | 0 |" in text
+        and "OSV-Scanner 9.9.9 against OSV's databases of 2026-11-01" in text,
+        text,
+    )
+    suite.check(
+        "...not counting a binary whose version can't be read, nor a fix older than what is installed",
+        "| The Docker sidecar | 0 | 1 | 0 | 0 | 0 | 3 |" in text,
+        text,
+    )
+    fixed = [line for line in text.splitlines() if line.startswith("- ")]
+    suite.check(
+        "...and the critical and high a newer version fixes, a line for each package, the most severe first",
+        fixed
+        == [
+            "- zip 4.6.1 → 9.0.5, in the app's crates: 2 critical",
+            "- github.com/moby/go-archive 0.2.0 → 0.3.0, in the Docker sidecar: 1 high",
+            "- openssl 3.5.0 → 3.5.1, in the proxy: 1 high",
+        ]
+        and [entry["scanned"] for entry in details] == ["source", "squid", "docker"]
+        and len(details[2]["findings"]) == 4,
+        text,
+    )
+
+    with tempfile.TemporaryDirectory(prefix="hc-scan-") as temporary:
+        directory = Path(temporary)
+        for name, content in reports.items():
+            (directory / f"{name}.json").write_text(json.dumps(content), encoding="utf-8")
+
+        out = directory / "vulnerabilities.md"
+        output = harness.run(
+            [
+                sys.executable,
+                ROOT / "release" / "scan.py",
+                "summary",
+                directory,
+                "--scanner",
+                "OSV-Scanner 9.9.9",
+                "--out",
+                out,
+            ]
+        )
+        suite.check(
+            "release/scan.py summary writes the section and vulnerabilities.json",
+            output.ok
+            and out.read_text(encoding="utf-8").startswith("## Known vulnerabilities")
+            and len(json.loads((directory / "vulnerabilities.json").read_text(encoding="utf-8"))) == 3,
+            output.text,
+        )
+
+
 def run_checks(suite: Suite) -> None:
     suite.section("the version")
     check_versions(suite)
@@ -417,6 +556,9 @@ def run_checks(suite: Suite) -> None:
 
     suite.section("the descriptions and the checksums")
     check_notes_and_checksums(suite)
+
+    suite.section("known vulnerabilities")
+    check_scan(suite)
 
 
 if __name__ == "__main__":

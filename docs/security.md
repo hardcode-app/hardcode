@@ -139,6 +139,15 @@ vscode has no route out and no capability to make one.
   job, which builds nothing and runs only the Tauri CLI's signer over the
   finished installers: the app's builds, and the hundreds of crates' build
   scripts they run, never hold it.
+- **Known vulnerabilities are reported with every build.** A release's
+  and a development build's description ends with what OSV-Scanner finds
+  in what HardCode is built from (the app's crates, the Python pins) and in
+  the images that are its boundary (squid, the gateway, the admin, CoreDNS,
+  the Docker sidecar), with the full list as `vulnerabilities.json`. The
+  scanner, checksum-pinned in the build image, runs with no network, no
+  token and a read-only filesystem against databases downloaded before it
+  starts, so a compromised scanner could only misreport. Findings don't
+  stop a release: a base image always carries some nobody has fixed yet.
 - **Releases are built from nothing cached.** Any job that runs on `main`
   can write to the repository's Actions cache: CI's, and with it any build
   script or tool those jobs run. The release workflow restores none of it

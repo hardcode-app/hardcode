@@ -9,8 +9,8 @@ compromised release usually takes to be found and pulled.
         published; fails when one is younger than a week, or its age can't
         be told (CI runs it on every pull request)
     maintenance/pins.py vendor [--write] [--message FILE]
-        the build image's vendor binaries (kind, kubectl, helm, the Tauri
-        CLI): the newest release of each that is a week old, with its
+        the build image's vendor binaries (kind, kubectl, helm, OSV-Scanner,
+        the Tauri CLI): the newest release of each that is a week old, with its
         publisher's checksums; --write puts them in images/build/Dockerfile,
         and --message writes the commit message that proposes them
 
@@ -121,6 +121,12 @@ VENDORS = [
             "AMD64": "url:https://get.helm.sh/helm-v{version}-linux-amd64.tar.gz.sha256sum",
             "ARM64": "url:https://get.helm.sh/helm-v{version}-linux-arm64.tar.gz.sha256sum",
         },
+    ),
+    Vendor(
+        arg="OSV_SCANNER",
+        repository="google/osv-scanner",
+        tag="v{version}",
+        checksums={"AMD64": "asset:osv-scanner_linux_amd64", "ARM64": "asset:osv-scanner_linux_arm64"},
     ),
     Vendor(
         arg="TAURI_CLI",

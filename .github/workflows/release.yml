@@ -10,7 +10,9 @@
 # which the next one replaces, the images' edge and sha-<commit> tags, and
 # an X.Y.Z-dev.N chart. A manual run from another branch builds everything
 # and publishes nothing. Linux builds happen in the build image
-# (images/build), like everything else. Nothing is restored from a cache:
+# (images/build), like everything else. Each description ends with the
+# known vulnerabilities in what was built and the images that are the
+# boundary (the scan job; OSV-Scanner, sealed). Nothing is restored from a cache:
 # any job on main (CI's, a dependency's build script in one) can write a
 # cache entry, and a release builds only from the commit and what it
 # downloads.
@@ -412,6 +414,61 @@ jobs:
           name: chart
           path: dist/*.tgz
 
+  # Known vulnerabilities in what the build is made from (the lock files)
+  # and in the images that are HardCode's boundary, as published: squid,
+  # the gateway, the admin, CoreDNS and the Docker sidecar. The job holds no
+  # secret and can only read; OSV-Scanner runs sealed (release/scan.sh: no
+  # network, no token, read-only), so a compromised scanner could only lie
+  # in its report. Reported in the description, not blocking.
+  scan:
+    name: Known vulnerabilities
+    needs: [version, images]
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      packages: read
+    env:
+      PREFIX: ${{ needs.version.outputs.prefix }}
+      IMAGE_TAG: ${{ needs.version.outputs.image-tag }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: ./.github/actions/build-image
+        with:
+          cache: false
+      - name: The images, as this run published them
+        if: env.IMAGE_TAG != ''
+        env:
+          TOKEN: ${{ github.token }}
+          ACTOR: ${{ github.actor }}
+        run: |
+          mkdir -p dist/scan/images
+          echo "$TOKEN" | docker login ghcr.io --username "$ACTOR" --password-stdin
+          images/build/run.sh release/scan.py images --prefix "$PREFIX" --tag "$IMAGE_TAG" > "$RUNNER_TEMP/images.txt"
+          while read -r name reference; do
+            docker pull --quiet "$reference"
+            docker save --output "dist/scan/images/$name.tar" "$reference"
+          done < "$RUNNER_TEMP/images.txt"
+          docker logout ghcr.io
+      - name: OSV's databases
+        run: images/build/run.sh release/scan.py databases dist/scan/db
+      - name: Scan, sealed
+        run: |
+          mkdir -p dist/scan/images dist/scan/reports
+          release/scan.sh dist/scan/db dist/scan/images dist/scan/reports
+      - name: The description's section
+        run: |
+          version="$(sed -n 's/^ARG OSV_SCANNER_VERSION=//p' images/build/Dockerfile)"
+          images/build/run.sh release/scan.py summary dist/scan/reports --scanner "OSV-Scanner $version" --out dist/scan/vulnerabilities.md
+          cat dist/scan/vulnerabilities.md >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: vulnerabilities
+          path: |
+            dist/scan/vulnerabilities.md
+            dist/scan/vulnerabilities.json
+          if-no-files-found: error
+
   # The updater's signatures, made apart from every build: this job builds
   # nothing, holds the key, and runs only the Tauri CLI's signer (the build
   # image's, checksum-pinned) over the installers the app jobs made.
@@ -451,7 +508,7 @@ jobs:
     name: GitHub Release
     # After sign, which is skipped when the release has no updater.
     if: ${{ !failure() && !cancelled() && needs.version.outputs.version != '' }}
-    needs: [version, images, app-linux, app-native, cli-linux, cli-native, chart, sign]
+    needs: [version, images, app-linux, app-native, cli-linux, cli-native, chart, sign, scan]
     runs-on: ubuntu-latest
     timeout-minutes: 20
     permissions:
@@ -469,15 +526,23 @@ jobs:
           pattern: "{app-*,cli-*,chart,signatures}"
           path: dist/release
           merge-multiple: true
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: vulnerabilities
+          path: dist/vulnerabilities
       # The builds' files out of their folders, the source, latest.json for
       # the app's updater (when the installers are signed), the
-      # description, and every file's checksum, last.
+      # description with the known vulnerabilities, and every file's
+      # checksum, last.
       - name: Assemble (in the build image)
         run: |
           images/build/run.sh release/release.py gather dist/release
           images/build/run.sh git archive --format=tar.gz --prefix="hardcode-$VERSION/" --output="dist/release/hardcode-$VERSION-source.tar.gz" HEAD
           images/build/run.sh release/release.py manifest --version "$VERSION" --repository "$GITHUB_REPOSITORY" dist/release
           images/build/run.sh release/release.py notes --version "$VERSION" --repository "$GITHUB_REPOSITORY" dist/notes.md
+          printf '\n' >> dist/notes.md
+          cat dist/vulnerabilities/vulnerabilities.md >> dist/notes.md
+          cp dist/vulnerabilities/vulnerabilities.json dist/release/
           images/build/run.sh release/release.py checksums dist/release
       # A prerelease (vX.Y.Z-N) isn't "latest": the app's updater skips it.
       - uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3.0.3
@@ -494,7 +559,7 @@ jobs:
   dev-release:
     name: Development build
     if: needs.version.outputs.dev == 'true'
-    needs: [version, images, app-linux, app-native, cli-linux, cli-native, chart]
+    needs: [version, images, app-linux, app-native, cli-linux, cli-native, chart, scan]
     runs-on: ubuntu-latest
     timeout-minutes: 20
     # One replacement at a time.
@@ -516,10 +581,17 @@ jobs:
           pattern: "{app-*,cli-*,chart}"
           path: dist/dev
           merge-multiple: true
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: vulnerabilities
+          path: dist/vulnerabilities
       - name: Assemble (in the build image)
         run: |
           images/build/run.sh release/release.py gather dist/dev
           images/build/run.sh release/release.py dev-notes --commit "$COMMIT" --chart "$CHART" --repository "$GITHUB_REPOSITORY" dist/dev-notes.md
+          printf '\n' >> dist/dev-notes.md
+          cat dist/vulnerabilities/vulnerabilities.md >> dist/dev-notes.md
+          cp dist/vulnerabilities/vulnerabilities.json dist/dev/
           images/build/run.sh release/release.py checksums dist/dev
       - name: Replace the last development build
         env:

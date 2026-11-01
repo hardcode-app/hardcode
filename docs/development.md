@@ -16,7 +16,7 @@ app/src/                    the desktop app's page; app/src-tauri/ the Rust shel
 admin/hardcode_admin/       the operator and admin API (Flask); admin/tests/
 helm/hardcode/              the chart: CRD, operator, profiles
 tests/                      the test suites, in Python (commits.py, lint.py, cli.py, app.py, admin.py, proxy.py, images.py, helm.py, release.py, maintenance.py, e2e_kind.py, run_all.py), their shared harness.py and their fixtures/
-release/                    a release's steps (release.py), its notes (notes.md, dev-notes.md), and the updater's public key (updater.pub, once there is one)
+release/                    a release's steps (release.py), its known vulnerabilities (scan.py, scan.sh), its notes (notes.md, dev-notes.md), and the updater's public key (updater.pub, once there is one)
 maintenance/                what keeps dependencies moving: what is pinned and how old (pins.py), and which updates merge themselves (merge.py)
 docs/                       this documentation; docs/images/ the screenshots; docs/tools/ how they are made
 assets/                     the icon
@@ -170,7 +170,7 @@ release to be found first:
 |---|---|
 | The app's crates, the Python pins (`cli/requirements.txt`, the build image's), the actions | Dependabot, weekly, one grouped pull request per ecosystem |
 | The images: CoreDNS and the Docker sidecar (`compose.yaml` and the chart's `docker.image`, `coredns.image`), the Dockerfiles' base | Dependabot, weekly, one pull request for all of them |
-| The build image's vendor binaries: kind, kubectl, helm, the Tauri CLI | `maintenance/pins.py vendor`, weekly ([`dependencies.yml`](../.github/workflows/dependencies.yml)), as the `pins/vendor-binaries` pull request, with each publisher's checksums |
+| The build image's vendor binaries: kind, kubectl, helm, OSV-Scanner, the Tauri CLI | `maintenance/pins.py vendor`, weekly ([`dependencies.yml`](../.github/workflows/dependencies.yml)), as the `pins/vendor-binaries` pull request, with each publisher's checksums |
 
 **A week old, always.** Dependabot proposes a release only once it is seven
 days old (its `cooldown`; security updates aren't held back), and so does

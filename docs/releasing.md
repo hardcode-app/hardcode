@@ -34,6 +34,7 @@ git push origin v1.2.0
 | The `hardcode` command | `hardcode-linux-x64`, `hardcode-macos-arm64`, `hardcode-win-x64.exe` (one file each, the stack inside), and the Python package `hardcode_cli-X.Y.Z-py3-none-any.whl` (`pipx install` it) |
 | Kubernetes | the chart `hardcode-X.Y.Z.tgz`, also at `oci://ghcr.io/<owner>/charts/hardcode`, with its images set to `ghcr.io/<owner>/hardcode-{vscode,squid,gateway,admin}:X.Y.Z` (also tagged `X.Y` and `latest`) |
 | The source | `hardcode-X.Y.Z-source.tar.gz`, the tag's files (`git archive`); GitHub attaches its own archives as well |
+| Known vulnerabilities | `vulnerabilities.json`, each finding in the lock files and the boundary's images, and a summary at the end of the description ([below](#known-vulnerabilities)) |
 | Checksums | `SHA256SUMS`, every file's: `sha256sum -c SHA256SUMS --ignore-missing` |
 
 The release's description is [`release/notes.md`](../release/notes.md)
@@ -54,6 +55,29 @@ any job on `main` can write one, so the build image, the images, the app
 and its crates are built from scratch each time
 ([security](security.md)). That makes a release slower than CI's runs,
 which keep their caches.
+
+## Known vulnerabilities
+
+Every release and development build is scanned before it is published, by
+the *Known vulnerabilities* job: the lock files (`Cargo.lock`, the Python
+pins), and the images that are HardCode's boundary as the run published
+them (squid, the gateway, the admin) and as `compose.yaml` pins them
+(CoreDNS, the Docker sidecar). The VS Code image is what the sandbox
+contains, and isn't scanned.
+
+The job holds no secret and can only read. `release/scan.py databases`
+downloads OSV's databases (crates.io, PyPI, Go, Alpine, Debian, Ubuntu), the images
+are pulled and saved as archives, and then `release/scan.sh` runs
+OSV-Scanner (the build image's, checksum-pinned) in a container with no
+network, no token, no capabilities and a read-only filesystem: a
+compromised scanner could misreport, and nothing more.
+`release/scan.py summary` turns its reports into the description's last
+section (a count by severity for each thing scanned, and what a newer
+version fixes) and `vulnerabilities.json`. The findings are reported, not
+blocking; the job's own failure stops the release, as any job's does.
+
+To scan a checkout: `release/scan.py databases`, `docker save` the images
+into a folder, then `release/scan.sh DATABASES IMAGES REPORTS`.
 
 ## Development builds
 
