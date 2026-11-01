@@ -429,14 +429,18 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: ./.github/actions/build-image
+      # The builds' files only: not the build records Docker's builds upload.
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
+          pattern: "{app-*,cli-*,chart}"
           path: dist/release
           merge-multiple: true
-      # The source, latest.json for the app's updater (when the installers
-      # are signed), the description, and every file's checksum, last.
+      # The builds' files out of their folders, the source, latest.json for
+      # the app's updater (when the installers are signed), the
+      # description, and every file's checksum, last.
       - name: Assemble (in the build image)
         run: |
+          images/build/run.sh release/release.py gather dist/release
           images/build/run.sh git archive --format=tar.gz --prefix="hardcode-$VERSION/" --output="dist/release/hardcode-$VERSION-source.tar.gz" HEAD
           images/build/run.sh release/release.py manifest --version "$VERSION" --repository "$GITHUB_REPOSITORY" dist/release
           images/build/run.sh release/release.py notes --version "$VERSION" --repository "$GITHUB_REPOSITORY" dist/notes.md
@@ -470,12 +474,15 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: ./.github/actions/build-image
+      # The builds' files only: not the build records Docker's builds upload.
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
+          pattern: "{app-*,cli-*,chart}"
           path: dist/dev
           merge-multiple: true
       - name: Assemble (in the build image)
         run: |
+          images/build/run.sh release/release.py gather dist/dev
           images/build/run.sh release/release.py dev-notes --commit "$COMMIT" --chart "$CHART" --repository "$GITHUB_REPOSITORY" dist/dev-notes.md
           images/build/run.sh release/release.py checksums dist/dev
       - name: Replace the last development build
