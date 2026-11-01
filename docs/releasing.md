@@ -49,6 +49,12 @@ Tauri CLI (the build image's version) as the build image has. macOS builds
 are unsigned unless the `APPLE_CERTIFICATE`, `APPLE_CERTIFICATE_PASSWORD`
 and `APPLE_SIGNING_IDENTITY` secrets hold a certificate.
 
+Nothing in a release (or a development build) is restored from a cache:
+any job on `main` can write one, so the build image, the images, the app
+and its crates are built from scratch each time
+([security](security.md)). That makes a release slower than CI's runs,
+which keep their caches.
+
 ## Development builds
 
 A manual run from `main` (Actions → Release → Run workflow, or
