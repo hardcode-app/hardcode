@@ -97,8 +97,6 @@ spec:
                   type: string
                   description: The VS Code image (defaults to the operator's profileDefaults.image).
                 squidImage: { type: string }
-                dockerImage: { type: string }
-                corednsImage: { type: string }
                 imagePullPolicy: { type: string, enum: [Always, IfNotPresent, Never] }
                 imagePullSecrets:
                   type: array
@@ -126,8 +124,13 @@ spec:
                   properties:
                     enabled: { type: boolean }
                     privileged: { type: boolean }
+                    image: { type: string, description: The Docker sidecar's image (defaults to the operator's profileDefaults.docker.image). }
                     size: { type: string }
                     storageClass: { type: string }
+                coredns:
+                  type: object
+                  properties:
+                    image: { type: string, description: The CoreDNS image (defaults to the operator's profileDefaults.coredns.image). }
                 resources:
                   type: object
                   description: The VS Code container's resources. A memory limit is always applied (the operator's default when none is given).

@@ -211,6 +211,21 @@ def _pick(spec: dict, defaults: dict, *keys: str, fallback: Any = None) -> Any:
     return fallback
 
 
+def pinned_image(spec: dict, key: str, name: str) -> str:
+    """
+    The image the effective *spec* has under *key*. The chart pins it
+    (``profileDefaults.<name>``), as compose.yaml does, and the operator
+    keeps no copy of its own to fall out of step: without one, the
+    ``ValueError`` says which is missing, and the operator reports it on
+    the profile.
+    """
+    image = spec.get(key)
+    if not image:
+        raise ValueError(f"no {name}: neither the profile's spec nor the chart's profileDefaults sets it")
+
+    return image
+
+
 def with_memory_limit(resources: Any, default: dict) -> dict:
     """
     *resources* as given, but never without a memory limit.
@@ -249,6 +264,10 @@ def effective_spec(profile: dict, defaults: Optional[dict] = None) -> dict:
     The profile's spec, with the operator's defaults filled in, and
     ``proxyAllowlist``: the allowlist the proxy is given, the profile's own
     (``allowlist``) with the entries this HardCode provides to its languages.
+
+    The Docker sidecar's and CoreDNS's images have no built-in default: the
+    chart pins them (``profileDefaults``), and they are None without one
+    (``pinned_image`` refuses to render them).
     """
     spec = profile.get("spec") or {}
 
@@ -268,8 +287,8 @@ def effective_spec(profile: dict, defaults: Optional[dict] = None) -> dict:
     return {
         "image": pick("image", fallback="hardcode-vscode:latest"),
         "squidImage": pick("squidImage", fallback="hardcode-squid:latest"),
-        "dockerImage": pick("dockerImage", fallback="docker:29-dind-rootless"),
-        "corednsImage": pick("corednsImage", fallback="coredns/coredns:1.15.0"),
+        "dockerImage": pick("docker", "image"),
+        "corednsImage": pick("coredns", "image"),
         "imagePullPolicy": pick("imagePullPolicy", fallback="IfNotPresent"),
         "imagePullSecrets": pick("imagePullSecrets", fallback=[]),
         "allowlist": own_allowlist,
@@ -639,7 +658,7 @@ def _coredns_deployment(build: _Build) -> dict:
 
     coredns = {
         "name": "coredns",
-        "image": spec["corednsImage"],
+        "image": pinned_image(spec, "corednsImage", "coredns.image"),
         "imagePullPolicy": spec["imagePullPolicy"],
         "args": ["-conf", "/etc/coredns/Corefile"],
         "ports": [
@@ -778,7 +797,7 @@ def _docker_container(build: _Build) -> dict:
 
     return {
         "name": "docker",
-        "image": spec["dockerImage"],
+        "image": pinned_image(spec, "dockerImage", "docker.image"),
         "imagePullPolicy": spec["imagePullPolicy"],
         "env": proxy_env(build.proxy_url)
         + [

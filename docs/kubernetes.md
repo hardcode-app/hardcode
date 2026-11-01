@@ -71,7 +71,7 @@ exist; afterwards accounts live in the `hardcode-admin-users` Secret.
 | `admin.trustedProxies` | `[]` | addresses/CIDRs (the Ingress controller's pods or nodes) whose `X-Forwarded-For` the login throttle believes, read from the right (the first address none of them added is the client); from anyone else the header is ignored |
 | `admin.resources`, `.nodeSelector`, `.tolerations` | 96Mi request / 256Mi limit | |
 | `imagePullSecrets` | `[]` | for the admin image |
-| `profileDefaults.image`, `.squidImage`, `.dockerImage`, `.corednsImage` | `hardcode-vscode:latest`, `hardcode-squid:latest`, `docker:29-dind-rootless`, `coredns/coredns:1.15.0` | images every profile uses unless its spec says otherwise |
+| `profileDefaults.image`, `.squidImage`, `.docker.image`, `.coredns.image` | `hardcode-vscode:latest`, `hardcode-squid:latest`, `docker:29-dind-rootless`, `coredns/coredns:1.15.0` | images every profile uses unless its spec says otherwise. The last two are pinned as `compose.yaml` pins them (Dependabot moves both together), and the operator has no copy of its own: a profile whose Docker sidecar or CoreDNS has no image is reported with an error |
 | `profileDefaults.imagePullPolicy`, `.imagePullSecrets` | `IfNotPresent`, `[]` | |
 | `profileDefaults.languages` | `[]` (all of them) | the languages and tools of a profile that doesn't list its own (`spec.languages`); see [Languages on Kubernetes](#languages-on-kubernetes) |
 | `profileDefaults.upstreamDNS` | `/etc/resolv.conf` | where allowlisted names resolve (the node's resolvers), or IPs |
@@ -107,7 +107,7 @@ spec:
 | `allowlist` | empty (the UI starts new profiles from the template) | the egress policy |
 | `languages` | `profileDefaults.languages`, or all of them | the languages and tools the profile is built around: `python`, `node`, `java`, `dotnet`, `go`, `rust`, `cpp`, `ruby`, `perl`, `build_essentials`, `docker`, `claude_cli`, `codex_cli` (an empty list: none). They decide the VS Code container's VS Code extensions and the allowlist entries HardCode provides. See below |
 | `extensions` | `[]` | VS Code extensions of the profile's own (`publisher.name`, up to 100), kept installed besides those every VS Code container has and those of its languages; a change is installed or removed in the running container, without a restart; only publishers with a domain the Marketplace has verified |
-| `image`, `squidImage`, `dockerImage`, `corednsImage`, `imagePullPolicy`, `imagePullSecrets` | `profileDefaults` | images |
+| `image`, `squidImage`, `docker.image`, `coredns.image`, `imagePullPolicy`, `imagePullSecrets` | `profileDefaults` | images |
 | `suspended` | `false` | scale the VS Code container, squid and CoreDNS to 0; volumes stay |
 | `user` | `dev` | the VS Code container user (the image's `USERNAME`); sets the home mount path |
 | `upstreamDNS`, `internalRanges`, `clientRanges` | `profileDefaults` | |

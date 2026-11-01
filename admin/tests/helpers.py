@@ -8,9 +8,36 @@ from __future__ import annotations
 import copy
 import json
 from datetime import datetime, timezone
+from pathlib import Path
+
+import yaml
 
 from hardcode_admin.auth import StoreConflict
 from hardcode_admin.k8s import ApiError
+
+VALUES = Path(__file__).resolve().parent.parent.parent / "helm" / "hardcode" / "values.yaml"
+
+
+def chart_defaults(overrides: dict | None = None) -> dict:
+    """
+    The chart's profileDefaults, as the operator is given them, with
+    *overrides* merged in: a dict into a dict, key by key, anything else
+    replaced.
+    """
+
+    def merged(base: dict, changes: dict) -> dict:
+        result = copy.deepcopy(base)
+        for key, value in changes.items():
+            if isinstance(value, dict) and isinstance(result.get(key), dict):
+                result[key] = merged(result[key], value)
+            else:
+                result[key] = copy.deepcopy(value)
+
+        return result
+
+    values = yaml.safe_load(VALUES.read_text(encoding="utf-8"))
+
+    return merged(values["profileDefaults"], overrides or {})
 
 
 class FakeK8s:
