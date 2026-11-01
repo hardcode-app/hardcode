@@ -336,7 +336,10 @@ jobs:
             binary="$binary.exe"
           fi
           "$binary" --version
-          HARDCODE_CONFIG="$RUNNER_TEMP/home" "$binary" profile add smoke --lang ""
+
+          # With no Docker daemon to ask: the runner's own networks (Windows
+          # containers', on Windows) aren't what the profile is checked against.
+          DOCKER_HOST=tcp://127.0.0.1:9 HARDCODE_CONFIG="$RUNNER_TEMP/home" "$binary" profile add smoke --lang ""
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: cli-${{ matrix.target }}
