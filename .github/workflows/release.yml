@@ -235,6 +235,14 @@ jobs:
           APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
           APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
         run: |
+          # A secret that isn't there is an empty variable, and Tauri signs
+          # whenever APPLE_CERTIFICATE is set, to nothing too: unset them.
+          for name in APPLE_CERTIFICATE APPLE_CERTIFICATE_PASSWORD APPLE_SIGNING_IDENTITY; do
+            if [ -z "${!name}" ]; then
+              unset "$name"
+            fi
+          done
+
           configs=(--config src-tauri/tauri.release.conf.json)
           if [ -n "$VERSION" ]; then
             configs+=(--config src-tauri/tauri.updater.conf.json)
