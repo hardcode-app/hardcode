@@ -1,5 +1,22 @@
 version: 2
 
+# Every update is a week old before it is proposed (cooldown: a compromised
+# release is usually found and pulled within days), and grouped: one pull
+# request per ecosystem a week at most. Security updates aren't held back.
+# CI's Pin ages job checks every pin a pull request changes is a week old
+# too, transitive crates included, and maintenance/merge.py merges the patch
+# and minor updates that pass (docs/development.md, "Dependencies").
+#
+# The images move together, in one pull request: Ubuntu's dated builds
+# (resolute-YYYYMMDD) in the Dockerfiles, and CoreDNS and the Docker sidecar
+# in compose.yaml and in the chart's values (keys named "image", which is
+# what Dependabot reads there). Its updates leave their commit message and
+# schedule to the group: Dependabot refuses them on the updates.
+multi-ecosystem-groups:
+  images:
+    schedule: { interval: weekly }
+    commit-message: { prefix: build, include: scope }
+
 # Its commits follow Conventional Commits like everyone's (tests/commits.py):
 # build(deps): bump ..., and ci(deps) for the actions.
 updates:
@@ -7,31 +24,38 @@ updates:
     directory: /app/src-tauri
     commit-message: { prefix: build, include: scope }
     schedule: { interval: weekly }
+    cooldown: { default-days: 7 }
     groups:
       app: { patterns: ["*"] }
   - package-ecosystem: pip
     directories: ["/admin", "/cli", "/images/build"]
     commit-message: { prefix: build, include: scope }
     schedule: { interval: weekly }
+    cooldown: { default-days: 7 }
+    groups:
+      python: { patterns: ["*"] }
   # Local composite actions aren't followed from the workflows that use them:
-  # each one's folder is listed.
+  # each one's folder is listed. An action is code the workflows run with
+  # their tokens: these are never merged without a person.
   - package-ecosystem: github-actions
     directories: ["/", "/.github/actions/build-image"]
     commit-message: { prefix: ci, include: scope }
     schedule: { interval: weekly }
-  # coredns and docker (dind) are pinned in compose.yaml, in the chart's
-  # values.yaml and as the operator's fallbacks in
-  # admin/hardcode_admin/manifests.py. Dependabot moves the first only (its
-  # Helm support reads values keys named "image", and the chart's are
-  # corednsImage and dockerImage, as in the Profile's spec): the other two
-  # follow by hand, in its pull request, and the admin tests fail until the
-  # three agree.
-  - package-ecosystem: docker-compose
-    directory: /
-    commit-message: { prefix: build, include: scope }
-    schedule: { interval: weekly }
-  # The images' base: ubuntu.
+    cooldown: { default-days: 7 }
+    groups:
+      actions: { patterns: ["*"] }
   - package-ecosystem: docker
     directories: ["/images/vscode", "/images/squid", "/images/gateway", "/images/admin", "/images/build"]
-    commit-message: { prefix: build, include: scope }
-    schedule: { interval: weekly }
+    patterns: ["*"]
+    multi-ecosystem-group: images
+    cooldown: { default-days: 7 }
+  - package-ecosystem: docker-compose
+    directory: /
+    patterns: ["*"]
+    multi-ecosystem-group: images
+    cooldown: { default-days: 7 }
+  - package-ecosystem: helm
+    directory: /helm/hardcode
+    patterns: ["*"]
+    multi-ecosystem-group: images
+    cooldown: { default-days: 7 }

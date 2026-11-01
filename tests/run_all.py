@@ -11,6 +11,7 @@ Every test suite, one after the other, in the build image.
     tests/images.py    the VS Code image's start-up scripts: the SSH proxy stanza, home seeding
     tests/helm.py      the Helm chart: lint and the rendered objects
     tests/release.py   the release's steps: the version, the updater's configuration, latest.json, checksums
+    tests/maintenance.py  the dependency scripts: pins and their ages, vendor releases, which updates merge
     tests/e2e_kind.py  the operator and admin on a real local kind cluster (opt in with E2E=1)
 """
 
@@ -23,7 +24,7 @@ import sys
 import harness
 from harness import ROOT
 
-SUITES = ["commits", "lint", "cli", "app", "admin", "proxy", "images", "helm", "release"]
+SUITES = ["commits", "lint", "cli", "app", "admin", "proxy", "images", "helm", "release", "maintenance"]
 
 
 def main() -> int:

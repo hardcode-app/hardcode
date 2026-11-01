@@ -15,11 +15,12 @@ cli/hardcode_cli/           the Python package; cli/tests/ its unit tests; cli/p
 app/src/                    the desktop app's page; app/src-tauri/ the Rust shell
 admin/hardcode_admin/       the operator and admin API (Flask); admin/tests/
 helm/hardcode/              the chart: CRD, operator, profiles
-tests/                      the test suites, in Python (commits.py, lint.py, cli.py, app.py, admin.py, proxy.py, images.py, helm.py, release.py, e2e_kind.py, run_all.py), their shared harness.py and their fixtures/
-release/                    a release's steps (release.py), its notes (notes.md), and the updater's public key (updater.pub, once there is one)
+tests/                      the test suites, in Python (commits.py, lint.py, cli.py, app.py, admin.py, proxy.py, images.py, helm.py, release.py, maintenance.py, e2e_kind.py, run_all.py), their shared harness.py and their fixtures/
+release/                    a release's steps (release.py), its notes (notes.md, dev-notes.md), and the updater's public key (updater.pub, once there is one)
+maintenance/                what keeps dependencies moving: what is pinned and how old (pins.py), and which updates merge themselves (merge.py)
 docs/                       this documentation; docs/images/ the screenshots; docs/tools/ how they are made
 assets/                     the icon
-.github/workflows/          CI and release
+.github/workflows/          CI, the release, and the dependency updates (dependencies.yml)
 pyproject.toml              Python formatting and lint settings (ruff, then isort; tests/lint.py --fix applies them)
 AGENTS.md                   ground rules for anyone changing the code
 ```
@@ -156,6 +157,47 @@ The app is run where it's installed, not in the container (it drives the
 Docker of the machine it runs on): from the launcher `app/build.sh bundle`
 writes on a Linux desktop (it starts the release build), or install the
 `.deb`, or run the AppImage.
+
+## Dependencies
+
+Nobody pins by hand. Everything that builds HardCode is pinned exactly (a
+crate's version in `Cargo.lock`, a Python package's `==`, an action's
+commit, an image's tag, a vendor binary's version and checksums), and
+something moves each pin, at a pace that leaves time for a compromised
+release to be found first:
+
+| What | Moved by |
+|---|---|
+| The app's crates, the Python pins (`cli/requirements.txt`, the build image's), the actions | Dependabot, weekly, one grouped pull request per ecosystem |
+| The images: CoreDNS and the Docker sidecar (`compose.yaml` and the chart's `docker.image`, `coredns.image`), the Dockerfiles' base | Dependabot, weekly, one pull request for all of them |
+| The build image's vendor binaries: kind, kubectl, helm, the Tauri CLI | `maintenance/pins.py vendor`, weekly ([`dependencies.yml`](../.github/workflows/dependencies.yml)), as the `pins/vendor-binaries` pull request, with each publisher's checksums |
+
+**A week old, always.** Dependabot proposes a release only once it is seven
+days old (its `cooldown`; security updates aren't held back), and so does
+the vendor binaries' workflow. CI's *Pin ages* job then looks up every pin a
+pull request changes where it was published (crates.io, PyPI, Docker Hub,
+GitHub's releases), the crates a lock file update pulls in included, and
+fails if one is younger than a week or can't be dated
+(`maintenance/pins.py ages`). The actions aren't aged there: Dependabot's
+cooldown holds them, and a person merges them.
+
+**Merged without anyone, when nothing needs anyone.** After every CI run,
+and daily, `maintenance/merge.py` merges, by rebase, each dependency update
+whose CI passed on its newest commit, that is up to date with `main`, and
+whose updates are all patch or minor ones (or a newer dated build of the
+same image). One behind `main` gets `@dependabot rebase`; one whose only
+failure was its pin-age check gets that job run again a day later. What is
+left for a person: a major update, any action (each is new code the
+workflows run with their tokens), a pull request with anyone else's
+commit, and anything that failed. `maintenance/merge.py --dry-run` says
+what it would do.
+
+The two jobs that act hold a write token, so they run nothing but those
+two scripts, on the runner's own Python: no build image, no cache. Pushes
+and merges made with a workflow's token start no workflow, so the vendor
+binaries' workflow starts CI on its branch itself; GitHub must also allow
+workflows to open pull requests (Settings → Actions → General → *Allow
+GitHub Actions to create and approve pull requests*).
 
 ## Versioning
 

@@ -16,6 +16,7 @@ E2E=1 tests/run_all.py    # … plus the operator end to end on a local kind clu
 | `tests/images.py` | the VS Code image's start-up scripts without the image: the SSH proxy stanza expanded by the real OpenSSH client; the Kubernetes home-seeding script run as uid 1000 onto a root-owned, world-writable volume root; the VS Code extensions the running container installs from the profile's list (the first start with dependencies and pack members, a language switched off, the profile's own extensions, an unverified publisher refused before it is ever installed and remembered, a verified extension refused before anything is installed when something it pulls in isn't, a package pulling in more than the Marketplace lists removed whole on arrival, a time limit on every Marketplace query, a reviewed exception, an unreachable Marketplace and the retry, extensions the user installed left alone, a list caught half-written, and the watcher picking up a change within seconds), run for real against a fake VS Code CLI and a fake Marketplace; and `images/build/run.sh`'s CPU cap, never above what the Docker daemon has, against a fake `docker` | the build image (`ssh` there; Docker through the socket) | the script, and `tests/fixtures/fake_code.py`, `fake_marketplace_curl.py`, `fake_docker.py` |
 | `tests/helm.py` | chart lint (with and without a bootstrap admin), rendering, the rendered objects | the build image | the script |
 | `tests/release.py` | the steps of a release that aren't a build (`release/release.py`): the version in every file that carries one, and stamped into all of them and nothing else; the updater's configuration (none without `release/updater.pub`; with it, HTTPS, the newest release, versions signed); `latest.json` from installers signed with a throwaway key (every installer, the defaults, each signature carrying its version, a missing one stopping the release); the description and `SHA256SUMS` | the build image (the Tauri CLI signs) | the script |
+| `tests/maintenance.py` | the scripts that keep dependencies moving (`maintenance/`), without the network: the checkout's pins (crates, Python packages, images, the build image's vendor binaries) and what isn't one (our images, variables, build stages); each pin dated where it was published (fake crates.io, PyPI, Docker Hub and GitHub), a digest the tag has moved on from or another registry refused; only what a change brings aged, in a throwaway git repository (a week old passes, two days old fails); each vendor binary moved to its newest release a week old (not a younger one, a prerelease or another package's), with its publisher's checksums and a commit message carrying Dependabot's metadata; and which updates merge themselves against a fake GitHub (a green patch update by rebase at the commit CI ran; actions, majors and a person's commit left; a dated image build not taken for a major; one rebase request per commit; a pin-age failure run again a day later; a refusal kept to its pull request) | the build image (git) | the script |
 | `tests/e2e_kind.py` | the chart installed on kind with the admin and squid images built from the checkout (`SQUID_IMAGE` to use another): TOTP sign-in through the API, the chart's profile reconciled (all 15 resources, the DNS ClusterIP in the VS Code container pod, squid and CoreDNS ready for real), a profile created with an Ingress and the Ingress removed when its host is cleared, bulk edits rolled into the ConfigMap, with the entries HardCode provides added by the operator and one switched off through the API commented out there, **the NetworkPolicies enforced** (a capped probe pod in the VS Code container's network position reaches its own squid and DNS and nothing else: not another profile's proxy, the admin, cluster DNS or the internet; kind's own CNI enforces policies), suspend, delete. What no test on kind can cover is the node-exception traffic Kubernetes allows regardless of policy | the build image (kind, kubectl and helm there; Docker through the socket) | the script, and the probe in `tests/fixtures/network_probe.py` |
 
 Every suite is a Python script that prints `ok`/`FAIL` lines and ends with
@@ -101,22 +102,18 @@ workstation; a runner needs nothing but Docker:
 | Proxy policy and image scripts | `tests/proxy.py`, then `tests/images.py` |
 | Helm chart | `tests/helm.py` |
 | Release steps | `tests/release.py` |
+| Maintenance scripts | `tests/maintenance.py` |
+| Pin ages | pull requests only: `maintenance/pins.py ages` against the base branch, so every pin the pull request changes must be a week old where it was published ([development.md](development.md#dependencies)) |
 | Images build | squid, gateway, admin, and a minimal VS Code image (every language off) with a BuildKit cache |
 | Operator end-to-end (kind) | `tests/e2e_kind.py`: the cluster is created in the job, its node capped at 6g |
 
-Dependabot keeps current the Rust crates; the Python packages (the
-admin's, the build image's, and `cli/requirements.txt`, what the jobs
-outside the build image install); the actions, pinned by commit SHA (the
-workflows' and the build-image composite action's); the Dockerfiles' base
-images; and the coredns and docker images in `compose.yaml`. Those two are
-pinned in the chart's `values.yaml` and as the operator's fallbacks
-(`admin/hardcode_admin/manifests.py`) too, which Dependabot doesn't move:
-they follow by hand, in its pull request, and the admin tests fail until
-all three agree. The binaries the build
-image pins by checksum (kind, kubectl, helm, the Tauri CLI) are bumped by
-hand in its Dockerfile; the release's macOS and Windows builds take the
-Tauri CLI's version and PyInstaller's pin from the build image's files. The
-release workflow's jobs hold only the permissions they publish with.
+Dependencies move by themselves, a week old at the earliest, and the
+updates that need no one merge themselves: [development.md](development.md#dependencies)
+says how. The admin tests check that `compose.yaml` and the chart pin the
+same CoreDNS and Docker images, which Dependabot moves in one pull
+request. The release's macOS and Windows builds take the Tauri CLI's
+version and PyInstaller's pin from the build image's files. The release
+workflow's jobs hold only the permissions they publish with.
 
 ## Releases
 
