@@ -270,7 +270,14 @@ def allocate(
     while third > 0 and _overlaps(f"172.31.{third}.0/24", taken):
         third -= 1
     if third == 0:
-        raise ProfileError("no free internal subnet in 172.31.0.0/16")
+        # Say what takes them: a Docker network is the user's to remove.
+        in_docker = sorted({subnet for subnet in taken_subnets if _overlaps("172.31.0.0/16", [subnet])})
+        if in_docker:
+            raise ProfileError(
+                f"no free internal subnet in 172.31.0.0/16: Docker's networks use {', '.join(in_docker)} "
+                "(docker network ls lists them; docker network prune removes the unused ones)"
+            )
+        raise ProfileError("no free internal subnet in 172.31.0.0/16: the other profiles use every one")
 
     return port, f"172.31.{third}.0/24"
 

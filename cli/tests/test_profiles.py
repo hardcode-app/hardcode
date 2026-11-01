@@ -186,8 +186,10 @@ class ProfileTests(HomeTestCase):
         )
         self.assertEqual(created.subnet, "172.31.252.0/24", "one that overlaps any part of it is taken")
 
-        with self.assertRaisesRegex(ProfileError, "no free internal subnet"):
-            profiles.create(self.root, "full", languages=[], taken_subnets=["172.31.0.0/16"])
+        with self.assertRaisesRegex(
+            ProfileError, r"no free internal subnet.*Docker's networks use 172\.16\.0\.0/12 \("
+        ):
+            profiles.create(self.root, "full", languages=[], taken_subnets=["172.16.0.0/12", "10.0.0.0/8"])
 
     def test_allocate_avoids_other_profiles_forwards(self):
         self.make("default")
