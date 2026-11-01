@@ -136,6 +136,13 @@ vscode has no route out and no capability to make one.
   pass an older release off as newer; and only over HTTPS, when the user
   says so ([releasing.md](releasing.md#the-apps-updater)). Development and
   local builds have no updater.
+- **Releases are built from nothing cached.** Any job that runs on `main`
+  can write to the repository's Actions cache: CI's, and with it any build
+  script or tool those jobs run. The release workflow restores none of it
+  (no BuildKit cache, no cargo cache, no `target/`), so what it publishes
+  comes from the commit and what the build downloads, pinned as the
+  Dockerfiles and lock files say. Its actions are pinned by commit, and
+  only the jobs that publish hold the permissions to.
 
 ## Not covered
 

@@ -1,8 +1,13 @@
-# The build image (images/build), built with a BuildKit cache and loaded as
-# hardcode-build:local, which is what tests/*.sh and app/build.sh run
-# themselves in (images/build/run.sh).
+# The build image (images/build), loaded as hardcode-build:local, which is
+# what tests/*.sh and app/build.sh run themselves in (images/build/run.sh).
+# CI builds it with a BuildKit cache; the release workflow without one
+# (cache: false), from nothing a CI job could have written.
 name: Build image
-description: Builds images/build as hardcode-build:local, cached
+description: Builds images/build as hardcode-build:local, cached unless asked not to
+inputs:
+  cache:
+    description: Use and update the BuildKit cache ("true" or "false")
+    default: "true"
 runs:
   using: composite
   steps:
@@ -12,5 +17,6 @@ runs:
         context: images/build
         load: true
         tags: hardcode-build:local
-        cache-from: type=gha,scope=build
-        cache-to: type=gha,scope=build,mode=max
+        no-cache: ${{ inputs.cache != 'true' }}
+        cache-from: ${{ inputs.cache == 'true' && 'type=gha,scope=build' || '' }}
+        cache-to: ${{ inputs.cache == 'true' && 'type=gha,scope=build,mode=max' || '' }}
