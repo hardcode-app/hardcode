@@ -130,7 +130,8 @@ See [Kubernetes](docs/kubernetes.md) and [the admin UI](docs/admin.md).
 
 What HardCode enforces, and what it doesn't, is set out in the
 [security model](docs/security.md): read its *Not covered* section before you
-rely on it. Found a way out of the sandbox? Please report it privately,
+rely on it. [Staying safe](docs/staying-safe.md) turns it into habits: how to
+use HardCode so that you stay protected. Found a way out of the sandbox? Please report it privately,
 through this repository's *Security* tab, rather than in an issue.
 
 ## Documentation
@@ -138,7 +139,7 @@ through this repository's *Security* tab, rather than in an issue.
 - [Getting started](docs/getting-started.md): installing and the first sandbox
 - [Profiles](docs/profiles.md) and [the allowlist](docs/allowlist.md)
 - [The desktop app](docs/app.md) and [the `hardcode` command](docs/cli.md)
-- [The VS Code image](docs/vscode-image.md): languages, extensions, Docker inside
+- [Inside the sandbox](docs/vscode-image.md): languages, tools, extensions, Docker inside
 - [Architecture](docs/architecture.md) and [troubleshooting](docs/troubleshooting.md)
 
 The full index is [docs/README.md](docs/README.md).

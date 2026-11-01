@@ -1,126 +1,217 @@
 # Troubleshooting
 
-### `docker` keeps restarting
+Find what you're seeing below. Most problems show up in one of three
+places: the state next to the page title in the app (or `hardcode ps`),
+**Blocked traffic** (or `hardcode blocked`), and a container's log (click
+it on the app's Overview, or `hardcode logs <container>`).
 
-With `[rootlesskit:parent] error: failed to start the child: fork/exec /proc/self/exe: operation not permitted`
-in `hardcode logs docker`: the host's AppArmor blocks unprivileged user
-namespaces (`kernel.apparmor_restrict_unprivileged_userns=1`, the default on
-Ubuntu 23.10+). Compose applies Ubuntu's stock `rootlesskit` profile, which
-allows them; if your host doesn't have it (`ls /etc/apparmor.d/rootlesskit`),
-set `DOCKER_APPARMOR_PROFILE=unconfined` in the profile's `.env` and
-`hardcode up`.
+## Installing and starting
 
-### A port is already in use
+### `hardcode` says it doesn't need root
 
-For VS Code's port, see [VS Code's port is taken](#vs-codes-port-is-taken)
-below. `hardcode forward` refuses ports another profile uses but can't know
-which ports other programs have.
+It refuses to run under `sudo`: as root it would use root's profiles
+(`/root/.config/hardcode`), not yours. Run it as yourself. On Linux, if
+`docker` itself needs `sudo`, follow Docker's
+[post-installation steps](https://docs.docker.com/engine/install/linux-postinstall/);
+Docker's group, Docker Desktop or rootless Docker are all HardCode needs.
 
-### A download fails inside the VS Code container
+### "Cannot connect to the Docker daemon", or the app says *docker not running*
 
-`hardcode blocked` (or the app's *Blocked traffic*). A `CONNECT host:443`
-line means the host isn't allowlisted: `hardcode allow host`. A `403` on a
-`POST`/`PUT` to an allowlisted host means the entry needs `rw`. A DNS line
-means the name isn't under any allowlisted host. Then check the entry is the
-right *kind*: `host/path` only allows that path.
+Docker isn't running. Start Docker Desktop (macOS, Windows), or the Docker
+service (Linux), and try again.
 
-### `certificate verify failed` / `unable to get local issuer certificate`
+### The app says *docker not found*
 
-The tool doesn't trust the proxy CA. In the VS Code container the system store and the
-common variables (`SSL_CERT_FILE`, `NODE_EXTRA_CA_CERTS`, `REQUESTS_CA_BUNDLE`,
-`PIP_CERT`) are set; a tool with its own bundle needs pointing at
-`/proxy-ca/ca-bundle.pem`. Inside containers, mount `/proxy-ca` and set the
-variable ([Docker inside the sandbox](vscode-image.md#using-docker-from-the-vscode)).
-
-### Java tools ignore the proxy
-
-Maven and Gradle are configured through `~/.m2/settings.xml` and
-`~/.gradle/gradle.properties`, generated on start if missing; delete them to
-regenerate. Plain `java` programs need
-`-Dhttps.proxyHost=squid -Dhttps.proxyPort=3128`.
-
-### `squid` is unhealthy or exits at start
-
-`hardcode logs squid`. `missing; did the allowlist service run?` means the
-render failed: `hardcode logs allowlist` shows the offending line of
-`proxy-allowlist.txt`, which comes from the profile's `allowlist.txt` (the
-app's *Allowlist* marks the line *invalid*). A `FATAL` about certificates means the `pki` volume is
-missing or unreadable: `hardcode compose up pki` then `hardcode up`.
-
-### The `172.31.253.0/24` subnet clashes with one of your networks
-
-Change `DEVNET_SUBNET` and `DNS_IP` together in the profile's `.env`
-(`DNS_IP` is `.53` of the subnet), then `hardcode down && hardcode up`.
-
-### The VS Code token is lost or wrong
-
-`hardcode open --no-browser` prints the current URL (the logs never show the
-token). The token lives in the home volume (`~/.vscode-server/connection-token`);
-`hardcode token rotate` (or *New token…* in the app) replaces it, and
-`VSCODE_CONNECTION_TOKEN` in `.env` fixes one.
-
-### VS Code shows "could not download the server"
-
-The server self-updates from `update.code.visualstudio.com` and
-`vscode.download.prss.microsoft.com`; both are on the default allowlist.
-Check *Blocked traffic* if you've trimmed it.
+The `docker` command isn't on the `PATH` of the app (HardCode also looks
+where Docker Desktop installs it on macOS). Install Docker, start Docker
+Desktop, or start the app from a shell whose `PATH` has `docker`.
 
 ### The app says the hardcode command was not found
 
-A release bundles it beside the app's executable; a development build runs
-`cli/hardcode` from the checkout it was built from, with Python 3
-(`python3`, or `python` on Windows). `HARDCODE_CLI` can name another one.
+A release has its own copy beside the app; reinstall the app if it has
+gone. A development build runs `cli/hardcode` from the checkout it was
+built from, with Python 3 (`python3`, or `python` on Windows).
+`HARDCODE_CLI` can name another one.
+
+### `hardcode up` says there are no profiles yet
+
+Run without a terminal to ask on (in a script, say), `hardcode up` can't
+ask what to build the profile around. Make it first:
+`hardcode profile add default --lang python,docker,claude`.
 
 ### VS Code's port is taken
 
 The start fails with Docker's error (`Bind for 127.0.0.1:11111 failed: port
 is already allocated`, or `address already in use`): another program has
-the profile's port. `hardcode port <number>` (or *change* beside the port
-on the app's Overview) moves the profile to another, and `hardcode up`
-starts it there.
+the profile's port. `hardcode port <number>` (or **change** beside the
+port on the app's Overview) moves the profile to another, and
+`hardcode up` starts it there.
 
-### `hardcode` says it doesn't need root
+### A port forward's port is in use
 
-It refuses to run under sudo: Docker's group, Docker Desktop or rootless
-Docker are all it needs, and as root it would use root's profiles
-(`/root/.config/hardcode`), not yours. Run it as yourself.
+`hardcode forward` refuses ports another profile uses, but can't know
+which ports other programs have: when the gateway can't start with the
+forward, the forward is undone and the error says why. Choose another
+port.
 
-### `docker` in the VS Code container says it can't connect
+### The `docker` container keeps restarting
 
-This profile runs without the Docker daemon (`ENABLE_DOCKER=false`, the
-switch on the docker row of the app's Overview, or `hardcode docker off`). `hardcode docker on` brings it
-back; the VS Code container is recreated.
+With `[rootlesskit:parent] error: failed to start the child: fork/exec
+/proc/self/exe: operation not permitted` in `hardcode logs docker`: your
+computer's AppArmor blocks unprivileged user namespaces
+(`kernel.apparmor_restrict_unprivileged_userns=1`, the default on Ubuntu
+23.10 and newer). HardCode applies Ubuntu's own `rootlesskit` AppArmor
+profile, which allows them; if your computer doesn't have it
+(`ls /etc/apparmor.d/rootlesskit`), set
+`DOCKER_APPARMOR_PROFILE=unconfined` in the profile's `.env` and run
+`hardcode up`.
 
-### The app's status pill says "docker not found"
+### The internal network `172.31.253.0/24` clashes with one of your networks
 
-The CLI couldn't find `docker` on the `PATH` (or in Docker Desktop's usual
-places on macOS). Start Docker Desktop, or put `docker` on the PATH of the
-shell the app was started from.
+Change `DEVNET_SUBNET` and `DNS_IP` together in the profile's `.env`
+(`DNS_IP` is `.53` of the network), then `hardcode down` and `hardcode up`.
+
+### `squid` is unhealthy, or stops as it starts
+
+Look at `hardcode logs squid`.
+
+- `… missing; did the allowlist service run?`: the allowlist couldn't be
+  turned into rules. `hardcode logs allowlist` shows the offending line;
+  it comes from the profile's `allowlist.txt` (the app's Allowlist marks
+  it *invalid*). Fix or remove it, then `hardcode up`.
+- `… missing or unreadable; did the pki service run?`: the proxy's
+  certificate wasn't made. `hardcode compose up pki`, then `hardcode up`.
+
+## Inside the sandbox
+
+### A download or a request fails
+
+Look at **Blocked traffic** (or `hardcode blocked`):
+
+- `CONNECT host:443`: the host isn't on the allowlist. If the sandbox
+  should reach it, allow it: `hardcode allow host`.
+- `POST` or `PUT` to a host that is allowed: the entry is read-only, and
+  this is an upload. It needs `rw`, if you mean to allow uploads there.
+- a `DNS` row: the name isn't covered by any entry.
+- nothing at all: check the entry's kind. A path entry (`host/path`)
+  allows only that path.
+
+Before you allow anything, read
+[Staying safe](staying-safe.md#read-blocked-traffic-before-you-allow-anything).
+
+### `git push` is refused
+
+Pushing is an upload: the repository needs an `rw` entry, such as
+`hardcode allow github.com/your-name/app rw`, and the sandbox needs
+credentials for it.
+
+### `certificate verify failed`, or `unable to get local issuer certificate`
+
+The tool doesn't trust the proxy's certificate (the proxy decrypts HTTPS
+to check it). In the VS Code container, the system's trusted certificates
+and the usual variables (`SSL_CERT_FILE`, `NODE_EXTRA_CA_CERTS`,
+`REQUESTS_CA_BUNDLE`, `PIP_CERT`) are set up; a tool with its own list of
+certificates needs pointing at `/proxy-ca/ca-bundle.pem`. Inside Docker
+containers, mount `/proxy-ca` and set the variable
+([Docker inside the sandbox](vscode-image.md#using-docker-inside-the-sandbox)).
+
+### Java tools ignore the proxy
+
+Maven and Gradle are set up through `~/.m2/settings.xml` and
+`~/.gradle/gradle.properties`, written at start if they are missing:
+delete them to have them written again. Plain `java` programs need
+`-Dhttps.proxyHost=squid -Dhttps.proxyPort=3128`.
+
+### A language's command isn't found after switching it on
+
+Its allowlist entries and extensions arrive at once, but the software
+itself comes with the next image rebuild: **Rebuild image** on the app's
+Languages / Tools page, or `hardcode rebuild`.
+
+### `docker` in the sandbox says it can't connect
+
+The profile runs without its Docker daemon (`ENABLE_DOCKER=false`, the
+switch on the docker row of the app's Overview, or `hardcode docker off`).
+`hardcode docker on` brings it back; VS Code's container is recreated. If
+`docker` itself isn't found, the profile doesn't have the **Docker CLI**
+tool: switch it on and rebuild.
+
+### Something I installed with `sudo apt install` has gone
+
+Everything outside your home folder and `/shared` is reset whenever the
+container is recreated: after a rebuild, a change of shared folders, or
+Docker switched on or off. Install it again, or keep to what lives in your
+home folder ([what is kept](vscode-image.md#what-is-kept-and-what-isnt)).
+
+### A server in the sandbox can't be reached at `localhost:<port>`
+
+Forward the port first (`hardcode forward 3000`, or the app's **Port
+forwards**), and make the server listen on `0.0.0.0`, not on `localhost`:
+the forward reaches it from outside its container.
+
+### Files in a shared folder have the wrong owner
+
+Files written as root inside the sandbox (with `sudo`) are root's on your
+computer too: remove them with `sudo`.
+
+The sandbox's user, `dev`, has user id 1000. If yours on your computer
+isn't 1000 (`id -u`), the files the sandbox writes in a shared folder
+belong to someone else there. Set `DEV_UID` and `DEV_GID` in the profile's
+`.env` to your ids (`id -u`, `id -g`) and rebuild. The Docker daemon
+always runs as 1000, so Docker containers inside then see those files as
+owned by "nobody".
+
+### An extension doesn't appear
+
+A running sandbox installs extensions in the background: reload VS Code's
+browser window. The app's **Extensions** page (or `hardcode extensions`)
+says how each is doing. *refused* means its publisher (or one of what it
+pulls in) has no verified domain on the Marketplace, and it won't be
+installed; *couldn't install* means the Marketplace didn't answer, and it
+is tried again a minute later.
+
+### The VS Code token is lost or wrong
+
+`hardcode open --no-browser` prints the current address (the logs never
+show the token). The token lives in the home folder
+(`~/.vscode-server/connection-token`); `hardcode token rotate` (or **New
+token…** in the app) replaces it, and `VSCODE_CONNECTION_TOKEN` in `.env`
+fixes one.
+
+### VS Code says it could not download the server
+
+VS Code updates its server from `update.code.visualstudio.com` and
+`vscode.download.prss.microsoft.com`, both on every profile's allowlist.
+Check **Blocked traffic** if you switched either off.
 
 ### Something ate all the memory
 
-Squid sizes its descriptor tables from the process's open-file limit, which
-some container runtimes leave effectively unlimited; `squid.conf` caps it
+Every container HardCode starts has a memory limit. The proxy, squid, sizes
+its tables from the number of files a process may open, which some
+container runtimes leave practically unlimited; `squid.conf` caps it
 (`max_filedescriptors 65536`). If you run the images elsewhere, keep that
 line, and give every container a memory limit.
 
-### On Kubernetes: the profile stays `Pending`
+## On Kubernetes
+
+### The profile stays `Pending`
 
 `kubectl -n <ns> get profile <name> -o jsonpath='{.status.message}'` names
-what it is waiting for and the container reason (`ImagePullBackOff`: the
-vscode or squid image isn't where `profileDefaults` says; `ContainerCreating`
-for a while: PVCs being provisioned). `kubectl describe pod` on the named
-component has the rest. The VS Code container needs a privileged container for its
-Docker sidecar unless `docker.enabled` is `false`.
+what it is waiting for and the container's reason (`ImagePullBackOff`: the
+VS Code or squid image isn't where `profileDefaults` says;
+`ContainerCreating` for a while: volumes being provisioned).
+`kubectl describe pod` on the component it names has the rest. The VS Code
+pod needs a privileged container for its Docker sidecar unless
+`docker.enabled` is `false`.
 
-### On Kubernetes: the allowlist works but the VS Code container reaches anything
+### The allowlist works, but the sandbox reaches anything
 
-The CNI doesn't enforce NetworkPolicy. The policies are created, but without
-enforcement the VS Code container has normal pod networking. Install Calico, Cilium or
-another enforcing CNI.
+The cluster's network plugin (CNI) doesn't enforce NetworkPolicy. The
+policies are created, but without enforcement the VS Code pod has normal
+pod networking. Install Calico, Cilium or another CNI that enforces them.
 
-### On Kubernetes: signed out unexpectedly
+### Signed out of the admin UI unexpectedly
 
-Sessions are in memory; an admin restart (a rollout, an OOM) signs everyone
-out. The session also expires after 2 hours idle and 12 hours in total; an
-open tab's background refresh doesn't count as activity.
+Sessions are kept in memory, so an admin restart (a rollout, running out of
+memory) signs everyone out. A session also ends after 2 hours idle and 12
+hours in all; an open tab's background refresh doesn't count as activity.

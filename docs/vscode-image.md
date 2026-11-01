@@ -1,207 +1,275 @@
-# The VS Code image
+# Inside the sandbox
 
-`images/vscode/Dockerfile` builds the container VS Code runs in: Ubuntu 26.04,
-an unprivileged user `dev` with password-less sudo, VS Code in web mode, and
-one section per language that can be switched off. Each profile builds its
-own `hardcode-vscode:<profile>` from its `.env`.
+Each profile's sandbox is a Linux container, built from Ubuntu 26.04, in
+which VS Code runs with the languages and tools you chose. This page says
+what is in it, what is kept when it restarts and what isn't, how the coding
+agents are set up, and how to use Docker inside it.
 
-## Package policy
+## What every sandbox has
 
-Ubuntu 26.04 archive packages first. Vendor sources only where the archive
-has nothing usable:
+- **You are the user `dev`**, with `sudo` that needs no password. Inside
+  the sandbox you can install and change anything; the boundary is the
+  container and its network, not the user account.
+- **VS Code**, in your browser, with the YAML extension.
+- **Everyday tools**: git (with git-lfs), GitHub's `gh`, an SSH client,
+  `curl`, `wget`, `jq`, `ripgrep`, `fdfind`, `shellcheck`, `vim`, `nano`,
+  `tmux`, `htop`, `zip`, `rsync`, `man`, and the like.
 
-| Vendor source | Why |
-|---|---|
-| VS Code (Microsoft .deb, checksum-verified; the .deb is stopped from adding packages.microsoft.com) | not in the archive |
-| uv, ruff (PyPI via pipx into `/opt/pipx`) | not packaged |
-| pnpm (npm registry) | not packaged; the archive's corepack is too old |
-| Gradle (gradle.org, sha256-verified; `GRADLE_VERSION`) | the archive's 4.4.1 can't run on JDK 25 |
-| Claude Code CLI (claude.ai native installer) | not in the archive |
-| Codex CLI (GitHub release binary, checked against the sha256 digest GitHub publishes; `CODEX_VERSION`) | not in the archive |
+## Languages and tools
 
-## Languages
+A profile's languages and tools decide three things: what its image
+installs, which [allowlist entries](allowlist.md#what-hardcode-provides)
+are open, and which VS Code extensions it gets.
 
-| `.env` key / build arg | Installs |
-|---|---|
-| `INSTALL_BUILD_ESSENTIALS` | build-essential, autotools, pkg-config, gettext, common `-dev` libraries (OpenSSL, zlib, libffi, sqlite, readline, …) |
-| `INSTALL_PYTHON` | Python 3.14, pip, venv, pipx, black; uv and ruff |
-| `INSTALL_CPP` | GCC 15, Clang 21 with clangd/clang-format/clang-tidy, LLDB, GDB, lld, CMake, Ninja, ccache, Valgrind, cppcheck, bear |
-| `INSTALL_RUST` | rustc/cargo 1.93, rustfmt, clippy, rust-src, rust-gdb, rust-lldb |
-| `INSTALL_GO` | Go 1.26, gopls, delve, x/tools |
-| `INSTALL_PERL` | Perl 5.40, cpanminus, local::lib, perltidy, Perl::Critic |
-| `INSTALL_RUBY` | Ruby 3.3, bundler |
-| `INSTALL_NODE` | Node.js 22, npm, TypeScript (archive: 5.2), yarn; pnpm |
-| `INSTALL_JAVA` | OpenJDK 25 (default-jdk), Maven; Gradle |
-| `INSTALL_DOTNET` | .NET SDK 10 |
-| `INSTALL_DOCKER` | Docker CLI, buildx, compose v2 (talk to the rootless daemon) |
-| `INSTALL_CLAUDE_CLI` | `claude` in the terminal: Anthropic's coding agent. With it on, the profile also gets its VS Code extension and its allowlist block |
-| `INSTALL_CODEX_CLI` | `codex` in the terminal: OpenAI's coding agent, beside Claude Code. With it on, the profile also gets its VS Code extension and its allowlist block |
+| Key | Name | Installs | VS Code extensions |
+|---|---|---|---|
+| `python` | Python | Python 3.14, pip, venv, pipx, black; uv and ruff | `ms-python.python`, `ms-python.vscode-pylance`, `ms-python.debugpy`, `ms-python.black-formatter`, `charliermarsh.ruff`, `ms-toolsai.jupyter` |
+| `node` | JavaScript / TypeScript | Node.js 22, npm, yarn, TypeScript; pnpm | `dbaeumer.vscode-eslint`, `esbenp.prettier-vscode` |
+| `java` | Java | OpenJDK 25, Maven; Gradle | `vscjava.vscode-java-pack` |
+| `dotnet` | C# / .NET | .NET SDK 10 | `ms-dotnettools.csdevkit`, `ms-dotnettools.csharp` |
+| `go` | Go | Go 1.26, gopls, delve, Go's extra tools | `golang.go` |
+| `rust` | Rust | rustc, cargo, rustfmt, clippy, rust-src, rust-gdb, rust-lldb | `rust-lang.rust-analyzer`, `vadimcn.vscode-lldb` |
+| `cpp` | C / C++ | GCC 15, Clang 21 with clangd, clang-format and clang-tidy, LLDB, GDB, lld, CMake, Ninja, ccache, Valgrind, cppcheck, bear | `ms-vscode.cpptools`, `ms-vscode.cmake-tools`, `ms-vscode.makefile-tools` |
+| `ruby` | Ruby | Ruby 3.3, bundler | `shopify.ruby-lsp` |
+| `perl` | Perl | Perl 5.40, cpanminus, local::lib, perltidy, Perl::Critic | |
+| `build_essentials` | Build essentials (tool) | gcc and g++, make, autotools, pkg-config, gettext, common development libraries (OpenSSL, zlib, libffi, SQLite, readline, …) | |
+| `docker` | Docker CLI (tool) | `docker`, buildx, compose, which talk to the profile's own Docker daemon | `ms-azuretools.vscode-containers` |
+| `claude_cli` | Claude Code CLI (tool) | `claude`: Anthropic's coding agent | `anthropic.claude-code` |
+| `codex_cli` | Codex CLI (tool) | `codex`: OpenAI's coding agent | `openai.chatgpt` |
 
-These are a profile's languages (and the four tools), chosen first: each
-also opens the language's [allowlist block](allowlist.md#language-blocks) and
-brings its VS Code extensions. `hardcode enable`/`disable <lang>...` (or the
-app's *Languages / Tools*) set them, change the allowlist blocks and the
-extensions at once, and rebuild for the toolchain; only the layers after the changed section are rebuilt, and apt
-downloads are kept in a BuildKit cache mount. The image carries the
-languages it was built with in its `io.github.hardcode-app.languages` label, which
-`hardcode languages` and the app compare with the profile's to say when a
-rebuild is due.
+To switch one on or off, use the switch on the app's **Languages / Tools**
+page, or:
 
-Per-user tool directories are on the `PATH` and persist in the home volume:
-`~/.local/bin` (pipx, npm globals via `NPM_CONFIG_PREFIX`), `~/.cargo/bin`,
-`~/go/bin`, `~/.gem/bin` (`GEM_HOME`), `~/perl5/bin` (local::lib).
+```sh
+hardcode enable rust          # on, and the image rebuilt now
+hardcode disable java dotnet  # off, and the image rebuilt now
+hardcode enable go --no-build # on; the image is rebuilt later, with hardcode rebuild
+hardcode languages            # every language and tool, on or off, and whether the image has it
+```
 
-## VS Code
+The keys above work, and so do short names: `js`, `ts`, `c++`, `c#`,
+`golang`, `claude`, `codex`, `build`.
 
-`code serve-web` runs as `dev` on port 8000, with the connection token from
-`~/.vscode-server/connection-token` (generated on first start, or
-`VSCODE_CONNECTION_TOKEN` from `.env`), telemetry off, and
-`VSCODE_DEFAULT_FOLDER` (or the home directory) as the default folder. The
-image provides the initial `code` binary (`VSCODE_VERSION`, `latest` by
-default); **the server itself is downloaded into `~/.vscode-server` at first
-use and updates itself there**, often mid-session, exactly as upstream
-intends. Don't pin or relocate it; it lives in the home volume and survives
-rebuilds. The Marketplace and update hosts are on the default allowlist.
+A switch changes things at different times. The allowlist entries open or
+close at once (a running proxy reloads). The extensions follow within
+seconds, while VS Code runs. The software itself comes with the next image
+rebuild, which takes a few minutes: the app marks a language *not in the
+image yet* or *still in the image* until then, with a **Rebuild image**
+button.
 
-### Extensions
+## What is kept, and what isn't
 
-The image has none. A profile's VS Code container installs them while it
-runs, from the profile's **extension list**: the one every container has
-(Red Hat YAML), those of the profile's languages and tools (the catalogue in
-`cli/hardcode_cli/langs.py`; the coding agents' extensions come with their
-tools: Claude Code with the Claude Code CLI, Codex with the Codex CLI), and the profile's own
-(`VSCODE_EXTENSIONS` in its `.env`: `hardcode extension add|remove`, or the
-app's *Extensions*). The CLI writes the list to
-`vscode-extensions.txt` in the profile's folder whenever it changes, and Compose
-mounts it read-only at `/etc/hardcode/extensions/wanted`; on Kubernetes the
-operator puts it in a ConfigMap mounted at the same place.
+| Where, inside the sandbox | Kept in | Lasts |
+|---|---|---|
+| `/home/dev`, your home folder | the profile's home storage | through stops, restarts and rebuilds. VS Code's server and extensions, Claude Code, your settings, caches and sign-ins are here. |
+| `/shared` (also `~/shared`) | the profile's shared storage | through stops, restarts and rebuilds. The Docker daemon sees it too, so `docker run -v /shared/...` works. |
+| shared folders (mounts) | your computer | they are your folders: changes made in the sandbox are made on your computer. |
+| images and containers made with Docker inside | the Docker daemon's own storage | through stops, restarts and rebuilds. |
+| everything else (`/usr`, `/etc`, `/opt`, ...) | the container | until the container is recreated: a rebuild, a change of shared folders, Docker switched on or off, `hardcode down`. A `sudo apt install` goes with it. |
 
-- python: Python, Pylance, debugpy, Black, Ruff, Jupyter
-- node: ESLint, Prettier · java: Extension Pack for Java
-- dotnet: C# Dev Kit, C# · go: Go · rust: rust-analyzer, CodeLLDB
-- cpp: C/C++, CMake Tools, Makefile Tools · ruby: Ruby LSP
-- docker: Containers · claude_cli: Claude Code · codex_cli: Codex
+**Reset…** in the app (`hardcode down -v`) deletes all the storage above
+that isn't your computer's: the home folder, `/shared` and Docker's data.
+**Delete profile…** deletes it with the profile.
 
-The entrypoint starts `hardcode-sync-extensions --watch` in the background
-and starts VS Code straight away: a first start is quick, and the extensions
-arrive as they're installed. The watcher then follows the list: switch a
-language on, or add an extension, and it starts installing within seconds,
-with no restart (VS Code picks a new extension up; an open window may ask to
-be reloaded). What it installed before and the list no longer has is
-removed, the members of a pack and the dependencies with it; extensions you
-installed or uninstalled yourself in VS Code are left alone. It reads a list
-only once it ends with `# end`, so a list caught half-written is never taken
-for a shorter one.
+Software you install for yourself lands in your home folder, and lasts:
+`pipx install`, Python virtual environments in your folders, `npm install
+-g` (into `~/.local`), `cargo install` (`~/.cargo`), `go install` (`~/go`),
+`gem install` (`~/.gem`), `cpanm` (`~/perl5`). Their folders are on the
+`PATH`.
 
-**Only publishers with a verified domain on the Marketplace are allowed.**
-Each extension on the list is checked before it is installed, with
-everything it pulls in (its dependencies and a pack's members, as the
-Marketplace lists them for its latest release, and theirs in turn), by
-asking the Marketplace (`hardcode-verify-extensions --with-dependencies`).
-VS Code is running and picks up whatever lands in its extensions folder,
-so if any publisher in that set has no verified domain, nothing of it gets
-there: the extension is refused, and remembered so it isn't asked about
-again. What arrives is checked once more, in case a package pulls in more
-than the Marketplace listed; then the whole set is removed, the extension
-included. One that couldn't be installed or checked (the Marketplace didn't
-answer within 30 seconds) is removed and tried again a minute later. The reviewed exceptions are the
-catalogue's `APPROVED_UNVERIFIED`, marked `unverified-ok` on the list: the
-only one is CodeLLDB, the Rust debugger VS Code's own Rust documentation
-recommends.
+## VS Code and its extensions
 
-How far it has got is in `~/.vscode-server/.hardcode-extensions-status.json`
-(`installing` or `done`, how many of how many are in place, and what is
-pending, refused or to be tried again), which `hardcode extensions` and the
-app show, and in the VS Code container's log, one line per step, which the
-Kubernetes admin shows.
+VS Code's server updates itself as it runs, inside your home folder (the
+image only provides the first one), and its telemetry is off. It opens
+your home folder unless the address names another, or the profile's
+`VSCODE_DEFAULT_FOLDER` setting does.
 
-## The Codex CLI
+The extensions aren't in the image either. A profile's sandbox installs
+them, in the background, from the profile's list:
 
-On by default, beside Claude Code (`INSTALL_CODEX_CLI`; `hardcode disable
-codex` leaves it out). Its allowlist block opens what it needs, all `rw`
-since each is an API: `auth.openai.com` (sign-in and token refresh),
-`chatgpt.com/backend-api` (the model, on a ChatGPT plan) and `api.openai.com`
-(the model, with an API key). Its update check (`api.github.com`), metrics
-(`ab.chatgpt.com`) and crash reports stay closed.
+- the one every sandbox has (YAML);
+- those of its languages and tools (see the table above);
+- the profile's own: add one with the app's **Extensions** page or
+  `hardcode extension add publisher.name`, using the id the Marketplace
+  shows on the extension's page.
 
-- **Signing in.** The browser sign-in calls back to `localhost:1455` inside
-  the container, which your browser can't reach. Use `codex login
-  --device-auth` instead (switch device code login on in your ChatGPT
-  security settings first), or an API key: `printenv OPENAI_API_KEY | codex
-  login --with-api-key`. Credentials stay in `~/.codex`, in the home volume.
-- **The proxy's CA.** `CODEX_CA_CERTIFICATE` points at the system bundle,
-  which has the proxy's CA: Codex reads it for its WebSocket connections
-  too, which `SSL_CERT_FILE` doesn't cover. Squid doesn't pass WebSocket
-  upgrades, so Codex falls back to HTTPS, as it is built to.
-- **Its first configuration.** The entrypoint writes `~/.codex/config.toml`
-  when there is none: the update check, analytics, feedback uploads and
-  metrics off (the binary comes with the image: rebuild to update it, with
-  `CODEX_VERSION` in `.env` to pin a release), and `sandbox_mode =
-  "danger-full-access"`. Codex's own sandbox is bubblewrap, which needs user
-  namespaces, and this container doesn't allow them: every command Codex
-  ran would fail. The container, its proxy and its network are the sandbox
-  here, as they are for Claude Code; Codex still asks before acting, as its
-  approval policy says. The file is yours to edit afterwards.
+![Extensions](images/app-extensions.png)
 
-## What the entrypoint does at start
+A change reaches a running sandbox within seconds, with no restart; VS
+Code picks a new extension up as it arrives (reload the browser window if
+one doesn't appear). `hardcode extensions` and the app's **Extensions**
+page show how far the installing has got.
 
-1. Takes ownership of `$HOME` and `/shared` if a volume was created
-   root-owned.
-2. Installs the proxy CA from `/proxy-ca/ca.pem` into the system store
-   (`update-ca-certificates`, which also refreshes the Java keystore).
-   `SSL_CERT_FILE`, `NODE_EXTRA_CA_CERTS`, `REQUESTS_CA_BUNDLE` and `PIP_CERT`
-   are set for tools that keep their own bundle.
-3. Configures the proxy for tools that ignore `HTTP(S)_PROXY`: apt
-   (`/etc/apt/apt.conf.d/90hardcode-proxy`), the Docker CLI
-   (`~/.docker/config.json`, which also passes the proxy into every container
-   and build it starts), Maven (`~/.m2/settings.xml`) and Gradle
-   (`~/.gradle/gradle.properties`). Only written when missing, so your edits
-   win. Codex's first configuration, the same way (see above).
-4. Starts the extension watcher in the background, as above.
-5. Starts VS Code. Any arguments replace it: `hardcode compose run --rm vscode bash`.
+**Only extensions from publishers whose domain the Marketplace has
+verified are installed**, and only when everything they pull in (their
+dependencies, a pack's members) passes the same check. An extension that
+doesn't is refused and shown as such. The one reviewed exception is
+CodeLLDB (`vadimcn.vscode-lldb`), the Rust debugger that VS Code's own
+Rust documentation recommends. Add extensions through HardCode rather than
+VS Code's own Extensions view: only HardCode's list is checked. (HardCode
+leaves extensions you install or uninstall in VS Code itself alone.)
 
-## Using Docker from the VS Code container
+## Claude Code
 
-`docker`, `docker compose` and `docker buildx` talk to the rootless daemon in
-`docker` over mutual TLS (`DOCKER_HOST=tcp://docker:2376`, certificates in
-`/certs/client`).
+`claude` is in the terminal, and the Claude Code extension in VS Code,
+when the profile has the **Claude Code CLI** tool. Type `claude` and sign
+in as it asks; the sign-in is kept in your home folder.
 
-- **Bind mounts** are resolved on the `docker` side, so only paths that exist
-  there work: `/shared`, plus host folders mounted with `hardcode mount`
-  (which go into both). `docker run -v ~/git/project:/src …` works; a path
-  that exists only in the VS Code container doesn't.
-- **File ownership**: `dev` (uid 1000) shows up as `root` inside containers,
-  and files containers create show up as owned by `dev`.
-- **Published ports** listen on the docker container: `docker run -p 8080:80`
-  is reachable from the VS Code container as `http://docker:8080`, and from your browser
-  after `hardcode forward 8080 docker`.
-- **Proxy**: containers and builds get `HTTP(S)_PROXY` from
-  `~/.docker/config.json`. They have no other way out.
-- **HTTPS inside containers** fails unless the container trusts the proxy CA,
-  because Squid decrypts it. The certificate is at `/proxy-ca` in both the
-  vscode and `docker`:
+- **Its telemetry and error reporting are off**, and their hosts aren't on
+  the allowlist. The connectors from your claude.ai account are off too,
+  and the host they go through is closed.
+- **Its own hosts** (the API, sign-in, its downloads and updates) are the
+  Claude Code CLI's allowlist block. Switching the tool off closes them and
+  removes the extension.
+- **It keeps itself up to date**, from its own download host.
+- **Anything else it needs to reach**, such as an MCP server or a plugin
+  marketplace, needs an allowlist entry of its own. Claude Code's
+  official plugin marketplace is a GitHub repository:
+  `github.com/anthropics/claude-code`.
+
+## Codex
+
+`codex` is in the terminal, and its extension in VS Code, when the profile
+has the **Codex CLI** tool. Its allowlist block opens what it needs, all
+`rw`, since each is an API: `auth.openai.com` (sign-in),
+`chatgpt.com/backend-api` (the model, with a ChatGPT plan) and
+`api.openai.com` (the model, with an API key). Its update check, metrics
+and crash reports stay closed.
+
+- **Signing in.** Codex's usual browser sign-in calls back to an address
+  inside the sandbox that your browser can't reach. Use
+  `codex login --device-auth` instead (switch device code login on in your
+  ChatGPT security settings first), or an API key:
+  `printenv OPENAI_API_KEY | codex login --with-api-key`. Its credentials
+  are kept in `~/.codex`, in your home folder.
+- **Its first configuration.** The first time the sandbox starts, it
+  writes `~/.codex/config.toml`: the update check, analytics, feedback
+  uploads and metrics off, and `sandbox_mode = "danger-full-access"`.
+  Codex's own sandbox needs something this container doesn't allow (user
+  namespaces), so every command it ran would fail; the container, its
+  proxy and its network are the sandbox here, as they are for Claude Code.
+  Codex still asks before acting, as its approval policy says. The file is
+  yours to change afterwards.
+- **Updating.** Codex comes with the image: rebuild to update it, and set
+  `CODEX_VERSION` in the profile's `.env` to stay on one release.
+- **Its connections.** The proxy doesn't pass WebSocket connections, so
+  Codex uses HTTPS instead, as it is built to.
+
+## Using Docker inside the sandbox
+
+With the **Docker CLI** tool, `docker`, `docker compose` and `docker
+buildx` talk to the profile's own Docker daemon, which runs beside VS Code
+in a container of its own, without root. Its containers are behind the
+same allowlist as everything else. A profile that doesn't need containers
+can do without it: `hardcode docker off`, or the switch on the **docker**
+row of the app's Overview.
+
+- **Folders you mount into containers** must exist where the daemon runs:
+  `/shared`, and the folders shared with `hardcode mount` (which are
+  shared with both). `docker run -v ~/git/project:/src …` works for a
+  mounted `~/git`; a folder that exists only in VS Code's container
+  doesn't.
+- **File ownership**: you (`dev`) appear as `root` inside containers, and
+  files containers create appear as yours.
+- **Published ports** are on the daemon's container: `docker run -p
+  8080:80` is reachable from VS Code's terminal as `http://docker:8080`,
+  and from your browser after `hardcode forward 8080 docker`.
+- **The proxy**: containers and builds are given the proxy settings
+  automatically (in `~/.docker/config.json`). They have no other way out.
+- **HTTPS inside containers** fails unless the container trusts the
+  proxy's certificate, because the proxy decrypts HTTPS to check it. The
+  certificate is at `/proxy-ca`, both in VS Code's container and where the
+  daemon runs:
+
   ```sh
   docker run -v /proxy-ca:/proxy-ca:ro -e SSL_CERT_FILE=/proxy-ca/ca-bundle.pem …   # Go, OpenSSL, curl, apk, Ruby, .NET
-  docker run -v /proxy-ca:/proxy-ca:ro -e NODE_EXTRA_CA_CERTS=/proxy-ca/ca.pem …     # Node (npm, yarn; fetch() ignores proxy variables)
+  docker run -v /proxy-ca:/proxy-ca:ro -e NODE_EXTRA_CA_CERTS=/proxy-ca/ca.pem …     # Node (npm, yarn)
   ```
-  For `RUN` steps in a build, copy `/proxy-ca/ca.pem` into the build context
-  and in the Dockerfile:
+
+  For `RUN` steps in an image build, copy `/proxy-ca/ca.pem` into the
+  build's folder, and in the Dockerfile:
+
   ```dockerfile
   COPY ca.pem /etc/proxy-ca.pem
   ENV SSL_CERT_FILE=/etc/proxy-ca.pem NODE_EXTRA_CA_CERTS=/etc/proxy-ca.pem PIP_CERT=/etc/proxy-ca.pem
   ```
-  Plain-HTTP mirrors such as `deb.debian.org` need nothing.
-- **Pushing images isn't possible**: registries are read-only in the default
-  allowlist.
-- Testcontainers works: `TESTCONTAINERS_HOST_OVERRIDE=docker` is set.
+
+  Plain-HTTP package mirrors such as `deb.debian.org` need nothing.
+- **Pushing images isn't possible**: the container registries are
+  read-only on the allowlist.
+- **Testcontainers** works: `TESTCONTAINERS_HOST_OVERRIDE=docker` is set.
 
 ## Rebuilding and updating
 
 ```sh
-hardcode build --pull vscode && hardcode up    # newer base image and toolchains; the home volume is kept
-hardcode rebuild                               # after editing the Dockerfile
-hardcode down -v                               # a fresh home directory (extensions, settings, caches gone)
+hardcode rebuild    # rebuild the image with the profile's languages and tools; your home folder is kept
+hardcode down -v    # start afresh next time: a new home folder (extensions, settings, caches, sign-ins gone)
 ```
 
-The Dockerfile's last layers (extensions, the entrypoint) are ordered so that
-editing `entrypoint.sh` doesn't rebuild the toolchains.
+In the app, **Rebuild image** on the Languages / Tools page rebuilds VS
+Code's image; **Rebuild images** on the Overview rebuilds all of the
+profile's images and starts it again.
+
+A profile's image is built once and then kept, even when you update
+HardCode: rebuild each profile after an update to get the newer image.
+Only the steps after the first one that changed run again, so a rebuild is
+usually quicker than the first build. To run every step again, with the
+newest packages from the Ubuntu archive:
+
+```sh
+hardcode compose build --no-cache vscode
+hardcode up
+```
+
+## Reference
+
+### Where the image's software comes from
+
+Ubuntu 26.04's own packages first. Other sources only where Ubuntu has
+nothing usable:
+
+| From elsewhere | Why |
+|---|---|
+| VS Code (Microsoft's package, checksum-checked; it isn't allowed to add Microsoft's package repository) | not in Ubuntu |
+| uv, ruff (from PyPI, with pipx, into `/opt/pipx`) | not in Ubuntu |
+| pnpm (from npm) | not in Ubuntu; its corepack is too old |
+| Gradle (from gradle.org, checksum-checked; `GRADLE_VERSION`) | Ubuntu's 4.4.1 can't run on JDK 25 |
+| Claude Code CLI (Anthropic's installer, from claude.ai) | not in Ubuntu |
+| Codex CLI (OpenAI's release on GitHub, checked against the checksum GitHub publishes; `CODEX_VERSION`) | not in Ubuntu |
+
+The image records the languages and tools it was built with (in its
+`io.github.hardcode-app.languages` label), which `hardcode languages` and
+the app compare with the profile's to say when a rebuild is due.
+
+### What the container does as it starts
+
+1. Takes ownership of the home folder and `/shared` if they were created
+   as root's.
+2. Adds the proxy's certificate to the system's trusted certificates
+   (which also refreshes Java's). For tools that keep their own, the
+   container's environment points `SSL_CERT_FILE`, `REQUESTS_CA_BUNDLE`,
+   `PIP_CERT` and `CODEX_CA_CERTIFICATE` at the system's bundle, and
+   `NODE_EXTRA_CA_CERTS` at the proxy's certificate.
+3. Sets the proxy up for tools that ignore `HTTP(S)_PROXY`: apt, SSH (only
+   to hosts with an `ssh` entry), the Docker CLI (`~/.docker/config.json`,
+   which also passes the proxy to every container and build it starts),
+   Maven (`~/.m2/settings.xml`) and Gradle (`~/.gradle/gradle.properties`).
+   The files in your home folder are only written when missing, so your
+   own edits win; delete one to have it written again. Codex's first
+   configuration is written the same way.
+4. Starts installing the profile's extensions in the background, and
+   keeps following the list.
+5. Starts VS Code. Its token is never written to the container's log:
+   `hardcode open` gives the address with it.
+
+### The extensions' progress
+
+The sandbox writes how far it has got with the extensions to
+`~/.vscode-server/.hardcode-extensions-status.json` (`installing` or
+`done`, how many of how many are in place, and which are pending, refused
+or to be tried again), which `hardcode extensions` and the app read, and
+to the container's log, one line per step, which the Kubernetes admin UI
+reads. An extension that couldn't be installed or checked (the
+Marketplace didn't answer within 30 seconds) is removed and tried again a
+minute later. One that is refused is remembered, and not asked about
+again.
