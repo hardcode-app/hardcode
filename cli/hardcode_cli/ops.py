@@ -17,7 +17,7 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Callable, Optional
 
-from . import allowlist, blocked, envfile, langs, override, profiles, stack
+from . import allowlist, blocked, bounded, envfile, langs, override, profiles, stack
 from .compose import Compose, ComposeError, Runner
 
 # Where the VS Code container's extension sync says how far it has got,
@@ -116,7 +116,7 @@ class Ops:
         self,
         root: Path,
         profile: profiles.Profile,
-        runner: Runner = subprocess.run,
+        runner: Runner = bounded.run,
         docker: Optional[str] = None,
         sleep: Callable[[float], None] = time.sleep,
         warn: Callable[[str], None] = _print_warning,
@@ -629,9 +629,11 @@ class Ops:
         ``failed`` (tried again later). ``None`` when the container isn't
         running or hasn't said yet.
         """
-        # Cut off in the container: a larger file never reaches this process.
+        # Cut off in the container, and kept to the limit here too: the
+        # sandbox's user can replace head.
+        command = f"head -c {STATUS_BYTES} ~/{EXTENSION_STATUS} 2>/dev/null || true"
         try:
-            output = self.compose.exec("vscode", f"head -c {STATUS_BYTES} ~/{EXTENSION_STATUS} 2>/dev/null || true")
+            output = self.compose.exec("vscode", command, limit=STATUS_BYTES)
         except ComposeError:
             return None
 

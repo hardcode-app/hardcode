@@ -2,7 +2,9 @@
 ``docker compose`` for one profile.
 
 Every call goes through an injectable *runner* with the signature of
-:func:`subprocess.run`, so the module can be tested without Docker.
+:func:`subprocess.run`, so the module can be tested without Docker; by
+default ``bounded.run``, which holds no more of a command's output than a
+limit (some of it comes from inside the sandbox).
 """
 
 from __future__ import annotations
@@ -17,7 +19,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Optional
 
-from . import envfile, stack
+from . import bounded, envfile, stack
 from .profiles import Profile
 
 Runner = Callable[..., subprocess.CompletedProcess]
@@ -90,7 +92,7 @@ def parse_ps(output: str) -> list[Service]:
     ]
 
 
-def docker_subnets(docker: str, runner: Runner = subprocess.run) -> list[str]:
+def docker_subnets(docker: str, runner: Runner = bounded.run) -> list[str]:
     """
     The subnets of Docker's networks, which a new profile's must not overlap;
     none when Docker can't say (no daemon, say): the check is a courtesy.
@@ -126,7 +128,7 @@ class Compose:
     def __init__(
         self,
         profile: Profile,
-        runner: Runner = subprocess.run,
+        runner: Runner = bounded.run,
         docker: Optional[str] = None,
         sleep: Callable[[float], None] = time.sleep,
     ):
@@ -227,6 +229,7 @@ class Compose:
         check: bool = False,
         timeout: Optional[float] = None,
         to_stderr: bool = False,
+        limit: Optional[int] = None,
     ) -> subprocess.CompletedProcess:
         """
         Run ``docker compose <args>`` in the stack's folder.
@@ -243,10 +246,15 @@ class Compose:
         A captured command gets no input. An interactive one (``hardcode
         shell``) keeps the terminal; but a captured ``exec`` reading a
         terminal it doesn't own would be stopped by it, and hang.
+
+        Captured output is held up to the runner's limit, or *limit* bytes:
+        a command that prints more is stopped, a ``ComposeError``.
         """
         options: dict = {}
         if to_stderr and not capture:
             options["stdout"] = sys.stderr
+        if limit is not None:
+            options["limit"] = limit
 
         try:
             result = self._run(
@@ -261,6 +269,8 @@ class Compose:
             )
         except subprocess.TimeoutExpired as error:
             raise ComposeError(f"docker compose {' '.join(args)} timed out after {error.timeout:g}s") from error
+        except bounded.OutputTooLarge as error:
+            raise ComposeError(f"docker compose {' '.join(args)} printed more than {error.limit} bytes") from error
 
         if check and result.returncode != 0:
             detail = (result.stderr or result.stdout or "").strip() if capture else ""
@@ -269,11 +279,11 @@ class Compose:
 
         return result
 
-    def output(self, *args: str, timeout: Optional[float] = 60) -> str:
+    def output(self, *args: str, timeout: Optional[float] = 60, limit: Optional[int] = None) -> str:
         """
-        The stdout of a command that must succeed.
+        The stdout of a command that must succeed, no longer than *limit*.
         """
-        return self.run(*args, capture=True, check=True, timeout=timeout).stdout
+        return self.run(*args, capture=True, check=True, timeout=timeout, limit=limit).stdout
 
     def status(self) -> tuple[list[Service], str]:
         """
@@ -332,11 +342,12 @@ class Compose:
         result = self.run("config", "--quiet", capture=True, timeout=60)
         return result.returncode == 0, (result.stderr or result.stdout or "").strip()
 
-    def exec(self, service: str, command: str, timeout: Optional[float] = 30) -> str:
+    def exec(self, service: str, command: str, timeout: Optional[float] = 30, limit: Optional[int] = None) -> str:
         """
-        Run a shell command in a running service and return its output.
+        Run a shell command in a running service and return its output, no
+        longer than *limit*.
         """
-        return self.output("exec", "-T", service, "sh", "-lc", command, timeout=timeout)
+        return self.output("exec", "-T", service, "sh", "-lc", command, timeout=timeout, limit=limit)
 
     def published(self, service: str, port: int) -> str:
         """

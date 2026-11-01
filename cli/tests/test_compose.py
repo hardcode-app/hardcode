@@ -3,11 +3,14 @@ Tests for running ``docker compose`` for a profile (hardcode_cli.compose).
 """
 
 import subprocess
+import sys
 import unittest
+from pathlib import Path
 from unittest import mock
 
-from hardcode_cli import compose, envfile, profiles, stack
+from hardcode_cli import bounded, compose, envfile, profiles, stack
 from hardcode_cli.compose import Compose, ComposeError, Service
+from hardcode_cli.ops import STATUS_BYTES, Ops
 
 from .helpers import FakeRunner, HomeTestCase
 
@@ -37,6 +40,10 @@ class ParseTests(unittest.TestCase):
             compose.docker_executable(lambda _: None)
 
 
+# A container command that ignores the cutoff it was given.
+LOUD = Path(__file__).resolve().parent / "loud_command.py"
+
+
 class ComposeTests(HomeTestCase):
     def make(self, runner=None, docker="docker"):
         """
@@ -47,6 +54,30 @@ class ComposeTests(HomeTestCase):
 
         profile = profiles.get(self.root, "default")
         return Compose(profile, runner=runner or self.runner, docker=docker)
+
+    def test_the_host_stops_reading_what_a_container_sends_past_the_limit(self):
+        # The sandbox's user can replace head, or anything else the command
+        # runs in the container: the limit is kept on this side.
+        limits = []
+
+        def loud_docker(argv, **options):
+            limits.append(options.get("limit"))
+            return bounded.run([sys.executable, str(LOUD), "1048576", "0", "30"], **options)
+
+        project = self.make(runner=loud_docker)
+        with self.assertRaisesRegex(ComposeError, "more than 65536 bytes"):
+            project.exec("vscode", "cat ~/somefile", limit=65536)
+
+        ops = Ops(self.root, project.profile, runner=loud_docker, docker="docker", sleep=lambda _: None)
+        self.assertIsNone(ops.extension_status())
+        self.assertEqual(limits[-1], STATUS_BYTES, "the status is read with its own small limit")
+
+    def test_commands_are_run_with_a_limit_by_default(self):
+        profiles.create(self.root, "default", languages=[])
+        profile = profiles.get(self.root, "default")
+
+        self.assertIs(Compose(profile)._run, bounded.run)
+        self.assertIs(Ops(self.root, profile).compose._run, bounded.run)
 
     def test_argv_includes_project_env_file_and_override(self):
         project = self.make()
