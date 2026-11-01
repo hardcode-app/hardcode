@@ -16,6 +16,7 @@
   <img src="https://img.shields.io/badge/platform-Linux%20%7C%20macOS%20%7C%20Windows-informational" alt="Platforms: Linux, macOS, Windows">
   <img src="https://img.shields.io/badge/Docker-28%2B-2496ED?logo=docker&logoColor=white" alt="Docker 28+">
   <img src="https://img.shields.io/badge/Kubernetes-Helm%20chart-326CE5?logo=kubernetes&logoColor=white" alt="Kubernetes: Helm chart">
+  <a href="LICENSE"><img src="https://img.shields.io/badge/licence-AGPL--3.0--only-blue" alt="Licence: AGPL-3.0-only"></a>
   <a href="https://www.conventionalcommits.org"><img src="https://img.shields.io/badge/Conventional%20Commits-1.0.0-fe5196?logo=conventionalcommits&logoColor=white" alt="Conventional Commits"></a>
 </p>
 
@@ -155,3 +156,11 @@ app/build.sh bundle      # the desktop app's installers
 
 [Development](docs/development.md) has the layout and conventions, and
 [AGENTS.md](AGENTS.md) the ground rules for changes, whoever makes them.
+
+## Licence
+
+HardCode is free software, under the
+[GNU Affero General Public License, version 3](LICENSE) only
+(AGPL-3.0-only): you may use, change and share it. If you change it and
+let others use your version over a network, as a hosted service for
+instance, you must offer them its source.
