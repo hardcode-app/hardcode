@@ -2,7 +2,8 @@
 """
 The steps of a release that aren't a build (release/release.py): the version
 written into every file that carries it, a development build's mark, the
-updater's configuration, the latest.json the app's updater reads (from
+updater's configuration, the builds' files gathered into one folder, the
+latest.json the app's updater reads (from
 installers signed for real, with a throwaway key), the release's and the
 development build's descriptions, and the checksums.
 """
@@ -178,6 +179,46 @@ def check_updater_config(suite: Suite) -> None:
             and isinstance(json.loads(out.read_text(encoding="utf-8")), dict),
             output.text,
         )
+
+
+def check_gather(suite: Suite) -> None:
+    with tempfile.TemporaryDirectory(prefix="hc-gather-") as temporary:
+        directory = Path(temporary)
+
+        # As the builds' files are downloaded: each in the folder it was built in.
+        arrived = {
+            "appimage/HardCode_1.2.3_amd64.AppImage": "a",
+            "deb/HardCode_1.2.3_amd64.deb": "b",
+            "macos/HardCode_aarch64.app.tar.gz": "c",
+            "bundle/nsis/HardCode_1.2.3_x64-setup.exe": "d",
+            "hardcode-linux-x64": "e",
+        }
+        for name, content in arrived.items():
+            (directory / name).parent.mkdir(parents=True, exist_ok=True)
+            (directory / name).write_text(content, encoding="utf-8")
+
+        output = harness.run([sys.executable, ROOT / "release" / "release.py", "gather", directory])
+        left = sorted(path.relative_to(directory).as_posix() for path in directory.rglob("*"))
+        suite.check(
+            "gather moves every file out of its folder, and removes the folders",
+            output.ok
+            and left == sorted(Path(name).name for name in arrived)
+            and (directory / "HardCode_1.2.3_x64-setup.exe").read_text(encoding="utf-8") == "d",
+            output.text + "\n".join(left),
+        )
+
+        (directory / "again").mkdir()
+        (directory / "again" / "hardcode-linux-x64").write_text("f", encoding="utf-8")
+        try:
+            release.gather(directory)
+            suite.check("two files of one name are refused, before anything moves", False)
+        except release.ReleaseError as error:
+            suite.check(
+                "two files of one name are refused, before anything moves",
+                (directory / "again" / "hardcode-linux-x64").exists()
+                and (directory / "hardcode-linux-x64").read_text(encoding="utf-8") == "e",
+                str(error),
+            )
 
 
 def sign(key: Path, path: Path, version: str) -> harness.Output:
@@ -368,6 +409,9 @@ def run_checks(suite: Suite) -> None:
 
     suite.section("the updater's configuration")
     check_updater_config(suite)
+
+    suite.section("the builds' files, gathered")
+    check_gather(suite)
 
     suite.section("latest.json")
     check_manifest(suite)

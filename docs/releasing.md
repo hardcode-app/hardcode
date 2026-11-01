@@ -137,7 +137,8 @@ the new one.
 
 `tests/release.py` tests `release/release.py` for real: the version written
 into every file (and nothing else), a development build's mark (and the
-checkout without one), the updater's configuration, a `latest.json`
+checkout without one), the updater's configuration, the builds' files
+gathered out of the folders they arrive in, a `latest.json`
 assembled from installers signed with a throwaway key (each signature
 carrying its version), both descriptions and the checksums.
 `tests/app.py` builds the app with a release's updater configuration,

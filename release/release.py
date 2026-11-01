@@ -11,6 +11,9 @@ The steps of a release that aren't a build: the release workflow
     release/release.py updater-config --repository OWNER/REPO OUT
         the Tauri configuration a release builds the app with: the updater,
         when release/updater.pub holds the key it trusts (else nothing)
+    release/release.py gather DIR
+        move the files in DIR's folders into DIR: the builds' files, as
+        they are downloaded, into the one list a release publishes
     release/release.py manifest --version VERSION --repository OWNER/REPO DIR
         DIR/latest.json, which the app's updater reads, from DIR's signed installers
     release/release.py notes --version VERSION --repository OWNER/REPO OUT
@@ -212,6 +215,35 @@ def updater_config(repository: str, key: Path = UPDATER_KEY) -> dict:
     }
 
 
+def gather(directory: Path) -> list[str]:
+    """
+    Move every file in *directory*'s folders into *directory* itself, and
+    remove the folders; the names of the files moved. The builds' files
+    are downloaded in the folders they were built in (``deb/``,
+    ``appimage/``, ``dmg/``...), and a release publishes one flat list, so
+    two files of one name are refused before anything is moved.
+    """
+    files = sorted(path for path in directory.rglob("*") if path.is_file())
+
+    seen: dict[str, Path] = {}
+    for path in files:
+        if path.name in seen:
+            raise ReleaseError(f"two files called {path.name}: {seen[path.name]} and {path}")
+        seen[path.name] = path
+
+    moved = []
+    for path in files:
+        if path.parent != directory:
+            path.rename(directory / path.name)
+            moved.append(path.name)
+
+    # The folders, now empty: in reverse order, a folder's own come first.
+    for folder in sorted((path for path in directory.rglob("*") if path.is_dir()), reverse=True):
+        folder.rmdir()
+
+    return moved
+
+
 def _installer(name: str) -> Optional[str]:
     """
     The updater's key for the installer called *name*, if it is one.
@@ -370,6 +402,9 @@ def main(argv: list[str]) -> int:
     command.add_argument("--repository", required=True)
     command.add_argument("out", type=Path)
 
+    command = commands.add_parser("gather", help="move the files in DIR's folders into DIR")
+    command.add_argument("directory", type=Path)
+
     command = commands.add_parser("manifest", help="DIR/latest.json, from DIR's signed installers")
     command.add_argument("--version", required=True)
     command.add_argument("--repository", required=True)
@@ -403,6 +438,10 @@ def main(argv: list[str]) -> int:
             config = updater_config(arguments.repository)
             arguments.out.write_text(json.dumps(config, indent=2) + "\n", encoding="utf-8")
             print("the updater, checking " + LATEST.format(repository=arguments.repository) if config else "no updater")
+
+        elif arguments.command == "gather":
+            moved = gather(arguments.directory)
+            print(f"{len(moved)} files moved into {arguments.directory}")
 
         elif arguments.command == "manifest":
             latest = manifest(arguments.version, arguments.repository, arguments.directory)
