@@ -118,7 +118,7 @@ services:
   # DNS for devnet: allowlisted names are resolved upstream, the rest get
   # NXDOMAIN, so DNS can't be used as an exfiltration channel.
   coredns:
-    image: coredns/coredns:1.15.0
+    image: coredns/coredns:1.15.0@sha256:0a9d8c8ddf34347eb59aad9a8784f0710de88d6d112726d11d271f9bc6daca26
     logging: *logging
     command: ["-conf", "/etc/coredns/Corefile"]
     depends_on:
@@ -184,7 +184,7 @@ services:
   # Rootless Docker for the VS Code container. Its containers share devnet's restrictions
   # (pulls and their HTTP(S) traffic go through squid).
   docker:
-    image: docker:29-dind-rootless
+    image: docker:29.9.2-dind-rootless@sha256:ae083cc7de51e7a8e5a597f8fb774ca7914c408a95fc0f1477826a913479518a
     logging: *logging
     # Only with the "docker" Compose profile, which `hardcode` activates unless
     # the profile's .env says ENABLE_DOCKER=false (a harder sandbox: nothing

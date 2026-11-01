@@ -18,8 +18,10 @@
 # profile's list in the background while it runs (hardcode-sync-extensions),
 # so switching a language brings its extensions without a rebuild.
 
-ARG UBUNTU_VERSION=26.04
-FROM ubuntu:${UBUNTU_VERSION}
+# Ubuntu 26.04 (resolute), one dated build of it, by digest: Dependabot moves
+# it to the next dated build once that is a week old (docs/development.md,
+# "Dependencies").
+FROM ubuntu:resolute-20261006@sha256:c098726dd9b9733f3e885f8de0ef375206a311b0a317eadc40d347b1115fb944
 
 ARG USERNAME=dev
 # Keep 1000: rootless docker runs as uid 1000 too, so files in /shared line up.
