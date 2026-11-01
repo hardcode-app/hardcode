@@ -168,7 +168,7 @@
   }
 
   const handlers = {
-    'home:get': () => ({ home: state.home, profile: state.profile, catalogue: null }),
+    'home:get': () => ({ home: state.home, version: '0.1.0', profile: state.profile, catalogue: null }),
     'home:open': () => null,
     'vscode:port': stateWithFixture,
     'state:get': stateWithFixture,

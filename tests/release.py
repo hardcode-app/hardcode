@@ -1,14 +1,16 @@
 #!/usr/bin/env python3
 """
 The steps of a release that aren't a build (release/release.py): the version
-written into every file that carries it, the updater's configuration, the
-latest.json the app's updater reads (from installers signed for real, with a
-throwaway key), the release's description and its checksums.
+written into every file that carries it, a development build's mark, the
+updater's configuration, the latest.json the app's updater reads (from
+installers signed for real, with a throwaway key), the release's and the
+development build's descriptions, and the checksums.
 """
 
 from __future__ import annotations
 
 import base64
+import importlib.util
 import json
 import shutil
 import sys
@@ -78,6 +80,46 @@ def check_versions(suite: Suite) -> None:
         len(refused) == 4,
         f"refused {refused}",
     )
+
+
+def check_dev_mark(suite: Suite) -> None:
+    suite.check(
+        "the checkout isn't marked as a development build",
+        release.build_mark() == "",
+        repr(release.build_mark()),
+    )
+
+    with tempfile.TemporaryDirectory(prefix="hc-dev-") as temporary:
+        root = Path(temporary)
+        name, _ = release.BUILD_MARK
+        (root / name).parent.mkdir(parents=True)
+        shutil.copy2(ROOT / name, root / name)
+        before = (root / name).read_text(encoding="utf-8")
+
+        change = release.mark_dev("2c419ae", root)
+        after = (root / name).read_text(encoding="utf-8")
+        suite.check(
+            "dev marks the build with its commit, and changes nothing else",
+            release.build_mark(root) == "dev, 2c419ae" and after.replace('"dev, 2c419ae"', '""') == before,
+            change,
+        )
+
+        # The marked module, loaded: what --version and the app show.
+        spec = importlib.util.spec_from_file_location("marked_cli", root / name)
+        marked = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(marked)
+        suite.check(
+            f"...so the command says {marked.version_text()!r}",
+            marked.version_text() == f"{marked.__version__} (dev, 2c419ae)",
+        )
+
+        refused = []
+        for commit in ("2C419AE", "2c419", "2c419ae; true", "", "g2c419ae"):
+            try:
+                release.mark_dev(commit, root)
+            except release.ReleaseError:
+                refused.append(commit)
+        suite.check("a commit that isn't a hash is refused", len(refused) == 5, f"refused {refused}")
 
 
 def check_updater_config(suite: Suite) -> None:
@@ -269,6 +311,40 @@ def check_notes_and_checksums(suite: Suite) -> None:
         except release.ReleaseError as error:
             suite.check("a name a release doesn't have is refused", "nonsense" in str(error), str(error))
 
+    version = next(iter(release.versions().values()))
+    text = release.dev_notes("2c419ae", f"{version}-dev.7", REPOSITORY)
+    suite.check(
+        "the development build's description names its commit, files, images and chart",
+        "{{" not in text
+        and f"`{version} (dev, 2c419ae)`" in text
+        and f"hardcode_cli-{version}-py3-none-any.whl" in text
+        and f"oci://ghcr.io/example-owner/charts/hardcode --version {version}-dev.7" in text
+        and "ghcr.io/example-owner/hardcode-{vscode,squid,gateway,admin}:sha-2c419ae" in text,
+        text,
+    )
+
+    with tempfile.TemporaryDirectory(prefix="hc-dev-notes-") as temporary:
+        out = Path(temporary) / "notes.md"
+        output = harness.run(
+            [
+                sys.executable,
+                ROOT / "release" / "release.py",
+                "dev-notes",
+                "--commit",
+                "2c419ae",
+                "--chart",
+                f"{version}-dev.7",
+                "--repository",
+                REPOSITORY,
+                out,
+            ]
+        )
+        suite.check(
+            "release.py dev-notes writes it",
+            output.ok and out.exists() and out.read_text(encoding="utf-8") == text,
+            output.text,
+        )
+
     with tempfile.TemporaryDirectory(prefix="hc-sums-") as temporary:
         directory = Path(temporary)
         (directory / "a.txt").write_text("a", encoding="utf-8")
@@ -287,13 +363,16 @@ def run_checks(suite: Suite) -> None:
     suite.section("the version")
     check_versions(suite)
 
+    suite.section("a development build's mark")
+    check_dev_mark(suite)
+
     suite.section("the updater's configuration")
     check_updater_config(suite)
 
     suite.section("latest.json")
     check_manifest(suite)
 
-    suite.section("the description and the checksums")
+    suite.section("the descriptions and the checksums")
     check_notes_and_checksums(suite)
 
 

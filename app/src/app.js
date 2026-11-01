@@ -2462,6 +2462,14 @@ async function checkUpdate(errors) {
   }
 }
 
+/** The sidebar says which HardCode this is: its command's version, as the CLI gave it. */
+function checkVersion(errors) {
+  const shown = $('#app-version').textContent;
+  if (!/^\d+\.\d+\.\d+/.test(shown)) {
+    errors.push(`the sidebar's version is "${shown}"`);
+  }
+}
+
 /** Render every view, check them, report to the app (which exits), and tell it how many views there were. */
 async function smoke() {
   const errors = [];
@@ -2476,6 +2484,7 @@ async function smoke() {
   if (!state.data) {
     await sleep(300);
     checkFirstProfile(errors);
+    checkVersion(errors);
     await checkUpdate(errors);
     api.invoke('smoke:done', 0, errors, state.update && state.update.version);
     return;
@@ -2512,6 +2521,7 @@ async function smoke() {
   await checkExtensionStatus(errors);
   await checkLanguageChannels(errors);
   await checkNewProfile(errors);
+  checkVersion(errors);
   await checkUpdate(errors);
 
   api.invoke('smoke:done', document.querySelectorAll('.nav-item').length, errors, state.update && state.update.version);
@@ -2527,6 +2537,11 @@ function showHome(home) {
   $('#home-path').title = home || '';
 }
 
+/** Show which HardCode this is under its name: its bundled command's version, "0.1.0 (dev, 2c419ae)" for a development build. */
+function showVersion(version) {
+  $('#app-version').textContent = version || '';
+}
+
 /**
  * Show the profile the home says to (the one last used, or another), or,
  * with none left, ask for the first: its languages and tools are the one
@@ -2540,6 +2555,7 @@ async function showHomeProfile() {
     return; // shown; the CLI can't be run
   }
   showHome(where.home);
+  showVersion(where.version);
 
   if (!where.profile) {
     forgetProfile();

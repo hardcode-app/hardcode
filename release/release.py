@@ -5,6 +5,9 @@ The steps of a release that aren't a build: the release workflow
 
     release/release.py stamp VERSION
         write VERSION into every file that carries HardCode's version
+    release/release.py dev COMMIT
+        mark a development build of COMMIT: the command's --version, and the
+        app, say "0.1.0 (dev, COMMIT)"
     release/release.py updater-config --repository OWNER/REPO OUT
         the Tauri configuration a release builds the app with: the updater,
         when release/updater.pub holds the key it trusts (else nothing)
@@ -12,6 +15,8 @@ The steps of a release that aren't a build: the release workflow
         DIR/latest.json, which the app's updater reads, from DIR's signed installers
     release/release.py notes --version VERSION --repository OWNER/REPO OUT
         the release's description, from release/notes.md
+    release/release.py dev-notes --commit COMMIT --chart VERSION --repository OWNER/REPO OUT
+        the development build's description, from release/dev-notes.md
     release/release.py checksums DIR
         DIR/SHA256SUMS, for every file in DIR
 
@@ -54,6 +59,13 @@ VERSIONED = [
     ("helm/hardcode/Chart.yaml", r"^version: (\S+)$"),
     ("helm/hardcode/Chart.yaml", r'^appVersion: "([^"]+)"$'),
 ]
+
+# Where a development build is marked as one, and how to find the mark
+# there: the pattern's one group is the mark, empty in a release.
+BUILD_MARK = ("cli/hardcode_cli/__init__.py", r'^__build__ = "([^"]*)"$')
+
+# A commit, as git names it: its hash, or the start of it.
+COMMIT = re.compile(r"^[0-9a-f]{7,40}$")
 
 # The installers the app's updater can apply, by the key it looks for in
 # latest.json ({os}-{arch}-{installer}), and the end of their file names.
@@ -134,6 +146,44 @@ def versions(root: Path = ROOT) -> dict[str, str]:
         found[f"{name} {pattern}"] = match.group(1) if match else ""
 
     return found
+
+
+def mark_dev(commit: str, root: Path = ROOT) -> str:
+    """
+    Mark the files at *root* as a development build of *commit*: the
+    command's ``--version``, and the app, which shows the command's, say
+    "0.1.0 (dev, *commit*)". The change, as ``path: old -> new``.
+    """
+    if not COMMIT.match(commit):
+        raise ReleaseError(f"{commit!r} is not a commit: its hash, or the start of it, in lowercase hex")
+
+    name, pattern = BUILD_MARK
+    path = root / name
+    text = path.read_text(encoding="utf-8")
+
+    match = re.search(pattern, text, re.MULTILINE)
+    if match is None:
+        raise ReleaseError(f"no build mark in {name} (looked for {pattern})")
+
+    mark = f"dev, {commit}"
+    start, end = match.span(1)
+    path.write_text(text[:start] + mark + text[end:], encoding="utf-8")
+
+    return f"{name}: {match.group(1)!r} -> {mark!r}"
+
+
+def build_mark(root: Path = ROOT) -> str:
+    """
+    The development build's mark the files at *root* carry: empty in a
+    release, and in the checkout.
+    """
+    name, pattern = BUILD_MARK
+    match = re.search(pattern, (root / name).read_text(encoding="utf-8"), re.MULTILINE)
+
+    if match is None:
+        raise ReleaseError(f"no build mark in {name} (looked for {pattern})")
+
+    return match.group(1)
 
 
 def updater_config(repository: str, key: Path = UPDATER_KEY) -> dict:
@@ -224,6 +274,22 @@ def manifest(version: str, repository: str, directory: Path, now: Optional[datet
     }
 
 
+def _fill(template: Path, values: dict[str, str]) -> str:
+    """
+    *template* with its ``{{name}}``s replaced by *values*; a name that
+    isn't one of them is refused.
+    """
+    text = template.read_text(encoding="utf-8")
+    for name, value in values.items():
+        text = text.replace("{{" + name + "}}", value)
+
+    unknown = re.findall(r"\{\{\s*(\w+)\s*\}\}", text)
+    if unknown:
+        raise ReleaseError(f"{template.name} names {', '.join(sorted(set(unknown)))}, which a release doesn't have")
+
+    return text
+
+
 def notes(version: str, repository: str, template: Path = ROOT / "release" / "notes.md") -> str:
     """
     The release's description: *template* with its ``{{name}}``s filled in.
@@ -237,15 +303,33 @@ def notes(version: str, repository: str, template: Path = ROOT / "release" / "no
         "owner": repository.split("/")[0].lower(),
     }
 
-    text = template.read_text(encoding="utf-8")
-    for name, value in values.items():
-        text = text.replace("{{" + name + "}}", value)
+    return _fill(template, values)
 
-    unknown = re.findall(r"\{\{\s*(\w+)\s*\}\}", text)
-    if unknown:
-        raise ReleaseError(f"{template.name} names {', '.join(sorted(set(unknown)))}, which a release doesn't have")
 
-    return text
+def dev_notes(
+    commit: str,
+    chart: str,
+    repository: str,
+    root: Path = ROOT,
+    template: Path = ROOT / "release" / "dev-notes.md",
+) -> str:
+    """
+    The development build's description: *template* with the commit it was
+    built from, the version its files carry (the checkout's, at *root*),
+    and its chart's version, filled in.
+    """
+    if not COMMIT.match(commit):
+        raise ReleaseError(f"{commit!r} is not a commit: its hash, or the start of it, in lowercase hex")
+
+    values = {
+        "commit": commit,
+        "version": next(iter(versions(root).values())),
+        "chart": chart,
+        "repository": repository,
+        "owner": repository.split("/")[0].lower(),
+    }
+
+    return _fill(template, values)
 
 
 def checksums(directory: Path) -> str:
@@ -279,6 +363,9 @@ def main(argv: list[str]) -> int:
     command = commands.add_parser("stamp", help="write VERSION into every file that carries the version")
     command.add_argument("version")
 
+    command = commands.add_parser("dev", help="mark a development build of COMMIT")
+    command.add_argument("commit")
+
     command = commands.add_parser("updater-config", help="the Tauri configuration a release builds the app with")
     command.add_argument("--repository", required=True)
     command.add_argument("out", type=Path)
@@ -293,6 +380,12 @@ def main(argv: list[str]) -> int:
     command.add_argument("--repository", required=True)
     command.add_argument("out", type=Path)
 
+    command = commands.add_parser("dev-notes", help="the development build's description")
+    command.add_argument("--commit", required=True)
+    command.add_argument("--chart", required=True)
+    command.add_argument("--repository", required=True)
+    command.add_argument("out", type=Path)
+
     command = commands.add_parser("checksums", help="DIR/SHA256SUMS")
     command.add_argument("directory", type=Path)
 
@@ -302,6 +395,9 @@ def main(argv: list[str]) -> int:
         if arguments.command == "stamp":
             for change in stamp(arguments.version):
                 print(change)
+
+        elif arguments.command == "dev":
+            print(mark_dev(arguments.commit))
 
         elif arguments.command == "updater-config":
             config = updater_config(arguments.repository)
@@ -318,6 +414,10 @@ def main(argv: list[str]) -> int:
 
         elif arguments.command == "notes":
             arguments.out.write_text(notes(arguments.version, arguments.repository), encoding="utf-8")
+
+        elif arguments.command == "dev-notes":
+            text = dev_notes(arguments.commit, arguments.chart, arguments.repository)
+            arguments.out.write_text(text, encoding="utf-8")
 
         elif arguments.command == "checksums":
             (arguments.directory / "SHA256SUMS").write_text(checksums(arguments.directory), encoding="utf-8")

@@ -18,7 +18,7 @@ from dataclasses import asdict
 from pathlib import Path
 from typing import Callable, Optional
 
-from . import __version__, allowlist, bounded, envfile, home, langs, override, profiles, stack, yamlio
+from . import allowlist, bounded, envfile, home, langs, override, profiles, stack, version_text, yamlio
 from .compose import Compose, ComposeError, Runner, docker_executable, docker_subnets
 from .ops import Ops, Result
 
@@ -364,7 +364,7 @@ def cmd_open(app: App, args: argparse.Namespace) -> int:
 def cmd_profiles(app: App, args: argparse.Namespace) -> int:
     """
     List the profiles with their port, subnet and state, and say where the
-    home is (the app shows it).
+    home is and which HardCode this is (the app shows both).
     """
     rows = []
     for name in profiles.list_profiles(app.root):
@@ -382,7 +382,7 @@ def cmd_profiles(app: App, args: argparse.Namespace) -> int:
         )
 
     if app.json_output:
-        app.out(json.dumps({"home": str(app.root), "profiles": rows}, indent=2))
+        app.out(json.dumps({"home": str(app.root), "version": version_text(), "profiles": rows}, indent=2))
         return 0
 
     if not rows:
@@ -935,7 +935,7 @@ def build_parser() -> argparse.ArgumentParser:
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     _shared_options(parser, suppress=False)
-    parser.add_argument("--version", action="version", version=f"hardcode {__version__}")
+    parser.add_argument("--version", action="version", version=f"hardcode {version_text()}")
 
     # Every subcommand inherits the shared options, so `hardcode allow x -p p`
     # works as well as `hardcode -p p allow x`.

@@ -9,6 +9,7 @@ import unittest
 from contextlib import redirect_stdout
 from unittest import mock
 
+import hardcode_cli
 from hardcode_cli import cli, envfile, langs, profiles
 
 from .helpers import FakeRunner, HomeTestCase, updated_catalogue
@@ -62,8 +63,20 @@ class CliTests(HomeTestCase):
         self.assertIn("hardcode [-p NAME | --all]", buffer.getvalue())
 
     def test_version(self):
-        with self.assertRaises(SystemExit), redirect_stdout(io.StringIO()):
+        with self.assertRaises(SystemExit), redirect_stdout(io.StringIO()) as buffer:
             cli.main(["--version"])
+
+        self.assertEqual(buffer.getvalue(), f"hardcode {hardcode_cli.__version__}\n")
+
+    def test_a_development_build_says_so_after_its_version(self):
+        with mock.patch.object(hardcode_cli, "__build__", "dev, 2c419ae"):
+            with self.assertRaises(SystemExit), redirect_stdout(io.StringIO()) as buffer:
+                cli.main(["--version"])
+
+            code, out, _ = self.run_cli("--json", "profiles")
+
+        self.assertEqual(buffer.getvalue(), f"hardcode {hardcode_cli.__version__} (dev, 2c419ae)\n")
+        self.assertEqual((code, json.loads(out)["version"]), (0, f"{hardcode_cli.__version__} (dev, 2c419ae)"))
 
     def test_unknown_profile_and_home(self):
         code, _, err = self.run_cli("-p", "nope", "allow", "x.org")
@@ -115,6 +128,7 @@ class CliTests(HomeTestCase):
         listed = json.loads(out)
         self.assertEqual(listed["profiles"][0]["state"], "running (2 containers)")
         self.assertEqual(listed["home"], str(self.root))
+        self.assertEqual(listed["version"], hardcode_cli.__version__)
 
     def test_profile_add_copy_and_remove(self):
         code, _, err = self.run_cli("profile", "add", "old-node")
