@@ -269,7 +269,7 @@ def effective_spec(profile: dict, defaults: Optional[dict] = None) -> dict:
         "image": pick("image", fallback="hardcode-vscode:latest"),
         "squidImage": pick("squidImage", fallback="hardcode-squid:latest"),
         "dockerImage": pick("dockerImage", fallback="docker:29-dind-rootless"),
-        "corednsImage": pick("corednsImage", fallback="coredns/coredns:1.14.7"),
+        "corednsImage": pick("corednsImage", fallback="coredns/coredns:1.15.0"),
         "imagePullPolicy": pick("imagePullPolicy", fallback="IfNotPresent"),
         "imagePullSecrets": pick("imagePullSecrets", fallback=[]),
         "allowlist": own_allowlist,

@@ -50,7 +50,7 @@ profileDefaults:
   image: hardcode-vscode:latest
   squidImage: hardcode-squid:latest
   dockerImage: docker:29-dind-rootless
-  corednsImage: coredns/coredns:1.14.7
+  corednsImage: coredns/coredns:1.15.0
   imagePullPolicy: IfNotPresent
   imagePullSecrets: []
   # The languages and tools of a profile that doesn't list its own

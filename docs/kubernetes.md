@@ -68,7 +68,7 @@ exist; afterwards accounts live in the `hardcode-admin-users` Secret.
 | `admin.trustedProxies` | `[]` | addresses/CIDRs (the Ingress controller's pods or nodes) whose `X-Forwarded-For` the login throttle believes, read from the right (the first address none of them added is the client); from anyone else the header is ignored |
 | `admin.resources`, `.nodeSelector`, `.tolerations` | 96Mi request / 256Mi limit | |
 | `imagePullSecrets` | `[]` | for the admin image |
-| `profileDefaults.image`, `.squidImage`, `.dockerImage`, `.corednsImage` | `hardcode-vscode:latest`, `hardcode-squid:latest`, `docker:29-dind-rootless`, `coredns/coredns:1.14.7` | images every profile uses unless its spec says otherwise |
+| `profileDefaults.image`, `.squidImage`, `.dockerImage`, `.corednsImage` | `hardcode-vscode:latest`, `hardcode-squid:latest`, `docker:29-dind-rootless`, `coredns/coredns:1.15.0` | images every profile uses unless its spec says otherwise |
 | `profileDefaults.imagePullPolicy`, `.imagePullSecrets` | `IfNotPresent`, `[]` | |
 | `profileDefaults.languages` | `[]` (all of them) | the languages and tools of a profile that doesn't list its own (`spec.languages`); see [Languages on Kubernetes](#languages-on-kubernetes) |
 | `profileDefaults.upstreamDNS` | `/etc/resolv.conf` | where allowlisted names resolve (the node's resolvers), or IPs |

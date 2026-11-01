@@ -118,7 +118,7 @@ services:
   # DNS for devnet: allowlisted names are resolved upstream, the rest get
   # NXDOMAIN, so DNS can't be used as an exfiltration channel.
   coredns:
-    image: coredns/coredns:1.14.7
+    image: coredns/coredns:1.15.0
     logging: *logging
     command: ["-conf", "/etc/coredns/Corefile"]
     depends_on:
