@@ -4,9 +4,12 @@
 # key its updates are signed with), the hardcode command as binaries and as
 # a Python package, the Helm chart as an OCI artifact, and a GitHub Release
 # with all of it, the source, latest.json for the app's updater, checksums
-# and notes. A manual run builds the same without a version, and publishes
-# only the images' latest tag, from main. Linux builds happen in the build
-# image (images/build), like everything else.
+# and notes. A manual run from main is a development build of the same,
+# marked with its commit (release/release.py dev): the "dev" prerelease,
+# which the next one replaces, the images' edge and sha-<commit> tags, and
+# an X.Y.Z-dev.N chart. A manual run from another branch builds everything
+# and publishes nothing. Linux builds happen in the build image
+# (images/build), like everything else.
 name: Release
 
 on:
@@ -26,6 +29,16 @@ jobs:
     outputs:
       # The tag without its v; empty on a manual run.
       version: ${{ steps.version.outputs.version }}
+      # "true" on a manual run from main: a development build, published.
+      dev: ${{ steps.version.outputs.dev }}
+      # The commit, as a development build's mark and its images' tag name it.
+      commit: ${{ steps.version.outputs.commit }}
+      # The images' tag the chart points at: the release's version, or
+      # sha-<commit>; empty when nothing is published.
+      image-tag: ${{ steps.version.outputs.image-tag }}
+      # The chart's version: the release's, X.Y.Z-dev.<run> for a development
+      # build (X.Y.Z the checkout's, the next release's), 0.0.0-<run> else.
+      chart: ${{ steps.version.outputs.chart }}
       # Where the images go: GHCR's names are lowercase, an owner's needn't be.
       prefix: ${{ steps.version.outputs.prefix }}
     steps:
@@ -34,12 +47,29 @@ jobs:
       - id: version
         shell: bash
         run: |
+          commit="${GITHUB_SHA::7}"
+          echo "commit=$commit" >> "$GITHUB_OUTPUT"
+
           if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
             version="${GITHUB_REF_NAME#v}"
             # Refuses a version a release can't carry, before anything is published.
             images/build/run.sh release/release.py stamp "$version"
-            echo "version=$version" >> "$GITHUB_OUTPUT"
+            {
+              echo "version=$version"
+              echo "image-tag=$version"
+              echo "chart=$version"
+            } >> "$GITHUB_OUTPUT"
+          elif [[ "$GITHUB_REF" == refs/heads/main ]]; then
+            checkout_version="$(sed -n 's/^version: //p' helm/hardcode/Chart.yaml)"
+            {
+              echo "dev=true"
+              echo "image-tag=sha-$commit"
+              echo "chart=$checkout_version-dev.$GITHUB_RUN_NUMBER"
+            } >> "$GITHUB_OUTPUT"
+          else
+            echo "chart=0.0.0-$GITHUB_RUN_NUMBER" >> "$GITHUB_OUTPUT"
           fi
+
           echo "prefix=ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/hardcode" >> "$GITHUB_OUTPUT"
 
   images:
@@ -77,7 +107,8 @@ jobs:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-      # A prerelease gets its version only; latest is a release, or a manual run from main.
+      # A release gets its version, X.Y and latest; a prerelease its version
+      # only. A development build gets edge and sha-<commit>, never latest.
       - id: meta
         uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
         with:
@@ -85,13 +116,14 @@ jobs:
           tags: |
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
-            type=raw,value=latest,enable={{is_default_branch}}
             type=raw,value=latest,enable=${{ needs.version.outputs.version != '' && !contains(needs.version.outputs.version, '-') }}
+            type=raw,value=edge,enable=${{ needs.version.outputs.dev == 'true' }}
+            type=raw,value=sha-${{ needs.version.outputs.commit }},enable=${{ needs.version.outputs.dev == 'true' }}
       - uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
           context: ${{ matrix.image.context }}
           file: ${{ matrix.image.dockerfile }}
-          push: true
+          push: ${{ needs.version.outputs.image-tag != '' }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: ${{ matrix.image.name != 'vscode' && format('type=gha,scope={0}', matrix.image.name) || '' }}
@@ -108,6 +140,7 @@ jobs:
     timeout-minutes: 60
     env:
       VERSION: ${{ needs.version.outputs.version }}
+      COMMIT: ${{ needs.version.outputs.commit }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: ./.github/actions/build-image
@@ -124,6 +157,9 @@ jobs:
           images/build/run.sh release/release.py stamp "$VERSION"
           images/build/run.sh release/release.py updater-config --repository "$GITHUB_REPOSITORY" app/src-tauri/tauri.updater.conf.json
           echo "HARDCODE_UPDATER_CONFIG=src-tauri/tauri.updater.conf.json" >> "$GITHUB_ENV"
+      - name: A development build's mark
+        if: env.VERSION == ''
+        run: images/build/run.sh release/release.py dev "$COMMIT"
       - run: app/build.sh bundle
         env:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
@@ -148,6 +184,7 @@ jobs:
     timeout-minutes: 60
     env:
       VERSION: ${{ needs.version.outputs.version }}
+      COMMIT: ${{ needs.version.outputs.commit }}
     strategy:
       fail-fast: false
       matrix:
@@ -169,6 +206,10 @@ jobs:
         run: |
           python release/release.py stamp "$VERSION"
           python release/release.py updater-config --repository "$GITHUB_REPOSITORY" app/src-tauri/tauri.updater.conf.json
+      - name: A development build's mark
+        if: env.VERSION == ''
+        shell: bash
+        run: python release/release.py dev "$COMMIT"
       - name: The CLI as a sidecar
         shell: bash
         run: |
@@ -231,6 +272,7 @@ jobs:
     timeout-minutes: 20
     env:
       VERSION: ${{ needs.version.outputs.version }}
+      COMMIT: ${{ needs.version.outputs.commit }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: ./.github/actions/build-image
@@ -238,6 +280,9 @@ jobs:
         if: env.VERSION != ''
         run: images/build/run.sh release/release.py stamp "$VERSION"
       - run: tests/cli.py
+      - name: A development build's mark
+        if: env.VERSION == ''
+        run: images/build/run.sh release/release.py dev "$COMMIT"
       - run: app/build.sh cli
       - run: app/build.sh wheel
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
@@ -255,6 +300,7 @@ jobs:
     timeout-minutes: 20
     env:
       VERSION: ${{ needs.version.outputs.version }}
+      COMMIT: ${{ needs.version.outputs.commit }}
     strategy:
       fail-fast: false
       matrix:
@@ -272,6 +318,10 @@ jobs:
         run: python release/release.py stamp "$VERSION"
       - run: pip install -r cli/requirements.txt -r images/build/requirements.txt
       - run: python -m unittest discover -s cli -t cli
+      - name: A development build's mark
+        if: env.VERSION == ''
+        shell: bash
+        run: python release/release.py dev "$COMMIT"
       - name: Build
         shell: bash
         run: |
@@ -306,28 +356,40 @@ jobs:
       - uses: ./.github/actions/build-image
       - name: Package (in the build image)
         env:
-          VER: ${{ needs.version.outputs.version || format('0.0.0-{0}', github.run_number) }}
+          VER: ${{ needs.version.outputs.chart }}
           PREFIX: ${{ needs.version.outputs.prefix }}
-          TAGGED: ${{ needs.version.outputs.version != '' }}
-          BUILD_ENV: VER PREFIX TAGGED
+          IMAGE_TAG: ${{ needs.version.outputs.image-tag }}
+          BUILD_ENV: VER PREFIX IMAGE_TAG
         run: |
           images/build/run.sh bash -e <<'SH'
-          # The packaged chart points at the images this workflow publishes, at this version
-          # (a tagged release only: a manual run publishes no versioned images to point at).
-          [ "$TAGGED" != true ] || python3 - "$VER" "$PREFIX" <<'PY'
-          import sys, pathlib
-          ver, prefix = sys.argv[1], sys.argv[2]
-          p = pathlib.Path("helm/hardcode/values.yaml"); s = p.read_text()
-          for old, new in (("repository: hardcode-admin\n", f"repository: {prefix}-admin\n"), ("tag: latest\n", f"tag: {ver}\n"),
-                           ("image: hardcode-vscode:latest\n", f"image: {prefix}-vscode:{ver}\n"), ("squidImage: hardcode-squid:latest\n", f"squidImage: {prefix}-squid:{ver}\n")):
-              assert s.count(old) == 1, old
-              s = s.replace(old, new)
-          p.write_text(s)
+          # The packaged chart points at the images this run publishes, at their
+          # tag: a release's version, or a development build's sha-<commit>. A
+          # run that publishes nothing leaves the chart's own names.
+          [ -z "$IMAGE_TAG" ] || python3 - "$IMAGE_TAG" "$PREFIX" <<'PY'
+          import pathlib
+          import sys
+
+          tag = sys.argv[1]
+          prefix = sys.argv[2]
+          values = pathlib.Path("helm/hardcode/values.yaml")
+          text = values.read_text(encoding="utf-8")
+
+          pointed = (
+              ("repository: hardcode-admin\n", f"repository: {prefix}-admin\n"),
+              ("tag: latest\n", f"tag: {tag}\n"),
+              ("image: hardcode-vscode:latest\n", f"image: {prefix}-vscode:{tag}\n"),
+              ("squidImage: hardcode-squid:latest\n", f"squidImage: {prefix}-squid:{tag}\n"),
+          )
+          for old, new in pointed:
+              assert text.count(old) == 1, old
+              text = text.replace(old, new)
+
+          values.write_text(text, encoding="utf-8")
           PY
           helm package helm/hardcode --version "$VER" --app-version "$VER" --destination dist
           SH
       - name: Push to GHCR (OCI)
-        if: needs.version.outputs.version != ''
+        if: needs.version.outputs.image-tag != ''
         env:
           TOKEN: ${{ secrets.GITHUB_TOKEN }}
           ACTOR: ${{ github.actor }}
@@ -376,3 +438,52 @@ jobs:
           prerelease: ${{ contains(needs.version.outputs.version, '-') }}
           files: dist/release/*
           fail_on_unmatched_files: true
+
+  # A development build (a manual run from main): the "dev" prerelease, with
+  # everything the run built, replacing the last one. A prerelease is never
+  # GitHub's latest release, so the app's updater never offers it.
+  dev-release:
+    name: Development build
+    if: needs.version.outputs.dev == 'true'
+    needs: [version, images, app-linux, app-native, cli-linux, cli-native, chart]
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    # One replacement at a time.
+    concurrency:
+      group: dev-release
+    permissions:
+      contents: write
+    env:
+      COMMIT: ${{ needs.version.outputs.commit }}
+      CHART: ${{ needs.version.outputs.chart }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: ./.github/actions/build-image
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          path: dist/dev
+          merge-multiple: true
+      - name: Assemble (in the build image)
+        run: |
+          images/build/run.sh release/release.py dev-notes --commit "$COMMIT" --chart "$CHART" --repository "$GITHUB_REPOSITORY" dist/dev-notes.md
+          images/build/run.sh release/release.py checksums dist/dev
+      - name: Replace the last development build
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if gh release view dev --repo "$GITHUB_REPOSITORY" > /dev/null 2>&1; then
+            gh release delete dev --repo "$GITHUB_REPOSITORY" --cleanup-tag --yes
+          fi
+
+          # A tag a failed run left behind would keep the release at its commit.
+          if gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/dev" > /dev/null 2>&1; then
+            gh api --method DELETE "repos/$GITHUB_REPOSITORY/git/refs/tags/dev"
+          fi
+
+          gh release create dev dist/dev/* \
+            --repo "$GITHUB_REPOSITORY" \
+            --target "$GITHUB_SHA" \
+            --prerelease \
+            --latest=false \
+            --title "Development build ($COMMIT)" \
+            --notes-file dist/dev-notes.md

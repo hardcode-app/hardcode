@@ -25,7 +25,9 @@ happens after deleting the last profile.
 
 ## The window
 
-The sidebar has the **profile switcher** (with the port each profile is
+The sidebar has the app's version under its name (a development build's
+with the commit it was built from: `0.1.0 (dev, 2c419ae)`), the
+**profile switcher** (with the port each profile is
 published on), a **＋** for new profiles, the views (Overview, Languages /
 Tools, Extensions, Allowlist, Blocked traffic, Port forwards, Mounts), and
 where the profiles are, with *Show folder* to open it in the file manager

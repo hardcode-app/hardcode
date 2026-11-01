@@ -21,9 +21,9 @@ git push origin v1.2.0
   `Cargo.lock` and `tauri.conf.json`, and the chart's `Chart.yaml`). In the
   repository they stay at the development version; `tests/release.py`
   checks they agree.
-- **A manual run** (Actions → Release → Run workflow) builds the same
-  without a version, signs nothing, and publishes only the images' `latest`
-  tag, from `main`.
+- **A manual run** (Actions → Release → Run workflow) from `main` is a
+  [development build](#development-builds); from any other branch it
+  builds everything and publishes nothing.
 
 ## What a release publishes
 
@@ -48,6 +48,33 @@ those platforms; they install the same pinned PyInstaller
 Tauri CLI (the build image's version) as the build image has. macOS builds
 are unsigned unless the `APPLE_CERTIFICATE`, `APPLE_CERTIFICATE_PASSWORD`
 and `APPLE_SIGNING_IDENTITY` secrets hold a certificate.
+
+## Development builds
+
+A manual run from `main` (Actions → Release → Run workflow, or
+`gh workflow run release.yml --ref main`) builds everything a release does,
+from `main` as it is, and publishes it for testing:
+
+| | Where |
+|---|---|
+| The app, the `hardcode` command, its Python package, the chart | the **`dev` prerelease** on the Releases page, with `SHA256SUMS`. Each development build deletes the last one and its `dev` tag, and publishes itself at its own commit |
+| The images | `ghcr.io/<owner>/hardcode-{vscode,squid,gateway,admin}`, tagged `sha-<commit>` and `edge` (the newest development build); never `latest`, which is a release's |
+| The chart | `oci://ghcr.io/<owner>/charts/hardcode`, version `X.Y.Z-dev.N` (the checkout's version, which is the next release's, and the run's number), pointing at the `sha-<commit>` images. Helm takes it only when asked: `--devel`, or its exact version |
+
+Its files carry the checkout's version, since Windows installers take
+nothing but numbers, and say they are a development build where people
+look: `hardcode --version` and the app's sidebar say
+`0.1.0 (dev, 2c419ae)` (`release/release.py dev` marks the build). The app
+has no updater, like any build without a release's version, and nothing
+is signed: macOS refuses the app until its quarantine is cleared, which
+the prerelease's description
+([`release/dev-notes.md`](../release/dev-notes.md)) says how to do. Being a
+prerelease, it is never GitHub's latest release: the app's updater, and
+`releases/latest`, never see it.
+
+While the repository is private, a run's macOS minutes count ten times
+against the account's Actions minutes and its Windows minutes twice, so
+development builds are started by hand.
 
 ## The app's updater
 
@@ -109,9 +136,10 @@ the new one.
 ## Testing the steps
 
 `tests/release.py` tests `release/release.py` for real: the version written
-into every file (and nothing else), the updater's configuration, a
-`latest.json` assembled from installers signed with a throwaway key (each
-signature carrying its version), the description and the checksums.
+into every file (and nothing else), a development build's mark (and the
+checkout without one), the updater's configuration, a `latest.json`
+assembled from installers signed with a throwaway key (each signature
+carrying its version), both descriptions and the checksums.
 `tests/app.py` builds the app with a release's updater configuration,
 pointed at a `latest.json` it serves, and checks that the app offers the
 newer version. CI runs both, and actionlint is worth running over the

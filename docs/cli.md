@@ -20,7 +20,7 @@ never needs root, and as root it would use root's home.
 | `--all` | Act on every profile. Accepted by `allow`, `deny`, `allowlist`, `reload`, `mount`, `unmount`, `enable`, `disable`, `rebuild`, `docker`, `extension`. |
 | `--json` | Machine-readable output (what the desktop app uses). |
 | `--config DIR` | The folder the profiles are kept in (the home). Default: `$HARDCODE_CONFIG`, else `~/.config/hardcode` on Linux (`$XDG_CONFIG_HOME/hardcode`), `~/Library/Application Support/HardCode` on macOS, `%LOCALAPPDATA%\HardCode` on Windows. |
-| `--version` | |
+| `--version` | The command's version: `hardcode 0.1.0`, or `hardcode 0.1.0 (dev, 2c419ae)` for a development build, with the commit it was built from. |
 
 Exit codes: `0` success, `1` a reported error (`error: …` on stderr; a
 damaged `compose.override.yaml` is reported with its path, never as a
@@ -132,7 +132,7 @@ Queries print their own objects:
 
 | Command | Shape |
 |---|---|
-| `profiles` / `status` | `{"home": "<folder>", "profiles": [{"name", "port", "subnet", "state", "running"}]}` |
+| `profiles` / `status` | `{"home": "<folder>", "version": "<as --version says it>", "profiles": [{"name", "port", "subnet", "state", "running"}]}` |
 | `ps` | `{"services": [{"service", "state", "status", "health"}], "docker": true, "error": "", "extensions": {"state", "installed", "total"}}` (`docker: false` when the Docker CLI isn't found; `error` says why Compose couldn't list the containers, such as a daemon that isn't running, and is empty when it could; `extensions` is how far the running VS Code container's extensions have got, `state` `installing` or `done`, and `null` when it isn't running) |
 | `show` | `{"profile", "env": {…}, "vscodePort", "allowlist": [entries], "forwards": [{port, host, target}], "mounts": [{local, remote, mode}], "langs": [languages], "extensions": [extensions], "image": {"built", "languages"}, "rebuildNeeded", "docker": bool, "profiles": [{name, port}]}` (`image.built` is `false` with no image and `null` when Docker can't say; `image.languages` is `[]` with no image, the image's languages and tools when it has the label, `null` when nobody can tell; `rebuildNeeded` is `null` when nobody can tell) |
 | `languages` | `{"languages": [languages], "rebuildNeeded": bool}` |

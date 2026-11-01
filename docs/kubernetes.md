@@ -34,7 +34,8 @@ spec:                                 team-a-squid              Deployment + Ser
   daemon (30Gi).
 - Images the cluster can pull: the VS Code container and squid images are built from
   this repository and pushed to your registry (releases publish them to
-  GHCR as `ghcr.io/<owner>/hardcode-{vscode,squid,gateway,admin}`).
+  GHCR as `ghcr.io/<owner>/hardcode-{vscode,squid,gateway,admin}`, and
+  development builds as their `edge` and `sha-<commit>` tags).
 
 ## Install
 
@@ -45,6 +46,8 @@ helm install hardcode ./helm/hardcode -n sandbox --create-namespace \
   --set profileDefaults.squidImage=registry.example.com/hardcode/squid:1.0
 # or a released chart:
 helm install hardcode oci://ghcr.io/<owner>/charts/hardcode --version 0.1.0 -n sandbox --create-namespace …
+# or the newest development build's (X.Y.Z-dev.N, with its sha-<commit> images):
+helm install hardcode oci://ghcr.io/<owner>/charts/hardcode --devel -n sandbox --create-namespace …
 ```
 
 The chart installs the CRD, a ServiceAccount with a namespaced Role, the

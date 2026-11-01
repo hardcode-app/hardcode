@@ -182,11 +182,11 @@
       }
 
       if (profile) {
-        return { home, profile, catalogue: null };
+        return { home, version: listed.version, profile, catalogue: null };
       }
 
       const catalogue = JSON.parse(await raw(['--json', 'languages'])).languages;
-      return { home, profile: null, catalogue };
+      return { home, version: listed.version, profile: null, catalogue };
     },
 
     /** Show the home in the file manager, to edit a profile's files by hand. */
