@@ -96,8 +96,13 @@ A change is complete when all of these are true:
   what the archive ships; the app's page stays plain JS; Rust stays the thin
   shell it is. A new runtime dependency anywhere is a discussion, not a
   commit.
-- Pin what you add (image tags, chart versions, actions) and let Dependabot
-  move it.
+- Pin what you add (image tags, chart versions, actions) where something
+  moves it: Dependabot, or `maintenance/pins.py` for the build image's
+  vendor binaries ([docs/development.md](docs/development.md#dependencies)).
+  Nothing that builds HardCode is taken before it is a week old: CI's Pin
+  ages job fails a pull request with a younger pin. Don't pin by hand, and
+  don't merge an action's update without reading it; the patch and minor
+  updates that pass merge themselves (`maintenance/merge.py`).
 - **Everything builds and tests in Ubuntu 26.04 containers. Always.** The
   build image (`images/build/Dockerfile`) is the environment; `tests/*.py`
   and `app/build.sh` run themselves in it through `images/build/run.sh`.
@@ -105,7 +110,10 @@ A change is complete when all of these are true:
   get a build or a test out, and don't run a suite on the host "just this
   once"; add what's missing to the Dockerfile, pinned, with the reason.
   The archive's package first; a vendor binary only when the archive has
-  nothing, checksum-pinned.
+  nothing, checksum-pinned. The one exception is the dependency workflow's
+  two jobs (`dependencies.yml`): they hold a write token, so they run
+  nothing but `maintenance/`'s standard-library scripts, on the runner's
+  own Python, without the build image or its cache.
 
 ## 5. Don't hurt the machine you're on
 

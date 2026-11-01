@@ -1,0 +1,92 @@
+# Keeps dependencies moving without anyone pinning by hand (docs/development.md,
+# "Dependencies"). Dependabot proposes updates a week old (its cooldown); CI
+# checks every pin a pull request changes is a week old too (the Pin ages
+# job). This workflow does the rest:
+#
+# - merge: after every CI run, and daily, merges the updates that may merge
+#   themselves, asks Dependabot to rebase those behind main, and runs a
+#   failed pin-age check again a day later (maintenance/merge.py);
+# - vendor: weekly, proposes the build image's vendor binaries' newest
+#   releases that are a week old, with their publishers' checksums
+#   (maintenance/pins.py vendor), as the pins/vendor-binaries pull request.
+#
+# Both hold a write token, so both run nothing but those two scripts, on the
+# runner's own Python: no build image, no cache, no third-party action but
+# checkout.
+name: Dependencies
+
+on:
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
+  schedule:
+    - cron: "17 6 * * *"
+    - cron: "23 5 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  merge:
+    name: Merge what may merge itself
+    if: github.event_name != 'schedule' || github.event.schedule == '17 6 * * *'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    # One at a time: two runs mustn't merge or ask twice.
+    concurrency:
+      group: dependencies-merge
+    permissions:
+      contents: write
+      pull-requests: write
+      actions: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - run: python3 maintenance/merge.py --repository "$GITHUB_REPOSITORY"
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+
+  vendor:
+    name: The build image's vendor binaries
+    if: github.event_name == 'workflow_dispatch' || github.event.schedule == '23 5 * * 1'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+      pull-requests: write
+      actions: write
+    env:
+      GITHUB_TOKEN: ${{ github.token }}
+      GH_TOKEN: ${{ github.token }}
+      BRANCH: pins/vendor-binaries
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Their newest releases that are a week old
+        run: python3 maintenance/pins.py vendor --write --message "$RUNNER_TEMP/message.txt"
+      - name: Propose them
+        run: |
+          if git diff --quiet; then
+            echo "nothing to propose"
+            exit 0
+          fi
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git switch --create "$BRANCH"
+          git commit --all --file "$RUNNER_TEMP/message.txt"
+          git push --force origin "$BRANCH"
+
+          open="$(gh pr list --head "$BRANCH" --state open --json number --jq '.[].number')"
+          if [ -z "$open" ]; then
+            gh pr create \
+              --head "$BRANCH" \
+              --base main \
+              --title "$(head -n 1 "$RUNNER_TEMP/message.txt")" \
+              --body-file "$RUNNER_TEMP/message.txt"
+          fi
+
+          # A push made with this workflow's token starts no workflow: CI is
+          # started here, and maintenance/merge.py finds its run by commit.
+          gh workflow run ci.yml --ref "$BRANCH"

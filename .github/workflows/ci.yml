@@ -113,6 +113,35 @@ jobs:
       - uses: ./.github/actions/build-image
       - run: tests/release.py
 
+  maintenance:
+    name: Maintenance scripts
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: ./.github/actions/build-image
+      - run: tests/maintenance.py
+
+  # Nothing that builds HardCode is taken until it is a week old: every pin
+  # a pull request changes (crates, Python packages, images, the build
+  # image's vendor binaries) is looked up where it was published.
+  # maintenance/merge.py runs this job again a day after it failed.
+  pin-ages:
+    name: Pin ages
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # The base branch too, to compare with.
+          fetch-depth: 0
+      - uses: ./.github/actions/build-image
+      - run: images/build/run.sh maintenance/pins.py ages "origin/$GITHUB_BASE_REF"
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          BUILD_ENV: GITHUB_TOKEN
+
   helm:
     name: Helm chart
     runs-on: ubuntu-latest
