@@ -6,6 +6,7 @@ operator that applies it (hardcode_admin.operator), against a fake API server.
 import base64
 import dataclasses
 import os
+import re
 import shutil
 import subprocess
 import tempfile
@@ -107,8 +108,9 @@ class EffectiveSpecTests(unittest.TestCase):
         self.assertEqual(manifests.with_memory_limit("junk", manifests.SQUID_RESOURCES)["limits"]["memory"], "512Mi")
 
     def test_the_fallback_images_are_the_ones_compose_and_the_chart_pin(self):
-        # Dependabot moves the pins in compose.yaml and the chart's
-        # values.yaml together; the operator's fallbacks follow by hand.
+        # Dependabot moves the pin in compose.yaml only: the chart's
+        # values.yaml and the operator's fallbacks follow by hand, in its
+        # pull request.
         repo = Path(__file__).resolve().parent.parent.parent
         compose = (repo / "compose.yaml").read_text(encoding="utf-8")
         values = (repo / "helm" / "hardcode" / "values.yaml").read_text(encoding="utf-8")
@@ -116,11 +118,22 @@ class EffectiveSpecTests(unittest.TestCase):
 
         for key, name in (("corednsImage", "coredns/coredns"), ("dockerImage", "docker")):
             with self.subTest(image=name):
-                pinned = fallbacks[key]
+                # "    image: docker:29-dind-rootless" in compose.yaml,
+                # "  dockerImage: docker:29-dind-rootless" in values.yaml.
+                in_compose = re.search(rf"^ +image: ({re.escape(name)}:\S+)$", compose, re.MULTILINE)
+                in_values = re.search(rf"^ +{key}: (\S+)$", values, re.MULTILINE)
+                pins = {
+                    "compose.yaml": in_compose.group(1) if in_compose else None,
+                    "helm/hardcode/values.yaml": in_values.group(1) if in_values else None,
+                    "admin/hardcode_admin/manifests.py": fallbacks[key],
+                }
 
-                self.assertTrue(pinned.startswith(f"{name}:"), pinned)
-                self.assertIn(f"image: {pinned}\n", compose)
-                self.assertIn(f"  {key}: {pinned}\n", values)
+                self.assertIsNotNone(pins["compose.yaml"], f"no {name} image in compose.yaml")
+                self.assertEqual(
+                    len(set(pins.values())),
+                    1,
+                    f"{name} is pinned differently, and all three follow compose.yaml: {pins}",
+                )
 
     def test_a_profile_without_a_memory_limit_inherits_the_charts(self):
         spec = manifests.effective_spec(

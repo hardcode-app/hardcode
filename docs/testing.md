@@ -95,7 +95,7 @@ workstation; a runner needs nothing but Docker:
 | Commit messages | `tests/commits.py`, over the whole history |
 | Python formatting and lint | `tests/lint.py` |
 | CLI | `tests/cli.py`: unit tests and the scenario |
-| CLI unit tests (macOS, Windows, Python 3.9) | the one job outside the image: the command runs on users' macOS and Windows machines with whatever Python they have (3.9 is the floor), and only those platforms can check that |
+| CLI unit tests (macOS, Windows, Python 3.9) | the one job outside the image: the command runs on users' macOS and Windows machines with whatever Python they have (3.9 is the floor, checked on Ubuntu 24.04: GitHub has no 3.9 for 26.04), and only those platforms can check that |
 | Desktop app | `tests/app.py`: Rust tests, build, headless launch; cargo's caches and target directory are cached between runs |
 | Operator and admin API | `tests/admin.py` |
 | Proxy policy and image scripts | `tests/proxy.py`, then `tests/images.py` |
@@ -108,10 +108,11 @@ Dependabot keeps current the Rust crates; the Python packages (the
 admin's, the build image's, and `cli/requirements.txt`, what the jobs
 outside the build image install); the actions, pinned by commit SHA (the
 workflows' and the build-image composite action's); the Dockerfiles' base
-images; and the coredns and docker images, pinned in both `compose.yaml`
-and the chart's `values.yaml` and moved in one pull request. The operator's
-fallbacks for those two (`admin/hardcode_admin/manifests.py`) follow by
-hand: the admin tests fail until all three agree. The binaries the build
+images; and the coredns and docker images in `compose.yaml`. Those two are
+pinned in the chart's `values.yaml` and as the operator's fallbacks
+(`admin/hardcode_admin/manifests.py`) too, which Dependabot doesn't move:
+they follow by hand, in its pull request, and the admin tests fail until
+all three agree. The binaries the build
 image pins by checksum (kind, kubectl, helm, the Tauri CLI) are bumped by
 hand in its Dockerfile; the release's macOS and Windows builds take the
 Tauri CLI's version and PyInstaller's pin from the build image's files. The
