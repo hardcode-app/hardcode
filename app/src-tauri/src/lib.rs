@@ -14,7 +14,7 @@ use std::io::{BufRead, BufReader, Read};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{LazyLock, Mutex, OnceLock};
+use std::sync::{Arc, LazyLock, Mutex, OnceLock};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -37,6 +37,18 @@ static STREAMS: LazyLock<Mutex<HashMap<String, Child>>> =
 
 /// No `hardcode` call the window waits on should take longer than this.
 const RUN_TIMEOUT: Duration = Duration::from_secs(15 * 60);
+
+/// The most of a command's output the window holds, on each of stdout and
+/// stderr. The CLI keeps what it reads from the sandbox to 64 MiB a stream;
+/// this leaves room for its JSON around that, and stops anything past it.
+const OUTPUT_LIMIT: usize = 128 * 1024 * 1024;
+
+/// The longest line a streamed command sends to the console; the rest of a
+/// longer one is left out, and the line marked with `LINE_CUT`.
+const LINE_LIMIT: usize = 64 * 1024;
+
+/// What ends a streamed line that was cut at `LINE_LIMIT`.
+const LINE_CUT: &str = " [cut]";
 
 /// How long to wait for a command's output pipes to drain once it has ended.
 /// After a kill, something it started may still hold them.
@@ -238,13 +250,23 @@ pub fn kill_tree(child: &mut Child) {
     let _ = child.wait();
 }
 
-/// Read a pipe to its end in a thread of its own, so that neither pipe can
-/// fill up and stall the command while the other is being read.
-fn read_in_background<R: Read + Send + 'static>(pipe: Option<R>) -> thread::JoinHandle<Vec<u8>> {
+/// Read a pipe in a thread of its own, so that neither pipe can fill up and
+/// stall the command while the other is being read: to its end, or to
+/// `limit` bytes, when `over` is set and the rest left unread.
+fn read_in_background<R: Read + Send + 'static>(
+    pipe: Option<R>,
+    limit: usize,
+    over: Arc<AtomicBool>,
+) -> thread::JoinHandle<Vec<u8>> {
     thread::spawn(move || {
         let mut bytes = Vec::new();
-        if let Some(mut pipe) = pipe {
-            let _ = pipe.read_to_end(&mut bytes);
+        if let Some(pipe) = pipe {
+            let _ = pipe.take(limit as u64 + 1).read_to_end(&mut bytes);
+        }
+
+        if bytes.len() > limit {
+            bytes.truncate(limit);
+            over.store(true, Ordering::Relaxed);
         }
         bytes
     })
@@ -264,14 +286,26 @@ fn collect_within(handle: thread::JoinHandle<Vec<u8>>, deadline: Instant) -> Vec
     }
 }
 
-/// Run a command to completion, or kill it once `timeout` has passed.
-pub fn run_command(mut command: Command, timeout: Duration) -> Result<CliResult, String> {
+/// Run a command to completion, or kill it once `timeout` has passed or it
+/// has printed more than `OUTPUT_LIMIT`.
+pub fn run_command(command: Command, timeout: Duration) -> Result<CliResult, String> {
+    run_command_within(command, timeout, OUTPUT_LIMIT)
+}
+
+/// `run_command`, holding no more than `limit` bytes of each of stdout and
+/// stderr: a command that prints more is killed.
+pub fn run_command_within(
+    mut command: Command,
+    timeout: Duration,
+    limit: usize,
+) -> Result<CliResult, String> {
     command.stdout(Stdio::piped()).stderr(Stdio::piped());
     let mut child = spawn_isolated(&mut command)
         .map_err(|error| format!("could not start the hardcode command: {error}"))?;
 
-    let stdout_reader = read_in_background(child.stdout.take());
-    let stderr_reader = read_in_background(child.stderr.take());
+    let over = Arc::new(AtomicBool::new(false));
+    let stdout_reader = read_in_background(child.stdout.take(), limit, over.clone());
+    let stderr_reader = read_in_background(child.stderr.take(), limit, over.clone());
 
     let started = Instant::now();
     let mut timed_out = false;
@@ -279,6 +313,11 @@ pub fn run_command(mut command: Command, timeout: Duration) -> Result<CliResult,
     let code = loop {
         match child.try_wait() {
             Ok(Some(status)) => break status.code().unwrap_or(-1),
+
+            Ok(None) if over.load(Ordering::Relaxed) => {
+                kill_tree(&mut child);
+                break -1;
+            }
 
             Ok(None) if started.elapsed() > timeout => {
                 kill_tree(&mut child);
@@ -299,6 +338,11 @@ pub fn run_command(mut command: Command, timeout: Duration) -> Result<CliResult,
         stderr.push_str(&format!(
             "\nhardcode timed out after {} s",
             timeout.as_secs()
+        ));
+    }
+    if over.load(Ordering::Relaxed) {
+        stderr.push_str(&format!(
+            "\nhardcode printed more than {limit} bytes, and was stopped"
         ));
     }
 
@@ -329,6 +373,46 @@ async fn cli_run(args: Vec<String>) -> Result<CliResult, String> {
     }
 }
 
+/// Hand each line of `pipe` to `each`, without its line ending, until the
+/// pipe ends. A line longer than `cap` bytes is cut there and marked with
+/// `LINE_CUT`; the rest of it is read and dropped, never held.
+pub fn read_lines_capped<R: Read>(pipe: R, cap: usize, mut each: impl FnMut(String)) {
+    let mut reader = BufReader::new(pipe);
+
+    loop {
+        let mut line = Vec::new();
+        match (&mut reader).take(cap as u64).read_until(b'\n', &mut line) {
+            Ok(0) | Err(_) => return,
+            Ok(_) => {}
+        }
+
+        let ended = line.ends_with(b"\n");
+        let cut = !ended && line.len() == cap;
+
+        // The rest of a line that was too long, up to its end.
+        if cut {
+            let mut rest = Vec::new();
+            loop {
+                rest.clear();
+                match (&mut reader).take(cap as u64).read_until(b'\n', &mut rest) {
+                    Ok(0) | Err(_) => break,
+                    Ok(_) if rest.ends_with(b"\n") => break,
+                    Ok(_) => {}
+                }
+            }
+        }
+
+        while line.ends_with(b"\n") || line.ends_with(b"\r") {
+            line.pop();
+        }
+        let mut text = String::from_utf8_lossy(&line).into_owned();
+        if cut {
+            text.push_str(LINE_CUT);
+        }
+        each(text);
+    }
+}
+
 /// Send each line a pipe produces to the page, as `cli-output` events.
 fn forward_lines<R: Read + Send + 'static>(
     pipe: R,
@@ -336,13 +420,13 @@ fn forward_lines<R: Read + Send + 'static>(
     id: String,
 ) -> thread::JoinHandle<()> {
     thread::spawn(move || {
-        for line in BufReader::new(pipe).lines().map_while(Result::ok) {
+        read_lines_capped(pipe, LINE_LIMIT, |line| {
             let event = OutputLine {
                 id: id.clone(),
                 line,
             };
             let _ = app.emit("cli-output", event);
-        }
+        });
     })
 }
 
@@ -778,6 +862,49 @@ mod tests {
         let result = run_command(command, Duration::from_secs(5)).unwrap();
         assert_eq!(result.code, 0, "{}", result.stderr);
         assert_eq!(result.stdout.trim(), "/dev/null");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn run_command_stops_a_command_that_prints_too_much() {
+        // 10 MB, then half a minute's wait: stopped at the limit instead,
+        // and no more than the limit held.
+        let mut loud = Command::new("sh");
+        loud.args(["-c", "head -c 10000000 /dev/zero; sleep 30"]);
+
+        let started = Instant::now();
+        let result = run_command_within(loud, Duration::from_secs(60), 65536).unwrap();
+
+        assert_eq!(result.code, -1);
+        assert!(
+            result.stdout.len() <= 65536,
+            "{} bytes held",
+            result.stdout.len()
+        );
+        assert!(
+            result.stderr.contains("more than 65536 bytes"),
+            "{}",
+            result.stderr
+        );
+        assert!(
+            started.elapsed() < Duration::from_secs(20),
+            "stopped, not waited for"
+        );
+    }
+
+    #[test]
+    fn a_streamed_line_is_cut_at_the_limit() {
+        let mut input = b"short\n".to_vec();
+        input.extend(std::iter::repeat_n(b'x', 200_000));
+        input.extend(b"\nafter\r\n");
+
+        let mut lines = Vec::new();
+        read_lines_capped(&input[..], 1024, |line| lines.push(line));
+
+        assert_eq!(lines.len(), 3, "{lines:?}");
+        assert_eq!(lines[0], "short");
+        assert_eq!(lines[1], format!("{}{}", "x".repeat(1024), LINE_CUT));
+        assert_eq!(lines[2], "after");
     }
 
     #[cfg(unix)]

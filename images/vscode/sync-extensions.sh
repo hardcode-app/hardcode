@@ -127,15 +127,16 @@ write_status() {
 # away) or "failed".
 #
 # VS Code is running and picks up what lands in its extensions folder, so
-# the extension itself is checked before it is installed: one from a
-# publisher without a verified domain never gets there. What it pulls in
-# (dependencies, a pack's members) is only known once it is here, and is
-# checked on arrival.
+# the extension is checked before it is installed, with everything the
+# Marketplace says it pulls in (dependencies, a pack's members): one from a
+# publisher without a verified domain never gets there. What arrives is
+# checked again, the extension included, in case the package pulls in more
+# than the Marketplace listed; then the whole set goes if any of it fails.
 install_one() {
   local id="$1" before report extension
   local arrived
 
-  if ! report="$(hardcode-verify-extensions "$id" 2>&1)"; then
+  if ! report="$(hardcode-verify-extensions --with-dependencies "$id" 2>&1)"; then
     if grep -q "without a verified domain" <<<"$report"; then
       echo refused
     else
@@ -150,7 +151,7 @@ install_one() {
     return 0
   fi
 
-  mapfile -t arrived < <(comm -13 <(printf '%s\n' "$before") <(list_installed) | grep -vixF -- "$id" || true)
+  mapfile -t arrived < <(comm -13 <(printf '%s\n' "$before") <(list_installed))
   if [ "${#arrived[@]}" -eq 0 ] || report="$(hardcode-verify-extensions "${arrived[@]}" 2>&1)"; then
     echo ok
     return 0

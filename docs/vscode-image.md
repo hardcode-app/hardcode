@@ -94,15 +94,17 @@ only once it ends with `# end`, so a list caught half-written is never taken
 for a shorter one.
 
 **Only publishers with a verified domain on the Marketplace are allowed.**
-Each extension on the list is checked before it is installed, by asking the
-Marketplace (`hardcode-verify-extensions`): VS Code is running and picks up
-whatever lands in its extensions folder, so one from an unverified
-publisher never gets there, and is remembered as refused, so it isn't asked
-about again. What an extension pulls in (dependencies, a pack's members) is
-only known once it is installed, and is checked on arrival: anything that
-fails then is removed again with the extension. One that couldn't be
-installed or checked (the Marketplace didn't answer within 30 seconds) is
-removed and tried again a minute later. The reviewed exceptions are the
+Each extension on the list is checked before it is installed, with
+everything it pulls in (its dependencies and a pack's members, as the
+Marketplace lists them for its latest release, and theirs in turn), by
+asking the Marketplace (`hardcode-verify-extensions --with-dependencies`).
+VS Code is running and picks up whatever lands in its extensions folder,
+so if any publisher in that set has no verified domain, nothing of it gets
+there: the extension is refused, and remembered so it isn't asked about
+again. What arrives is checked once more, in case a package pulls in more
+than the Marketplace listed; then the whole set is removed, the extension
+included. One that couldn't be installed or checked (the Marketplace didn't
+answer within 30 seconds) is removed and tried again a minute later. The reviewed exceptions are the
 catalogue's `APPROVED_UNVERIFIED`, marked `unverified-ok` on the list: the
 only one is CodeLLDB, the Rust debugger VS Code's own Rust documentation
 recommends.

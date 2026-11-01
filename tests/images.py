@@ -52,6 +52,10 @@ MARKETPLACE = {
     "lldb.reviewed": {},
     "user.own": {},
     "user.two": {},
+    # A verified extension that depends on an unverified one, and one whose
+    # package pulls it in though the Marketplace doesn't list it.
+    "good.parent": {"extensionDependencies": ["bad.one"]},
+    "sly.parent": {"extensionDependencies": ["bad.one"], "listed": {"extensionDependencies": []}},
 }
 UNVERIFIED = "bad.one,lldb.reviewed"
 
@@ -372,6 +376,43 @@ def check_extension_sync(suite: Suite, world: ExtensionWorld) -> None:
     )
 
 
+def check_extension_dependencies(suite: Suite, world: ExtensionWorld) -> None:
+    """
+    What an extension pulls in (dependencies, a pack's members) is checked
+    before anything is installed, as far as the Marketplace lists it: VS
+    Code is running, and would pick up whatever lands in its folder. What a
+    package pulls in beyond that is checked on arrival, and takes the whole
+    set with it, the extension asked for included.
+    """
+    world.want("good.parent")
+    listed = world.sync()
+    suite.check(
+        "a verified extension needing an unverified one is refused before anything is installed",
+        listed.ok
+        and not {"good.parent", "bad.one"} & world.installed()
+        and not [call for call in world.calls() if call.startswith("install ")],
+        f"{listed.text}\n{world.calls()}\n{sorted(world.installed())}",
+    )
+    suite.check(
+        "...and said so: refused, nothing installed",
+        world.status().get("refused") == ["good.parent"] and world.status().get("installed") == 0,
+        str(world.status()),
+    )
+
+    world.want("sly.parent")
+    unlisted = world.sync()
+    suite.check(
+        "one whose package pulls in more than the Marketplace lists: the whole set removed on arrival",
+        unlisted.ok and not {"sly.parent", "bad.one"} & world.installed() and "uninstall sly.parent" in world.calls(),
+        f"{unlisted.text}\n{world.calls()}\n{sorted(world.installed())}",
+    )
+    suite.check(
+        "...and said so: refused, nothing installed",
+        world.status().get("refused") == ["sly.parent"] and world.status().get("installed") == 0,
+        str(world.status()),
+    )
+
+
 def check_extension_watch(suite: Suite, world: ExtensionWorld) -> None:
     """
     Watching, the sync follows a change to the list within seconds, with
@@ -461,6 +502,7 @@ def run_checks(suite: Suite) -> None:
         world = ExtensionWorld(scratch)
         check_extension_sync(suite, world)
         check_extension_watch(suite, ExtensionWorld(scratch / "watch"))
+        check_extension_dependencies(suite, ExtensionWorld(scratch / "dependencies"))
 
         suite.section("the build image's runner")
         check_build_runner_cpus(suite, scratch)

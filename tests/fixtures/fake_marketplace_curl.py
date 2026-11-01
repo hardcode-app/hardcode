@@ -7,7 +7,11 @@ whether each extension's publisher has a verified domain.
 The query arrives on stdin (``--data-binary @-``), one criterion per id. The
 answer lists every id the fake Marketplace ($FAKE_MARKETPLACE, the same
 directory fake_code.py installs from) has, with its publisher verified unless
-the id is in $FAKE_UNVERIFIED (comma separated). With $FAKE_MARKETPLACE_DOWN
+the id is in $FAKE_UNVERIFIED (comma separated). Asked for version properties
+(flag 16), it lists each extension's dependencies and pack members as the
+real Marketplace does: what its manifest says, or what the manifest's
+``listed`` says, for an extension the Marketplace describes short of what
+its package pulls in. With $FAKE_MARKETPLACE_DOWN
 set, it fails as curl does when the server can't be reached. With
 $FAKE_CURL_LOG set, each call's arguments are added to that file, a line
 per call.
@@ -34,6 +38,7 @@ def main() -> int:
 
     query = json.loads(sys.stdin.read())
     wanted = [criterion["value"].lower() for criterion in query["filters"][0]["criteria"]]
+    with_properties = bool(query.get("flags", 0) & 16)
 
     market = Path(os.environ["FAKE_MARKETPLACE"])
     unverified = {item.strip().lower() for item in os.environ.get("FAKE_UNVERIFIED", "").split(",") if item.strip()}
@@ -44,16 +49,35 @@ def main() -> int:
             continue
 
         publisher, name = extension_id.split(".", 1)
-        extensions.append(
-            {
-                "extensionName": name,
-                "publisher": {
-                    "publisherName": publisher,
-                    "displayName": publisher.title(),
-                    "isDomainVerified": extension_id not in unverified,
-                },
-            }
-        )
+        extension = {
+            "extensionName": name,
+            "publisher": {
+                "publisherName": publisher,
+                "displayName": publisher.title(),
+                "isDomainVerified": extension_id not in unverified,
+            },
+        }
+
+        if with_properties:
+            manifest = json.loads((market / f"{extension_id}.json").read_text(encoding="utf-8"))
+            listed = manifest.get("listed", manifest)
+            extension["versions"] = [
+                {
+                    "version": "1.0.0",
+                    "properties": [
+                        {
+                            "key": "Microsoft.VisualStudio.Code.ExtensionDependencies",
+                            "value": ",".join(listed.get("extensionDependencies", [])),
+                        },
+                        {
+                            "key": "Microsoft.VisualStudio.Code.ExtensionPack",
+                            "value": ",".join(listed.get("extensionPack", [])),
+                        },
+                    ],
+                }
+            ]
+
+        extensions.append(extension)
 
     print(json.dumps({"results": [{"extensions": extensions}]}))
     return 0

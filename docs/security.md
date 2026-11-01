@@ -108,8 +108,10 @@ vscode has no route out and no capability to make one.
   `seccomp=unconfined` or privileged for it, and there is no `docker`
   inside. The harder sandbox, for profiles that don't need containers.
 - **Only verified VS Code extension publishers**, each checked before the
-  running container installs it, and what it pulls in (dependencies, pack
-  members) as it arrives, with explicit reviewed exceptions. The rule keeps
+  running container installs it, with everything the Marketplace says it
+  pulls in (dependencies, pack members), and checked again as it arrives,
+  the whole set removed if any of it fails, with explicit reviewed
+  exceptions. The rule keeps
   a mistaken or look-alike choice off a profile's list; it doesn't stop
   code inside the sandbox from installing extensions itself.
 - **The proxy runs the policy the profile says.** `hardcode` records what it
@@ -120,10 +122,13 @@ vscode has no route out and no capability to make one.
   is rotated (at most 3 files of 10 MB, `x-logging` in `compose.yaml`), so a
   sandbox can't fill the host's disk through the proxy's log, which it
   writes just by making requests, and *Blocked traffic* and `hardcode logs`
-  read a bounded amount. The extension status the VS Code container writes
-  is read up to 64 KiB, and taken only when it has the fields and sizes the
-  extension sync writes. On Kubernetes the kubelet rotates logs, and the
-  admin reads at most 16 MiB of one.
+  read a bounded amount. The limits are kept on the host, where the sandbox
+  can't change them: `hardcode` stops any command it runs once it has
+  printed more than 64 MiB (the extension status the VS Code container
+  writes: 64 KiB, and taken only when it has the fields and sizes the
+  extension sync writes), and the app stops the command at 128 MiB and
+  cuts a streamed line at 64 KiB. On Kubernetes the kubelet rotates logs,
+  and the admin reads at most 16 MiB of one.
 - **The app installs only signed updates.** A release's app takes an
   update from the project's newest GitHub release only when its signature
   checks out against the key the app was built with (`release/updater.pub`)

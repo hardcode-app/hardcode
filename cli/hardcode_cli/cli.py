@@ -11,7 +11,6 @@ from __future__ import annotations
 import argparse
 import json
 import os
-import subprocess
 import sys
 import time
 import webbrowser
@@ -19,7 +18,7 @@ from dataclasses import asdict
 from pathlib import Path
 from typing import Callable, Optional
 
-from . import __version__, allowlist, envfile, home, langs, override, profiles, stack, yamlio
+from . import __version__, allowlist, bounded, envfile, home, langs, override, profiles, stack, yamlio
 from .compose import Compose, ComposeError, Runner, docker_executable, docker_subnets
 from .ops import Ops, Result
 
@@ -94,7 +93,7 @@ class App:
         self,
         root: Path,
         json_output: bool = False,
-        runner: Runner = subprocess.run,
+        runner: Runner = bounded.run,
         docker: Optional[str] = None,
         out: Callable[[str], None] = print,
         sleep: Callable[[float], None] = time.sleep,
@@ -969,7 +968,7 @@ def _ask(question: str) -> str:
 
 def main(
     argv: Optional[list[str]] = None,
-    runner: Runner = subprocess.run,
+    runner: Runner = bounded.run,
     docker: Optional[str] = None,
     out: Callable[[str], None] = print,
     err: Callable[[str], None] = _print_error,
