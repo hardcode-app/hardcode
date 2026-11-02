@@ -6,13 +6,15 @@ sees only those that need one.
     maintenance/merge.py --repository OWNER/REPO [--dry-run]
 
 Its own workflow (.github/workflows/dependencies.yml) runs it after every
-CI run and once a day. Each open pull request from Dependabot, or from the
-vendor binaries' workflow (a pins/ branch), is:
+CI run and once a day. Each open pull request from Dependabot, or from one
+of its workflow's own jobs (a pins/ branch: the vendor binaries, the lock
+files), is:
 
-- merged, by rebase, when its CI run passed on its newest commit, it is up
-  to date with main, and every update in it is a patch or a minor one (or
-  a newer dated build of the same image, such as Ubuntu's
-  resolute-20261024.1);
+- merged, by rebase, when its CI run passed on its newest commit, its
+  pin-age check included, it is up to date with main, every update in it is
+  a patch or a minor one (or a newer dated build of the same image, such as
+  Ubuntu's resolute-20261024.1), and, from a pins/ branch, it changes only
+  the files that branch's job makes;
 - asked to rebase ("@dependabot rebase") when main has moved on since;
 - given its pin-age check again when that was all that failed, a day
   later: a pin a few days too young becomes old enough;
@@ -50,6 +52,13 @@ REBASE = "@dependabot rebase"
 # Who may have made a dependency update's commits: one with anyone else's is
 # a person's change, and waits for a person.
 MOVERS = {"dependabot[bot]", "github-actions[bot]"}
+
+# What each of our own workflows' pull requests may change (its pins/ branch):
+# a pull request that changes anything else waits for a person.
+PINS_FILES = {
+    "pins/vendor-binaries": {"images/build/Dockerfile"},
+    "pins/locks": {"app/src-tauri/Cargo.lock", "images/admin/uv.lock", "images/build/uv.lock"},
+}
 
 # Dependabot's metadata in its commit message: an update-type per update.
 UPDATE_TYPE = re.compile(r"^\s*update-type:\s*(\S+)\s*$", re.MULTILINE)
@@ -208,6 +217,14 @@ class Merger:
         reason = needs_a_person(pull, commits)
         if reason:
             return Decision(number, "left", reason)
+
+        # Our own workflows' pull requests change only what they make.
+        ref = pull["head"]["ref"]
+        if ref.startswith("pins/"):
+            allowed = PINS_FILES.get(ref, set())
+            changed = {item["filename"] for item in self.get(f"/pulls/{number}/files?per_page=100")}
+            if not changed <= allowed:
+                return Decision(number, "left", f"it changes what its workflow doesn't: {', '.join(sorted(changed - allowed))}")
 
         # Up to date with main: what CI ran is what would land.
         compared = self.get(f"/compare/{pull['base']['ref']}...{head}")

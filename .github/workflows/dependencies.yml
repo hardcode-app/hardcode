@@ -9,11 +9,16 @@
 #   failed pin-age check again a day later (maintenance/merge.py);
 # - vendor: weekly, proposes the build image's vendor binaries' newest
 #   releases that are a week old, with their publishers' checksums
-#   (maintenance/pins.py vendor), as the pins/vendor-binaries pull request.
+#   (maintenance/pins.py vendor), as the pins/vendor-binaries pull request;
+# - locks, then locks-propose: nightly, moves everything the lock files pull
+#   in, indirect packages included, to the newest of it a week old, as the
+#   pins/locks pull request. Dependabot moves only what the projects name.
 #
-# Both hold a write token, so both run nothing but those two scripts, on the
-# runner's own Python: no build image, no cache, no third-party action but
-# checkout.
+# merge, vendor and locks-propose hold a write token, so they run nothing but
+# maintenance/'s scripts, on the runner's own Python: no build image, no
+# cache, no third-party action. The refresh itself runs Cargo, uv and the
+# build image, so it is a job of its own that only reads, and hands the
+# lock files on as an artifact.
 name: Dependencies
 
 on:
@@ -23,6 +28,7 @@ on:
   schedule:
     - cron: "17 6 * * *"
     - cron: "23 5 * * 1"
+    - cron: "41 4 * * *"
   workflow_dispatch:
 
 permissions:
@@ -86,6 +92,115 @@ jobs:
               --base main \
               --title "$(head -n 1 "$RUNNER_TEMP/message.txt")" \
               --body-file "$RUNNER_TEMP/message.txt"
+          fi
+
+          # A push made with this workflow's token starts no workflow: CI is
+          # started here, and maintenance/merge.py finds its run by commit.
+          gh workflow run ci.yml --ref "$BRANCH"
+
+  # Every package the lock files hold moved to the newest compatible version
+  # published a week ago or earlier: the crates with Cargo's min-publish-age
+  # (app/src-tauri/.cargo/config.toml), the images' Python packages with
+  # uv's exclude-newer. Read-only: it runs Cargo, uv and the build image, and
+  # hands the changed lock files, and the commit message, to the next job.
+  locks:
+    name: The lock files, refreshed
+    if: github.event_name == 'workflow_dispatch' || github.event.schedule == '41 4 * * *'
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    outputs:
+      changed: ${{ steps.changed.outputs.changed }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      # Cargo as app/src-tauri/rust-toolchain.toml pins it.
+      - id: rust
+        run: echo "channel=$(sed -n 's/^channel = "\(.*\)"$/\1/p' app/src-tauri/rust-toolchain.toml)" >> "$GITHUB_OUTPUT"
+      - uses: dtolnay/rust-toolchain@686976e191b89faba57d3206551f0f330d8cb249 # stable
+        with:
+          toolchain: ${{ steps.rust.outputs.channel }}
+      # min-publish-age is unstable in Rust 1.99: RUSTC_BOOTSTRAP lets this
+      # stable Cargo take -Zmin-publish-age. Both go once rust-toolchain.toml
+      # is at 1.100, where it is stable. Choosing versions runs no crate's code.
+      - name: The crates
+        working-directory: app/src-tauri
+        env:
+          RUSTC_BOOTSTRAP: "1"
+        run: cargo -Zmin-publish-age update
+      # No cache: a lock this job writes is proposed to main.
+      - uses: ./.github/actions/build-image
+        with:
+          cache: false
+      - name: The images' Python packages
+        run: |
+          images/build/run.sh uv lock --upgrade --project images/admin
+          images/build/run.sh uv lock --upgrade --project images/build
+      - id: changed
+        name: What changed
+        run: |
+          mkdir -p dist/locks/files
+          python3 maintenance/pins.py locks HEAD --message dist/locks/message.txt
+
+          for file in app/src-tauri/Cargo.lock images/admin/uv.lock images/build/uv.lock; do
+            if ! git diff --quiet -- "$file"; then
+              mkdir -p "dist/locks/files/$(dirname "$file")"
+              cp "$file" "dist/locks/files/$file"
+            fi
+          done
+
+          if [ -f dist/locks/message.txt ]; then
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          fi
+      - if: steps.changed.outputs.changed == 'true'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: locks
+          path: dist/locks
+
+  # The refreshed lock files proposed, as pins/locks made afresh from main.
+  # Only the three lock files are taken from what the refresh handed on, by
+  # name: nothing else it might have written gets near the branch.
+  locks-propose:
+    name: Propose the refreshed lock files
+    needs: locks
+    if: needs.locks.outputs.changed == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+      pull-requests: write
+      actions: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      BRANCH: pins/locks
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: locks
+          path: ${{ runner.temp }}/locks
+      - name: Propose them
+        run: |
+          for file in app/src-tauri/Cargo.lock images/admin/uv.lock images/build/uv.lock; do
+            if [ -f "$RUNNER_TEMP/locks/files/$file" ]; then
+              cp "$RUNNER_TEMP/locks/files/$file" "$file"
+            fi
+          done
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git switch --create "$BRANCH"
+          git commit --all --file "$RUNNER_TEMP/locks/message.txt"
+          git push --force origin "$BRANCH"
+
+          open="$(gh pr list --head "$BRANCH" --state open --json number --jq '.[].number')"
+          if [ -z "$open" ]; then
+            gh pr create \
+              --head "$BRANCH" \
+              --base main \
+              --title "$(head -n 1 "$RUNNER_TEMP/locks/message.txt")" \
+              --body-file "$RUNNER_TEMP/locks/message.txt"
           fi
 
           # A push made with this workflow's token starts no workflow: CI is

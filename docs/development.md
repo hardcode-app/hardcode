@@ -175,6 +175,7 @@ release to be found first:
 | The Rust the release's macOS and Windows builds use (`app/src-tauri/rust-toolchain.toml`) | Dependabot, weekly |
 | The build image's vendor binaries: kind, kubectl, helm, OSV-Scanner, the Tauri CLI | `maintenance/pins.py vendor`, weekly ([`dependencies.yml`](../.github/workflows/dependencies.yml)), as the `pins/vendor-binaries` pull request, with each publisher's checksums |
 | The AppImage's tools (AppRun, linuxdeploy and its AppImage plugin), pinned by checksum in the build image at the release tags the Tauri CLI names | a person, with the Tauri CLI: `app/build.sh bundle` fails if the CLI fetches a tool that isn't pinned |
+| Everything the lock files pull in, indirect crates and Python packages included, which Dependabot doesn't move | the lock refresh, nightly ([`dependencies.yml`](../.github/workflows/dependencies.yml)), as the `pins/locks` pull request: `cargo update` with a week's `min-publish-age` (`app/src-tauri/.cargo/config.toml`; unstable in Rust 1.99, so switched on with `RUSTC_BOOTSTRAP=1` and `-Zmin-publish-age` until 1.100), and `uv lock --upgrade` with each project's `exclude-newer` |
 | The Python the release's macOS and Windows builds use | uv: the newest 3.14 the pinned uv knows, checked against the hash uv carries, so it moves with uv |
 
 **A week old, always.** Dependabot proposes a release only once it is seven
@@ -214,19 +215,24 @@ and daily, `maintenance/merge.py` merges, by rebase, each dependency update
 whose CI passed on its newest commit, its pin-age check included, that is
 up to date with `main`, and
 whose updates are all patch or minor ones (or a newer dated build of the
-same image). One behind `main` gets `@dependabot rebase`; one whose only
+same image), and, from one of our own jobs' `pins/` branches, that changes
+only the files that job makes. One behind `main` gets `@dependabot rebase`; one whose only
 failure was its pin-age check gets that job run again a day later. What is
 left for a person: a major update, any action (each is new code the
 workflows run with their tokens), a pull request with anyone else's
 commit, and anything that failed. `maintenance/merge.py --dry-run` says
 what it would do.
 
-The two jobs that act hold a write token, so they run nothing but those
-two scripts, on the runner's own Python: no build image, no cache. Pushes
-and merges made with a workflow's token start no workflow, so the vendor
-binaries' workflow starts CI on its branch itself; GitHub must also allow
-workflows to open pull requests (Settings → Actions → General → *Allow
-GitHub Actions to create and approve pull requests*).
+The jobs that act hold a write token, so they run nothing but
+`maintenance/`'s scripts, on the runner's own Python: no build image, no
+cache, no third-party action. The lock refresh runs Cargo, uv and the
+build image, so it is a job of its own that only reads; the job that
+proposes its result takes the three lock files from it by name and nothing
+else. Pushes and merges made with a workflow's token start no workflow, so
+the vendor binaries' and the lock refresh's jobs start CI on their branches
+themselves; GitHub must also allow workflows to open pull requests
+(Settings → Actions → General → *Allow GitHub Actions to create and
+approve pull requests*).
 
 ## Repository settings
 

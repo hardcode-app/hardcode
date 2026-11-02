@@ -1,0 +1,7 @@
+# When Cargo resolves Cargo.lock afresh, only crates published a week ago or
+# earlier, indirect ones included, as uv's exclude-newer does for the Python
+# packages. Stable in Cargo 1.100; until then the nightly lock refresh
+# (.github/workflows/dependencies.yml) switches it on, and other Cargos ignore
+# it. Builds are --locked, so they never resolve anything.
+[registry]
+global-min-publish-age = "7 days"

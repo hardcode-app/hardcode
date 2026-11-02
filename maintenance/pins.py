@@ -13,6 +13,10 @@ compromised release usually takes to be found and pulled.
         the Tauri CLI): the newest release of each that is a week old, with its
         publisher's checksums; --write puts them in images/build/Dockerfile,
         and --message writes the commit message that proposes them
+    maintenance/pins.py locks BASE --message FILE
+        what the lock files (Cargo.lock, the images' uv.lock) change against
+        the git ref BASE, after the nightly refresh, as the commit message
+        that proposes it, with Dependabot's metadata
 
 Beside the vendor binaries, the build image pins the AppImage's tools at
 the release tags the Tauri CLI names; they aren't moved here, but aged
@@ -709,6 +713,140 @@ def vendor(
     return 0
 
 
+# ---------------------------------------------------------------------------
+# The lock files, refreshed
+# ---------------------------------------------------------------------------
+
+# The lock files the nightly refresh moves, and how each is read.
+LOCKS = {CARGO_LOCK: crates, **{name: uv_lock for name in UV_LOCKS}}
+
+
+def _numbers(version: str) -> tuple[int, ...]:
+    """
+    A version's leading number in each dotted part ("1.0.0rc1" as (1, 0, 0)),
+    for telling what kind of step a change is; () when it has none.
+    """
+    numbers = []
+    for part in version.split("."):
+        match = re.match(r"\d+", part)
+        if match is None:
+            break
+        numbers.append(int(match.group()))
+
+    return tuple(numbers)
+
+
+def version_update(old: str, new: str) -> str:
+    """
+    Dependabot's word for a package going from *old* to *new*: a package
+    the lock didn't have (*old* empty) counts as a minor update, and a
+    version that can't be read as a major one, which waits for a person.
+    """
+    before, after = _numbers(old), _numbers(new)
+
+    if not old:
+        return "version-update:semver-minor"
+    if not before or not after or before[0] != after[0]:
+        return "version-update:semver-major"
+    if before[1:2] != after[1:2]:
+        return "version-update:semver-minor"
+
+    return "version-update:semver-patch"
+
+
+def lock_changes(old: set[Pin], new: set[Pin]) -> list[dict]:
+    """
+    What changed between two readings of a lock file: for each name whose
+    versions differ, ``{"name", "old", "new"}`` in version order, with an
+    empty old for a package added and an empty new for one removed (a lock
+    can hold two versions of one crate).
+    """
+    changes = []
+
+    for name in sorted({pin.name for pin in old ^ new}):
+        before = sorted((pin.version for pin in old - new if pin.name == name), key=_numbers)
+        after = sorted((pin.version for pin in new - old if pin.name == name), key=_numbers)
+
+        for index in range(max(len(before), len(after))):
+            changes.append(
+                {
+                    "name": name,
+                    "old": before[index] if index < len(before) else "",
+                    "new": after[index] if index < len(after) else "",
+                }
+            )
+
+    return changes
+
+
+def locks_message(changed: dict[str, list[dict]]) -> str:
+    """
+    The commit that proposes the refreshed lock files (*changed*: each
+    file's changes): a subject, a line per package, and Dependabot's
+    metadata, which maintenance/merge.py reads, for every package added or
+    moved.
+    """
+    count = sum(len(changes) for changes in changed.values())
+    lines = [
+        f"build(deps): refresh the lock files, {count} packages",
+        "",
+        "What the lock files pull in, indirect packages included, moved to the",
+        "newest version of each published a week ago or earlier (Cargo's",
+        "min-publish-age, uv's exclude-newer).",
+    ]
+
+    for name, changes in changed.items():
+        lines += ["", f"{name}:"]
+        for change in changes:
+            if not change["old"]:
+                lines.append(f"- {change['name']} {change['new']} (added)")
+            elif not change["new"]:
+                lines.append(f"- {change['name']} {change['old']} (removed)")
+            else:
+                lines.append(f"- {change['name']} {change['old']} -> {change['new']}")
+
+    lines += ["", "---", "updated-dependencies:"]
+    for changes in changed.values():
+        for change in changes:
+            if change["new"]:
+                lines += [
+                    f"- dependency-name: {change['name']}",
+                    f"  dependency-version: {change['new']}",
+                    f"  update-type: {version_update(change['old'], change['new'])}",
+                ]
+    lines.append("...")
+
+    return "\n".join(lines) + "\n"
+
+
+def locks(base: str, message: Path, root: Path = ROOT) -> int:
+    """
+    Write the commit message for what the lock files change against the
+    git ref *base* to *message*; nothing when they haven't changed.
+    """
+    before, after = reader_at(base, root), reader_of(root)
+    changed = {}
+
+    for name, read in LOCKS.items():
+        old, new = before(name), after(name)
+        if old is None or new is None or old == new:
+            continue
+
+        changes = lock_changes(read(old), read(new))
+        if changes:
+            changed[name] = changes
+
+    if not changed:
+        print("the lock files are as they were")
+        return 0
+
+    for name, changes in changed.items():
+        print(f"{name}: {len(changes)} packages")
+
+    message.write_text(locks_message(changed), encoding="utf-8")
+    return 0
+
+
 def main(argv: list[str]) -> int:
     """
     The command line; see the module's docstring.
@@ -723,11 +861,17 @@ def main(argv: list[str]) -> int:
     command.add_argument("--write", action="store_true")
     command.add_argument("--message", type=Path)
 
+    command = commands.add_parser("locks", help="the refreshed lock files' changes against BASE, as a commit message")
+    command.add_argument("base")
+    command.add_argument("--message", type=Path, required=True)
+
     arguments = parser.parse_args(argv)
 
     try:
         if arguments.command == "ages":
             return ages(arguments.base)
+        if arguments.command == "locks":
+            return locks(arguments.base, arguments.message)
 
         return vendor(arguments.write, arguments.message)
 

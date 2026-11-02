@@ -288,6 +288,117 @@ def check_ages(suite: Suite) -> None:
 
 
 # ---------------------------------------------------------------------------
+# The lock files, refreshed
+# ---------------------------------------------------------------------------
+
+
+def check_locks(suite: Suite) -> None:
+    suite.check(
+        "a step in a lock is told apart: patch, minor, major, a package added, a version that can't be read",
+        [
+            pins.version_update("1.5.2", "1.5.3"),
+            pins.version_update("6.0.1", "6.2.0"),
+            pins.version_update("3.1.3", "4.0.0"),
+            pins.version_update("", "1.0.3"),
+            pins.version_update("2026.9", "2026.10"),
+            pins.version_update("1.0", "latest"),
+        ]
+        == [
+            "version-update:semver-patch",
+            "version-update:semver-minor",
+            "version-update:semver-major",
+            "version-update:semver-minor",
+            "version-update:semver-minor",
+            "version-update:semver-major",
+        ],
+    )
+
+    old = {pins.Pin("crate", "brotli", "9.0.0"), pins.Pin("crate", "windows-sys", "0.52.0")}
+    old |= {pins.Pin("crate", "windows-sys", "0.59.0"), pins.Pin("crate", "gone", "1.0.0")}
+    new = {pins.Pin("crate", "brotli", "9.1.0"), pins.Pin("crate", "windows-sys", "0.52.0")}
+    new |= {pins.Pin("crate", "windows-sys", "0.60.2"), pins.Pin("crate", "added", "0.3.1")}
+    changes = pins.lock_changes(old, new)
+    suite.check(
+        "...and each package's change is read from two versions of a lock, two versions of one crate included",
+        changes
+        == [
+            {"name": "added", "old": "", "new": "0.3.1"},
+            {"name": "brotli", "old": "9.0.0", "new": "9.1.0"},
+            {"name": "gone", "old": "1.0.0", "new": ""},
+            {"name": "windows-sys", "old": "0.59.0", "new": "0.60.2"},
+        ],
+        str(changes),
+    )
+
+    cargo = '[[package]]\nname = "{name}"\nversion = "{version}"\nsource = "{source}"\n'
+    uv = '[[package]]\nname = "{name}"\nversion = "{version}"\nsource = {{ registry = "https://pypi.org/simple" }}\n'
+    with tempfile.TemporaryDirectory(prefix="hc-locks-") as temporary:
+        root = Path(temporary)
+        (root / "app/src-tauri").mkdir(parents=True)
+        (root / "images/admin").mkdir(parents=True)
+        (root / pins.CARGO_LOCK).write_text(
+            cargo.format(name="brotli", version="9.0.0", source=pins.CRATES_IO), encoding="utf-8"
+        )
+        (root / "images/admin/uv.lock").write_text(uv.format(name="flask", version="3.1.3"), encoding="utf-8")
+        git(root, "init", "-q", "-b", "main")
+        git(root, "add", ".")
+        git(root, "commit", "-q", "-m", "base")
+
+        message = root / "message.txt"
+        unchanged = pins.locks("main", message, root)
+        unchanged_written = message.exists()
+
+        (root / pins.CARGO_LOCK).write_text(
+            cargo.format(name="brotli", version="9.1.0", source=pins.CRATES_IO), encoding="utf-8"
+        )
+        (root / "images/admin/uv.lock").write_text(uv.format(name="flask", version="4.0.0"), encoding="utf-8")
+        code = pins.locks("main", message, root)
+        text = message.read_text(encoding="utf-8")
+
+    suite.check(
+        "the refresh's commit message: nothing when the locks are as they were; else a line per package, and "
+        "Dependabot's metadata merge.py reads (a major left for a person)",
+        (unchanged, unchanged_written, code) == (0, False, 0)
+        and text.startswith("build(deps): refresh the lock files, 2 packages\n")
+        and "- brotli 9.0.0 -> 9.1.0\n" in text
+        and "- flask 3.1.3 -> 4.0.0\n" in text
+        and merge.needs_a_person({"head": {"ref": "pins/locks"}}, [commit_of(text, "github-actions[bot]")])
+        == "a major update (4.0.0)",
+        text,
+    )
+
+    # The workflow: a refresh that only reads, and a job that takes only the
+    # three lock files from it.
+    jobs = yaml.safe_load((ROOT / ".github/workflows/dependencies.yml").read_text(encoding="utf-8"))["jobs"]
+    refresh, propose = jobs["locks"], jobs["locks-propose"]
+    runs = "\n".join(item.get("run", "") for item in refresh["steps"])
+    crates = next(item for item in refresh["steps"] if item.get("name") == "The crates")
+    copied = next(item for item in propose["steps"] if item.get("name") == "Propose them")["run"]
+    config = tomllib.loads((ROOT / "app/src-tauri/.cargo/config.toml").read_text(encoding="utf-8"))
+    suite.check(
+        "the nightly refresh only reads: Cargo as rust-toolchain.toml pins it, with a week's min-publish-age, "
+        "and uv without a cache",
+        "permissions" not in refresh
+        and config["registry"]["global-min-publish-age"] == "7 days"
+        and crates["run"] == "cargo -Zmin-publish-age update"
+        and crates["env"] == {"RUSTC_BOOTSTRAP": "1"}
+        and "app/src-tauri/rust-toolchain.toml" in runs
+        and "uv lock --upgrade --project images/admin" in runs
+        and "uv lock --upgrade --project images/build" in runs
+        and {"uses": "./.github/actions/build-image", "with": {"cache": False}} in refresh["steps"],
+        runs,
+    )
+    suite.check(
+        "...and the job that proposes it takes only the three lock files, by name, and runs no third-party action",
+        "for file in app/src-tauri/Cargo.lock images/admin/uv.lock images/build/uv.lock; do" in copied
+        and all(item.get("uses", "actions/").startswith("actions/") for item in propose["steps"])
+        and set(merge.PINS_FILES["pins/locks"])
+        == {"app/src-tauri/Cargo.lock", "images/admin/uv.lock", "images/build/uv.lock"},
+        copied,
+    )
+
+
+# ---------------------------------------------------------------------------
 # The Python environments
 # ---------------------------------------------------------------------------
 
@@ -599,7 +710,7 @@ class FakeGitHub:
 def world(pulls: list[dict], per_pull: dict) -> dict:
     """
     The GET answers for *pulls*: each one's commits, comparison with main,
-    CI runs and their jobs, and comments, from *per_pull*.
+    CI runs and their jobs, comments and changed files, from *per_pull*.
     """
     base = f"/repos/{REPOSITORY}"
     answers = {f"{base}/pulls?state=open&per_page=100": pulls}
@@ -616,6 +727,7 @@ def world(pulls: list[dict], per_pull: dict) -> dict:
             "workflow_runs": [run] if run else []
         }
         answers[f"{base}/issues/{number}/comments?per_page=100"] = details.get("comments", [])
+        answers[f"{base}/pulls/{number}/files?per_page=100"] = [{"filename": name} for name in details.get("files", [])]
         if run:
             answers[f"{base}/actions/runs/{run['id']}/jobs?per_page=100"] = {"jobs": details.get("jobs", [])}
 
@@ -654,7 +766,8 @@ def check_merging(suite: Suite) -> None:
         pins_pull(12, "pins/vendor-binaries", "github-actions[bot]"),
         pins_pull(13, "feature/someones", "a-person"),
         pins_pull(14, "dependabot/cargo/conflict", dependabot),
-        pins_pull(15, "pins/unaged", "github-actions[bot]"),
+        pins_pull(15, "pins/locks", "github-actions[bot]"),
+        pins_pull(16, "pins/locks", "github-actions[bot]"),
     ]
     pin_ages_passed = [{"name": "Pin ages", "conclusion": "success"}, {"name": "CLI", "conclusion": "success"}]
     pin_ages_skipped = [{"name": "Pin ages", "conclusion": "skipped"}, {"name": "CLI", "conclusion": "success"}]
@@ -683,12 +796,23 @@ def check_merging(suite: Suite) -> None:
             "jobs": pin_ages_failed + [{"name": "Desktop app (Tauri)", "conclusion": "failure"}],
         },
         11: {"commits": [commit_of(patch)], "run": ci_run(11, "in_progress", status="in_progress")},
-        12: {"commits": [commit_of(metadata(("4.3.1", "patch")), "github-actions[bot]")], "behind": 2},
+        12: {
+            "commits": [commit_of(metadata(("4.3.1", "patch")), "github-actions[bot]")],
+            "behind": 2,
+            "files": ["images/build/Dockerfile"],
+        },
         14: {"commits": [commit_of(patch)], "run": ci_run(14), "jobs": pin_ages_passed},
         15: {
-            "commits": [commit_of(metadata(("4.3.1", "patch")), "github-actions[bot]")],
+            "commits": [commit_of(metadata(("1.5.3", "patch")), "github-actions[bot]")],
             "run": ci_run(15),
             "jobs": pin_ages_skipped,
+            "files": ["app/src-tauri/Cargo.lock"],
+        },
+        16: {
+            "commits": [commit_of(metadata(("1.5.3", "patch")), "github-actions[bot]")],
+            "run": ci_run(16),
+            "jobs": pin_ages_passed,
+            "files": ["app/src-tauri/Cargo.lock", ".github/workflows/ci.yml"],
         },
     }
 
@@ -748,6 +872,13 @@ def check_merging(suite: Suite) -> None:
         detail,
     )
     suite.check(
+        "our own workflows' pull requests merge only when they change just what those workflows make",
+        actions[16] == "left"
+        and ".github/workflows/ci.yml" in decisions[16].reason
+        and not sent("PUT", "/pulls/16/merge"),
+        detail,
+    )
+    suite.check(
         "a person's pull request isn't touched; a refusal stays with its pull request",
         13 not in decisions and actions[14] == "left" and "405" in decisions[14].reason,
         detail,
@@ -760,6 +891,9 @@ def run_checks(suite: Suite) -> None:
 
     suite.section("how old a pin is")
     check_ages(suite)
+
+    suite.section("the lock files, refreshed")
+    check_locks(suite)
 
     suite.section("the Python environments")
     check_python_environments(suite)
