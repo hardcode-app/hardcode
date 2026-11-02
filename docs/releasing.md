@@ -48,9 +48,20 @@ image, as everything does. The macOS and Windows builds can only run on
 those platforms; they install the build image's Python packages, PyInstaller
 among them, from its `uv.lock` (with uv, pinned by hash as the build image
 has it, `images/build/uv/requirements.txt`), every file checked against its
-hash, and the build image's version of the Tauri CLI. macOS builds
-are unsigned unless the `APPLE_CERTIFICATE`, `APPLE_CERTIFICATE_PASSWORD`
-and `APPLE_SIGNING_IDENTITY` secrets hold a certificate.
+hash, onto the newest Python 3.14 that uv knows (it checks that download
+against the hash it carries for it); Rust as
+`app/src-tauri/rust-toolchain.toml` pins it; and the build image's version
+of the Tauri CLI. Every build of the app is `--locked`: `Cargo.lock` as it
+is. macOS builds are unsigned. Signing them, when there is a certificate,
+belongs in a job of its own, as the updater's signing does: the build job
+runs every crate's build script, so no key is given to it.
+
+The AppImage's tools (AppRun, linuxdeploy and its AppImage plugin), which
+the Tauri CLI would download unchecked, come from the build image, pinned
+by checksum; `app/build.sh bundle` hands them to the CLI and fails if it
+fetched anything else. A tagged release is published with `gh` on the
+runner, at the tag that was pushed (`--verify-tag`): no third-party action
+runs in a job that can write.
 
 Nothing in a release (or a development build) is restored from a cache:
 any job on `main` can write one, so the build image, the images, the app
@@ -93,7 +104,10 @@ Release → Run workflow, or `gh workflow run release.yml --ref main`), the
 release workflow builds everything a release does, from `main` as it is,
 and publishes it for testing. The nightly run first compares `main` with
 the commit the `dev` tag names, and builds nothing when they're the same;
-a manual run always builds. What a development build publishes:
+a manual run always builds. A build whose commit `main` has moved on from
+by the time it finishes publishes nothing, and the last one stays: the
+next nightly build publishes `main` as it is then. What a development
+build publishes:
 
 | | Where |
 |---|---|

@@ -1,0 +1,22 @@
+# docker/setup-buildx-action, its builder running the BuildKit image pinned in
+# .github/buildkit/Dockerfile rather than the moving buildx-stable-1 tag it
+# pulls by default. BuildKit builds every image: the four published ones, and
+# the build image every Linux artifact, the scan and the signing are done in.
+# Every workflow sets up its builder through this.
+name: Docker Buildx, pinned
+description: setup-buildx-action with the BuildKit image .github/buildkit/Dockerfile pins
+runs:
+  using: composite
+  steps:
+    - id: buildkit
+      shell: bash
+      run: |
+        image="$(sed -n 's/^FROM //p' .github/buildkit/Dockerfile)"
+        if [ -z "$image" ]; then
+          echo "no BuildKit image in .github/buildkit/Dockerfile" >&2
+          exit 1
+        fi
+        echo "image=$image" >> "$GITHUB_OUTPUT"
+    - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+      with:
+        driver-opts: image=${{ steps.buildkit.outputs.image }}

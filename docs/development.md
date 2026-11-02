@@ -171,8 +171,11 @@ release to be found first:
 | What | Moved by |
 |---|---|
 | The app's crates, the images' Python packages (their `uv.lock`), uv itself (`images/build/uv`), `cli/requirements.txt`, the actions | Dependabot, weekly, one grouped pull request per ecosystem |
-| The images: CoreDNS and the Docker sidecar (`compose.yaml` and the chart's `docker.image`, `coredns.image`), the Dockerfiles' base | Dependabot, weekly, one pull request for all of them |
+| The images: CoreDNS and the Docker sidecar (`compose.yaml` and the chart's `docker.image`, `coredns.image`), the Dockerfiles' base, and the BuildKit every image builder runs (`.github/buildkit/Dockerfile`, which no one builds) | Dependabot, weekly, one pull request for all of them |
+| The Rust the release's macOS and Windows builds use (`app/src-tauri/rust-toolchain.toml`) | Dependabot, weekly |
 | The build image's vendor binaries: kind, kubectl, helm, OSV-Scanner, the Tauri CLI | `maintenance/pins.py vendor`, weekly ([`dependencies.yml`](../.github/workflows/dependencies.yml)), as the `pins/vendor-binaries` pull request, with each publisher's checksums |
+| The AppImage's tools (AppRun, linuxdeploy and its AppImage plugin), pinned by checksum in the build image at the release tags the Tauri CLI names | a person, with the Tauri CLI: `app/build.sh bundle` fails if the CLI fetches a tool that isn't pinned |
+| The Python the release's macOS and Windows builds use | uv: the newest 3.14 the pinned uv knows, checked against the hash uv carries, so it moves with uv |
 
 **A week old, always.** Dependabot proposes a release only once it is seven
 days old (its `cooldown`; security updates aren't held back), and so does
@@ -181,8 +184,12 @@ pull request changes where it was published (crates.io, PyPI, Docker Hub,
 GitHub's releases), the crates and Python packages a lock file update
 pulls in included, and
 fails if one is younger than a week or can't be dated
-(`maintenance/pins.py ages`). The actions aren't aged there: Dependabot's
-cooldown holds them, and a person merges them.
+(`maintenance/pins.py ages`). A GitHub release counts from its newest file:
+an asset uploaded again after the release was published is as young as
+that upload. The vendor binaries' pull request is checked the same way:
+its workflow starts CI by hand on its branch, and the job runs there too.
+The actions aren't aged there: Dependabot's cooldown holds them, and a
+person merges them.
 
 **Python packages through uv, by hash.** The admin image and the build
 image take their Python libraries from PyPI, never from the archive's
@@ -204,7 +211,8 @@ week-old version.
 
 **Merged without anyone, when nothing needs anyone.** After every CI run,
 and daily, `maintenance/merge.py` merges, by rebase, each dependency update
-whose CI passed on its newest commit, that is up to date with `main`, and
+whose CI passed on its newest commit, its pin-age check included, that is
+up to date with `main`, and
 whose updates are all patch or minor ones (or a newer dated build of the
 same image). One behind `main` gets `@dependabot rebase`; one whose only
 failure was its pin-age check gets that job run again a day later. What is

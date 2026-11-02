@@ -14,6 +14,11 @@ compromised release usually takes to be found and pulled.
         publisher's checksums; --write puts them in images/build/Dockerfile,
         and --message writes the commit message that proposes them
 
+Beside the vendor binaries, the build image pins the AppImage's tools at
+the release tags the Tauri CLI names; they aren't moved here, but aged
+like any release. A GitHub release is as old as its newest file: an asset
+uploaded again after the release was published counts from then.
+
 The actions the workflows use aren't aged here: Dependabot's cooldown holds
 them back a week, and each one waits for a person before it is merged.
 
@@ -47,6 +52,7 @@ CARGO_LOCK = "app/src-tauri/Cargo.lock"
 REQUIREMENTS = ["cli/requirements.txt", "images/build/uv/requirements.txt"]
 UV_LOCKS = ["images/admin/uv.lock", "images/build/uv.lock"]
 IMAGE_FILES = [
+    ".github/buildkit/Dockerfile",
     "compose.yaml",
     "helm/hardcode/values.yaml",
     "images/admin/Dockerfile",
@@ -56,6 +62,7 @@ IMAGE_FILES = [
     "images/vscode/Dockerfile",
 ]
 BUILD_DOCKERFILE = "images/build/Dockerfile"
+RUST_TOOLCHAIN = "app/src-tauri/rust-toolchain.toml"
 
 CRATES_IO = "registry+https://github.com/rust-lang/crates.io-index"
 PYPI = "https://pypi.org/simple"
@@ -139,6 +146,14 @@ VENDORS = [
         checksums={"AMD64": "asset:cargo-tauri-x86_64-unknown-linux-gnu.tgz"},
     ),
 ]
+
+# The AppImage's tools, pinned in the build image's Dockerfile at the release
+# tags the Tauri CLI names ("ARG APPRUN_TAG=apprun-old"): aged, not moved.
+FIXED_RELEASES = {
+    "APPRUN": "tauri-apps/binary-releases",
+    "LINUXDEPLOY": "tauri-apps/binary-releases",
+    "LINUXDEPLOY_PLUGIN_APPIMAGE": "linuxdeploy/linuxdeploy-plugin-appimage",
+}
 
 Fetch = Callable[[str, dict], bytes]
 
@@ -231,7 +246,8 @@ def images(text: str) -> set[Pin]:
 
 def vendor_pins(text: str) -> set[Pin]:
     """
-    The vendor binaries' versions the build image's Dockerfile pins.
+    The vendor binaries' versions the build image's Dockerfile pins, and
+    the AppImage tools' release tags.
     """
     pins = set()
 
@@ -242,7 +258,26 @@ def vendor_pins(text: str) -> set[Pin]:
 
         pins.add(Pin("release", vendor.repository, vendor.tag.format(version=match.group(1))))
 
+    for arg, repository in FIXED_RELEASES.items():
+        match = re.search(rf"^ARG {arg}_TAG=(\S+)$", text, re.MULTILINE)
+        if match is None:
+            raise PinError(f"{BUILD_DOCKERFILE} has no ARG {arg}_TAG")
+
+        pins.add(Pin("release", repository, match.group(1)))
+
     return pins
+
+
+def rust_toolchain(text: str) -> set[Pin]:
+    """
+    The Rust release a rust-toolchain.toml names, as rust-lang/rust's GitHub
+    release.
+    """
+    channel = tomllib.loads(text).get("toolchain", {}).get("channel", "")
+    if not re.fullmatch(r"\d+\.\d+\.\d+", channel):
+        raise PinError(f"{RUST_TOOLCHAIN} names {channel or 'no channel'}, not a Rust release (1.2.3)")
+
+    return {Pin("release", "rust-lang/rust", channel)}
 
 
 def pins_in(read: Callable[[str], Optional[str]]) -> set[Pin]:
@@ -274,6 +309,10 @@ def pins_in(read: Callable[[str], Optional[str]]) -> set[Pin]:
     dockerfile = read(BUILD_DOCKERFILE)
     if dockerfile is not None:
         found |= vendor_pins(dockerfile)
+
+    toolchain = read(RUST_TOOLCHAIN)
+    if toolchain is not None:
+        found |= rust_toolchain(toolchain)
 
     return found
 
@@ -342,6 +381,22 @@ def docker_hub_repository(name: str) -> Optional[str]:
     return name if "/" in name else f"library/{name}"
 
 
+def release_published(release: dict) -> datetime:
+    """
+    How old a GitHub release's files are: when it was published, or when one
+    of its assets was last uploaded, if that is later (an asset can be
+    replaced long after the release was published).
+    """
+    times = [_when(release["published_at"])]
+
+    for asset in release.get("assets") or []:
+        for key in ("created_at", "updated_at"):
+            if asset.get(key):
+                times.append(_when(asset[key]))
+
+    return max(times)
+
+
 def published(pin: Pin, fetch: Fetch) -> datetime:
     """
     When *pin* was published, as its registry says.
@@ -362,7 +417,7 @@ def published(pin: Pin, fetch: Fetch) -> datetime:
 
     if pin.kind == "release":
         answer = _json(fetch, f"https://api.github.com/repos/{pin.name}/releases/tags/{pin.version}")
-        return _when(answer["published_at"])
+        return release_published(answer)
 
     raise PinError(f"no registry for a {pin.kind} pin")
 
@@ -493,7 +548,7 @@ def update_type(old: str, new: str) -> str:
 def newest_release(vendor: Vendor, fetch: Fetch, now: datetime) -> Optional[dict]:
     """
     The newest release of *vendor* that is published, not a prerelease, at
-    least MINIMUM_AGE old, and tagged as its releases are (a repository
+    least MINIMUM_AGE old (its files too), and tagged as its releases are (a repository
     such as Tauri's releases several things): ``{"version", "published",
     "assets"}``, or None.
     """
@@ -512,7 +567,7 @@ def newest_release(vendor: Vendor, fetch: Fetch, now: datetime) -> Optional[dict
             if match is None or release.get("draft") or release.get("prerelease"):
                 continue
 
-            when = _when(release["published_at"])
+            when = release_published(release)
             if now - when < MINIMUM_AGE:
                 continue
 

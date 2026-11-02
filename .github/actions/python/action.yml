@@ -1,0 +1,44 @@
+# Python and the build image's Python packages, for the release's macOS and
+# Windows builds, which can't run in the build image. uv, pinned by hash
+# (images/build/uv/requirements.txt), is installed with the runner's own
+# Python into a venv of its own; uv then installs the newest Python 3.14 it
+# knows (python-build-standalone), checked against the hash uv carries for
+# it, so it is older than this uv, which is a week old at least; then the
+# packages as images/build/uv.lock locks them, by hash, wheels only, into a
+# venv first on PATH for the job's later steps.
+name: Python, locked
+description: uv by hash, its Python 3.14, and the build image's locked packages, first on PATH
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      run: |
+        # RUNNER_TEMP for the programs that take it (Python, uv, GitHub's
+        # PATH); as this shell names it, to run what is in it.
+        if [ "$RUNNER_OS" = Windows ]; then
+          runner_python=python
+          bin=Scripts
+          temp="$(cygpath -u "$RUNNER_TEMP")"
+        else
+          runner_python=python3
+          bin=bin
+          temp="$RUNNER_TEMP"
+        fi
+
+        "$runner_python" -m venv "$RUNNER_TEMP/uv"
+        "$temp/uv/$bin/pip" install \
+          --quiet \
+          --require-hashes \
+          --only-binary :all: \
+          -r images/build/uv/requirements.txt
+        uv="$temp/uv/$bin/uv"
+
+        "$uv" python install 3.14
+        UV_PROJECT_ENVIRONMENT="$RUNNER_TEMP/venv" "$uv" sync \
+          --project images/build \
+          --locked \
+          --no-build \
+          --managed-python \
+          --python 3.14
+
+        echo "$RUNNER_TEMP/venv/$bin" >> "$GITHUB_PATH"

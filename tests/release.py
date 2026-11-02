@@ -6,7 +6,9 @@ updater's configuration, the builds' files gathered into one folder, the
 latest.json the app's updater reads (from
 installers signed for real, with a throwaway key), the release's and the
 development build's descriptions, the checksums, the known vulnerabilities'
-section, and whether a nightly run builds.
+section, whether a nightly run builds and when a development build is
+published, and what builds a release: the pinned BuildKit, the actions and
+secrets each job gets, and the macOS and Windows builds' toolchains.
 """
 
 from __future__ import annotations
@@ -15,6 +17,7 @@ import base64
 import importlib.util
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -593,12 +596,63 @@ def check_scan(suite: Suite) -> None:
         )
 
 
-def check_nightly(suite: Suite) -> None:
-    workflow = yaml.safe_load((ROOT / ".github/workflows/release.yml").read_text(encoding="utf-8"))
-    jobs = workflow["jobs"]
+def workflow(name: str) -> dict:
+    """
+    .github/workflows/NAME, as YAML: its "on" key under "on" (YAML 1.1,
+    which PyYAML reads, takes it for true).
+    """
+    loaded = yaml.safe_load((ROOT / ".github" / "workflows" / name).read_text(encoding="utf-8"))
+    if True in loaded:
+        loaded["on"] = loaded.pop(True)
 
-    # YAML 1.1, which PyYAML reads, takes the key "on" for true.
-    triggers = workflow.get("on", workflow.get(True))
+    return loaded
+
+
+def step(job: dict, name: str) -> dict:
+    """
+    The step of *job* called *name*.
+    """
+    return next(item for item in job["steps"] if item.get("name") == name)
+
+
+def run_with_gh(script: str, variables: dict) -> tuple[subprocess.CompletedProcess, list[str]]:
+    """
+    A workflow step's script, run as GitHub runs a bash step, in a folder of
+    its own, with tests/fixtures/fake_gh.py answering for gh: what it did,
+    and the gh calls it made.
+    """
+    with tempfile.TemporaryDirectory(prefix="hc-step-") as temporary:
+        folder = Path(temporary)
+        (folder / "bin").mkdir()
+        (folder / "bin" / "gh").symlink_to(ROOT / "tests" / "fixtures" / "fake_gh.py")
+        log = folder / "gh.log"
+        log.write_text("", encoding="utf-8")
+
+        environment = {
+            **os.environ,
+            "PATH": f"{folder / 'bin'}{os.pathsep}{os.environ['PATH']}",
+            "GITHUB_REPOSITORY": "owner/hardcode",
+            "GITHUB_OUTPUT": str(folder / "output"),
+            "FAKE_GH_LOG": str(log),
+            **variables,
+        }
+        done = subprocess.run(
+            ["bash", "--noprofile", "--norc", "-eo", "pipefail", "-c", script],
+            cwd=folder,
+            env=environment,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+        )
+        output = (folder / "output").read_text(encoding="utf-8") if (folder / "output").exists() else ""
+        calls = log.read_text(encoding="utf-8").splitlines()
+
+    return subprocess.CompletedProcess(done.args, done.returncode, output, done.stderr), calls
+
+
+def check_nightly(suite: Suite) -> None:
+    release = workflow("release.yml")
+    jobs = release["jobs"]
 
     # Every job but the check waits on the version job, which waits on the
     # check: skipping the version job skips the build.
@@ -611,61 +665,139 @@ def check_nightly(suite: Suite) -> None:
 
     suite.check(
         "a nightly run is scheduled; every job waits on the version job, which waits on the check",
-        len(triggers["schedule"]) == 1
+        len(release["on"]["schedule"]) == 1
         and jobs["version"]["needs"] == "changed"
         and jobs["version"]["if"] == "needs.changed.outputs.build == 'true'"
         and not not_waiting,
         f"not waiting on the version job: {not_waiting}",
     )
 
-    # The check's own script, run as GitHub runs a bash step, with
-    # tests/fixtures/fake_gh.py answering for gh.
+    # The check's own script, against the stand-in for gh.
     script = jobs["changed"]["steps"][0]["run"]
     head = "a" * 40
 
-    with tempfile.TemporaryDirectory(prefix="hc-nightly-") as temporary:
-        folder = Path(temporary)
-        (folder / "gh").symlink_to(ROOT / "tests" / "fixtures" / "fake_gh.py")
-        output = folder / "output"
+    def decided(event: str, dev_commit: str) -> str:
+        done, _ = run_with_gh(script, {"GITHUB_EVENT_NAME": event, "GITHUB_SHA": head, "FAKE_DEV_COMMIT": dev_commit})
+        return done.stdout.strip() if done.returncode == 0 else done.stderr
 
-        def decided(event: str, dev_commit: str) -> str:
-            output.write_text("", encoding="utf-8")
-            environment = {
-                **os.environ,
-                "PATH": f"{folder}{os.pathsep}{os.environ['PATH']}",
-                "GITHUB_EVENT_NAME": event,
-                "GITHUB_SHA": head,
-                "GITHUB_REPOSITORY": "owner/hardcode",
-                "GITHUB_OUTPUT": str(output),
-                "FAKE_DEV_COMMIT": dev_commit,
-            }
-            subprocess.run(
-                ["bash", "--noprofile", "--norc", "-eo", "pipefail", "-c", script],
-                env=environment,
-                check=True,
-                capture_output=True,
-            )
-            return output.read_text(encoding="utf-8").strip()
+    decisions = {
+        "nightly, main unchanged": decided("schedule", head),
+        "nightly, main moved": decided("schedule", "b" * 40),
+        "nightly, no dev tag": decided("schedule", ""),
+        "by hand, main unchanged": decided("workflow_dispatch", head),
+        "a tag": decided("push", head),
+    }
+    suite.check(
+        "...which skips a nightly run while main is the last development build's commit, and builds otherwise",
+        decisions
+        == {
+            "nightly, main unchanged": "build=false",
+            "nightly, main moved": "build=true",
+            "nightly, no dev tag": "build=true",
+            "by hand, main unchanged": "build=true",
+            "a tag": "build=true",
+        },
+        str(decisions),
+    )
 
-        decisions = {
-            "nightly, main unchanged": decided("schedule", head),
-            "nightly, main moved": decided("schedule", "b" * 40),
-            "nightly, no dev tag": decided("schedule", ""),
-            "by hand, main unchanged": decided("workflow_dispatch", head),
-            "a tag": decided("push", head),
-        }
-        suite.check(
-            "...which skips a nightly run while main is the last development build's commit, and builds otherwise",
-            decisions
-            == {
-                "nightly, main unchanged": "build=false",
-                "nightly, main moved": "build=true",
-                "nightly, no dev tag": "build=true",
-                "by hand, main unchanged": "build=true",
-                "a tag": "build=true",
-            },
-            str(decisions),
-        )
+    # The development build's last step, against the stand-in for gh.
+    script = step(jobs["dev-release"], "Replace the last development build")["run"]
+    variables = {"GITHUB_SHA": head, "COMMIT": head[:7], "CHART": "0.1.0-dev.1", "FAKE_DEV_COMMIT": "c" * 40}
+
+    moved, moved_calls = run_with_gh(script, {**variables, "FAKE_MAIN_COMMIT": "b" * 40})
+    current, current_calls = run_with_gh(script, {**variables, "FAKE_MAIN_COMMIT": head})
+    suite.check(
+        "a development build replaces the last one only while main is its commit; otherwise the last one stays",
+        moved.returncode == 0
+        and not any(call.startswith("release ") for call in moved_calls)
+        and current.returncode == 0
+        and any(call.startswith("release delete dev") for call in current_calls)
+        and any(call.startswith("release create dev") for call in current_calls),
+        f"main moved: {moved_calls}\nmain current: {current_calls}\n{current.stderr}",
+    )
+
+
+def check_build_supply(suite: Suite) -> None:
+    workflows = {name: workflow(name) for name in ("ci.yml", "release.yml", "dependencies.yml")}
+    actions = sorted((ROOT / ".github" / "actions").glob("*/action.yml"))
+
+    # Every docker/setup-buildx-action goes through .github/actions/buildx,
+    # which gives it the BuildKit image .github/buildkit/Dockerfile pins.
+    texts = {path: path.read_text(encoding="utf-8") for path in (ROOT / ".github").rglob("*.yml")}
+    buildx_users = sorted(
+        str(path.relative_to(ROOT)) for path, text in texts.items() if "docker/setup-buildx-action@" in text
+    )
+    buildx = (ROOT / ".github" / "actions" / "buildx" / "action.yml").read_text(encoding="utf-8")
+    pinned = (ROOT / ".github" / "buildkit" / "Dockerfile").read_text(encoding="utf-8")
+    suite.check(
+        "every image builder runs the BuildKit image pinned by digest, not the moving buildx-stable-1",
+        buildx_users == [".github/actions/buildx/action.yml"]
+        and "driver-opts: image=${{ steps.buildkit.outputs.image }}" in buildx
+        and re.search(r"^FROM moby/buildkit:v[\d.]+@sha256:[0-9a-f]{64}$", pinned, re.M) is not None,
+        f"setup-buildx-action used in: {buildx_users}",
+    )
+
+    # A job that can write runs only GitHub's and Docker's actions and our own.
+    third_party = []
+    for name, loaded in workflows.items():
+        for job_name, job in loaded["jobs"].items():
+            permissions = job.get("permissions") or {}
+            if "write" not in permissions.values():
+                continue
+            for item in job.get("steps", []):
+                uses = item.get("uses", "")
+                if uses and not uses.startswith(("actions/", "docker/", "./")):
+                    third_party.append(f"{name} {job_name}: {uses}")
+    suite.check(
+        "a job that can write runs no third-party action",
+        not third_party,
+        "\n".join(third_party),
+    )
+
+    # No checkout leaves its token for the steps after it.
+    kept = []
+    for name in ("ci.yml", "release.yml"):
+        for job_name, job in workflows[name]["jobs"].items():
+            for item in job.get("steps", []):
+                if item.get("uses", "").startswith("actions/checkout@"):
+                    if (item.get("with") or {}).get("persist-credentials") is not False:
+                        kept.append(f"{name} {job_name}")
+    suite.check("no checkout in CI or the release keeps its token", not kept, "\n".join(kept))
+
+    # No secret but the job's own token outside the job that signs.
+    secrets = []
+    for job_name, job in workflows["release.yml"]["jobs"].items():
+        names = set(re.findall(r"secrets\.(\w+)", yaml.safe_dump(job))) - {"GITHUB_TOKEN"}
+        if names and job_name != "sign":
+            secrets.append(f"{job_name}: {sorted(names)}")
+    suite.check(
+        "no secret but the job's own token is handed to any release job but the one that signs",
+        not secrets,
+        "\n".join(secrets),
+    )
+
+    jobs = workflows["release.yml"]["jobs"]
+    publish = step(jobs["release"], "Publish")["run"]
+    suite.check(
+        "a release is published with gh, at the tag that was pushed (none is made)",
+        'gh release create "$GITHUB_REF_NAME"' in publish and "--verify-tag" in publish,
+        publish,
+    )
+
+    native = jobs["app-native"]
+    uses = [item.get("uses", "") for item in native["steps"]]
+    rust = next(item for item in native["steps"] if item.get("uses", "").startswith("dtolnay/rust-toolchain@"))
+    suite.check(
+        "the macOS and Windows builds use the pinned Rust and uv's Python, and Cargo.lock as it is",
+        rust["with"]["toolchain"] == "${{ steps.rust.outputs.channel }}"
+        and "app/src-tauri/rust-toolchain.toml"
+        in next(item for item in native["steps"] if item.get("id") == "rust")["run"]
+        and "./.github/actions/python" in uses
+        and not any(item.startswith("actions/setup-python@") for item in uses)
+        and "-- --locked" in step(native, "Build")["run"]
+        and [path.parent.name for path in actions] == ["build-image", "buildx", "python"],
+        str(uses),
+    )
 
 
 def run_checks(suite: Suite) -> None:
@@ -692,6 +824,9 @@ def run_checks(suite: Suite) -> None:
 
     suite.section("the nightly development build")
     check_nightly(suite)
+
+    suite.section("what builds a release")
+    check_build_supply(suite)
 
 
 if __name__ == "__main__":

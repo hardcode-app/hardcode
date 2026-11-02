@@ -27,6 +27,13 @@ updates:
     cooldown: { default-days: 7 }
     groups:
       app: { patterns: ["*"] }
+  # The Rust of the release's macOS and Windows builds (rust-toolchain.toml);
+  # the build image's is the archive's.
+  - package-ecosystem: rust-toolchain
+    directory: /app/src-tauri
+    commit-message: { prefix: build, include: scope }
+    schedule: { interval: weekly }
+    cooldown: { default-days: 7 }
   # uv itself (images/build/uv), pinned with its hashes, which this moves too.
   - package-ecosystem: pip
     directories: ["/admin", "/cli", "/images/build/uv"]
@@ -52,14 +59,14 @@ updates:
   # each one's folder is listed. An action is code the workflows run with
   # their tokens: these are never merged without a person.
   - package-ecosystem: github-actions
-    directories: ["/", "/.github/actions/build-image"]
+    directories: ["/", "/.github/actions/build-image", "/.github/actions/buildx"]
     commit-message: { prefix: ci, include: scope }
     schedule: { interval: weekly }
     cooldown: { default-days: 7 }
     groups:
       actions: { patterns: ["*"] }
   - package-ecosystem: docker
-    directories: ["/images/vscode", "/images/squid", "/images/gateway", "/images/admin", "/images/build"]
+    directories: ["/images/vscode", "/images/squid", "/images/gateway", "/images/admin", "/images/build", "/.github/buildkit"]
     patterns: ["*"]
     multi-ecosystem-group: images
     cooldown: { default-days: 7 }

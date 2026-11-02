@@ -87,6 +87,8 @@ jobs:
       prefix: ${{ steps.version.outputs.prefix }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - uses: ./.github/actions/build-image
         with:
           cache: false
@@ -139,18 +141,28 @@ jobs:
           - { name: admin,   context: .,              dockerfile: images/admin/Dockerfile }
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      # The full VS Code image needs more disk than a runner has free by default.
-      - if: matrix.image.name == 'vscode'
-        uses: jlumbroso/free-disk-space@ceedf095f4ec1a097402bc6bd80831f2e1a6fde6 # v2.0.0
         with:
-          preinstalled-runtimes: true
-          android: true
-          dotnet: true
-          haskell: true
-          large-packages: true
-          docker-images: false
-          swap-storage: true
-      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+          persist-credentials: false
+      # The full VS Code image needs more disk than a runner has free by
+      # default: the preinstalled toolchains this job doesn't use (it builds in
+      # Docker) and the swap file go, with the runner's own commands rather
+      # than a third-party action in a job that can push images.
+      - name: Disk for the VS Code image
+        if: matrix.image.name == 'vscode'
+        run: |
+          sudo rm -rf \
+            /usr/local/lib/android \
+            /usr/share/dotnet \
+            /opt/ghc \
+            /usr/local/.ghcup \
+            /opt/hostedtoolcache \
+            /usr/local/share/boost \
+            /usr/local/share/powershell \
+            /usr/share/swift
+          sudo swapoff -a
+          sudo rm -f /mnt/swapfile
+          df -h /
+      - uses: ./.github/actions/buildx
       - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
         with:
           registry: ghcr.io
@@ -191,6 +203,8 @@ jobs:
       COMMIT: ${{ needs.version.outputs.commit }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - uses: ./.github/actions/build-image
         with:
           cache: false
@@ -233,10 +247,17 @@ jobs:
           - { os: windows-latest, triple: x86_64-pc-windows-msvc, arch: x64 }
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: dtolnay/rust-toolchain@686976e191b89faba57d3206551f0f330d8cb249 # stable
-      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
-          python-version: "3.14"
+          persist-credentials: false
+      # Rust as app/src-tauri/rust-toolchain.toml pins it, not the newest stable.
+      - id: rust
+        shell: bash
+        run: echo "channel=$(sed -n 's/^channel = "\(.*\)"$/\1/p' app/src-tauri/rust-toolchain.toml)" >> "$GITHUB_OUTPUT"
+      - uses: dtolnay/rust-toolchain@686976e191b89faba57d3206551f0f330d8cb249 # stable
+        with:
+          toolchain: ${{ steps.rust.outputs.channel }}
+      # Python and the build image's packages, by hash (.github/actions/python).
+      - uses: ./.github/actions/python
       - name: The release's version, and its updater
         if: env.VERSION != ''
         shell: bash
@@ -247,24 +268,6 @@ jobs:
         if: env.VERSION == ''
         shell: bash
         run: python release/release.py dev "$COMMIT"
-      # uv, by hash, as the build image has it; then the build image's Python
-      # packages, as images/build/uv.lock locks them for this platform, by
-      # hash, wheels only, onto this Python: a venv first on PATH.
-      - name: Python packages, locked
-        shell: bash
-        run: |
-          pip install --require-hashes --only-binary :all: -r images/build/uv/requirements.txt
-          venv="$RUNNER_TEMP/venv"
-          UV_PROJECT_ENVIRONMENT="$venv" UV_PYTHON_DOWNLOADS=never uv sync \
-            --project images/build \
-            --locked \
-            --no-build \
-            --python 3.14
-          if [ "$RUNNER_OS" = Windows ]; then
-            echo "$venv/Scripts" >> "$GITHUB_PATH"
-          else
-            echo "$venv/bin" >> "$GITHUB_PATH"
-          fi
       - name: The CLI as a sidecar
         shell: bash
         run: |
@@ -278,29 +281,20 @@ jobs:
         run: |
           version="$(sed -n 's/^ARG TAURI_CLI_VERSION=//p' images/build/Dockerfile)"
           cargo install tauri-cli --locked --version "=$version"
-      # The updater's key is nowhere here either: the sign job signs.
+      # No key is here: this job runs every crate's build script. The sign job
+      # signs the updates; signing the macOS app, when there is a
+      # certificate, belongs in a job of its own like that one.
       - name: Build
         shell: bash
         working-directory: app
-        env:
-          # Unsigned macOS builds unless a certificate is provided as secrets.
-          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
-          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
-          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
         run: |
-          # A secret that isn't there is an empty variable, and Tauri signs
-          # whenever APPLE_CERTIFICATE is set, to nothing too: unset them.
-          for name in APPLE_CERTIFICATE APPLE_CERTIFICATE_PASSWORD APPLE_SIGNING_IDENTITY; do
-            if [ -z "${!name}" ]; then
-              unset "$name"
-            fi
-          done
-
           configs=(--config src-tauri/tauri.release.conf.json)
           if [ -n "$VERSION" ]; then
             configs+=(--config src-tauri/tauri.updater.conf.json)
           fi
-          cargo tauri build "${configs[@]}"
+
+          # Arguments after -- go to cargo build: Cargo.lock as it is.
+          cargo tauri build "${configs[@]}" -- --locked
       # What the updater applies on macOS: the app, archived (as Tauri's
       # updater archive is), named after its architecture like the other
       # installers. COPYFILE_DISABLE keeps macOS's metadata files out.
@@ -329,6 +323,8 @@ jobs:
       COMMIT: ${{ needs.version.outputs.commit }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - uses: ./.github/actions/build-image
         with:
           cache: false
@@ -365,30 +361,14 @@ jobs:
           - { os: windows-latest, target: win-x64 }
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
-          python-version: "3.14"
+          persist-credentials: false
+      # Python and the build image's packages, by hash (.github/actions/python).
+      - uses: ./.github/actions/python
       - name: The release's version
         if: env.VERSION != ''
         shell: bash
         run: python release/release.py stamp "$VERSION"
-      # As the app's job does: uv by hash, then the build image's locked
-      # Python packages in a venv first on PATH.
-      - name: Python packages, locked
-        shell: bash
-        run: |
-          pip install --require-hashes --only-binary :all: -r images/build/uv/requirements.txt
-          venv="$RUNNER_TEMP/venv"
-          UV_PROJECT_ENVIRONMENT="$venv" UV_PYTHON_DOWNLOADS=never uv sync \
-            --project images/build \
-            --locked \
-            --no-build \
-            --python 3.14
-          if [ "$RUNNER_OS" = Windows ]; then
-            echo "$venv/Scripts" >> "$GITHUB_PATH"
-          else
-            echo "$venv/bin" >> "$GITHUB_PATH"
-          fi
       - run: python -m unittest discover -s cli -t cli
       - name: A development build's mark
         if: env.VERSION == ''
@@ -428,6 +408,8 @@ jobs:
       packages: write
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - uses: ./.github/actions/build-image
         with:
           cache: false
@@ -501,6 +483,8 @@ jobs:
       IMAGE_TAG: ${{ needs.version.outputs.image-tag }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - uses: ./.github/actions/build-image
         with:
           cache: false
@@ -545,6 +529,8 @@ jobs:
       VERSION: ${{ needs.version.outputs.version }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - uses: ./.github/actions/build-image
         with:
           cache: false
@@ -580,6 +566,8 @@ jobs:
       VERSION: ${{ needs.version.outputs.version }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - uses: ./.github/actions/build-image
         with:
           cache: false
@@ -607,14 +595,27 @@ jobs:
           cat dist/vulnerabilities/vulnerabilities.md >> dist/notes.md
           cp dist/vulnerabilities/vulnerabilities.json dist/release/
           images/build/run.sh release/release.py checksums dist/release
-      # A prerelease (vX.Y.Z-N) isn't "latest": the app's updater skips it.
-      - uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3.0.3
-        with:
-          body_path: dist/notes.md
-          generate_release_notes: true
-          prerelease: ${{ contains(needs.version.outputs.version, '-') }}
-          files: dist/release/*
-          fail_on_unmatched_files: true
+      # With gh on the runner, not a third-party action holding this job's
+      # token. The release is the pushed tag's (--verify-tag: no tag is made
+      # here); its description is the notes, then GitHub's list of what was
+      # merged. A prerelease (vX.Y.Z-N) isn't "latest": the app's updater
+      # skips it.
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          prerelease=()
+          if [[ "$VERSION" == *-* ]]; then
+            prerelease=(--prerelease --latest=false)
+          fi
+
+          gh release create "$GITHUB_REF_NAME" dist/release/* \
+            --repo "$GITHUB_REPOSITORY" \
+            --verify-tag \
+            --title "$GITHUB_REF_NAME" \
+            --notes-file dist/notes.md \
+            --generate-notes \
+            "${prerelease[@]}"
 
   # A development build (a manual run from main): the "dev" prerelease, with
   # everything the run built, replacing the last one. A prerelease is never
@@ -635,6 +636,8 @@ jobs:
       CHART: ${{ needs.version.outputs.chart }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - uses: ./.github/actions/build-image
         with:
           cache: false
@@ -660,6 +663,17 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
+          # Only main's newest build replaces the last one. When main has
+          # moved on since this run's commit, nothing is published and the
+          # last build stays, until the nightly run builds main as it is; and
+          # GitHub refuses this job's token a tag on a commit whose workflows
+          # differ from main's anyway.
+          main="$(gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/main" --jq .object.sha)"
+          if [ "$main" != "$GITHUB_SHA" ]; then
+            echo "::notice::main has moved on to ${main::7} since this build's ${GITHUB_SHA::7}: not published; the last development build stays"
+            exit 0
+          fi
+
           if gh release view dev --repo "$GITHUB_REPOSITORY" > /dev/null 2>&1; then
             gh release delete dev --repo "$GITHUB_REPOSITORY" --cleanup-tag --yes
           fi

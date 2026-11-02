@@ -202,7 +202,15 @@ languages while the chart's `profileDefaults.languages` is empty.
   (no BuildKit cache, no cargo cache, no `target/`), so what it publishes
   comes from the commit and what the build downloads, pinned as the
   Dockerfiles and lock files say. Its actions are pinned by commit, and
-  only the jobs that publish hold the permissions to.
+  only the jobs that publish hold the permissions to; those run no
+  third-party action, and no checkout leaves its token behind.
+- **What builds a release is pinned and a week old.** The BuildKit every
+  image is built with, the build image's tools (the AppImage's included,
+  which the Tauri CLI would otherwise download unchecked), the Rust and
+  Python of the macOS and Windows builds, the crates and the Python
+  packages: each pinned, checked by checksum or hash where it is
+  downloaded, and taken only once it has been published for a week
+  ([development.md](development.md#dependencies)).
 
 ## Not covered
 

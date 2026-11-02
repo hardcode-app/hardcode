@@ -1,5 +1,3 @@
-# syntax=docker/dockerfile:1
-#
 # vscode: Ubuntu 26.04 development image that runs VS Code in web mode
 # (`code serve-web`) as an unprivileged user with password-less sudo.
 #

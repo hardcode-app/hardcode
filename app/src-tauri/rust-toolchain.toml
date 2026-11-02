@@ -1,0 +1,6 @@
+# The Rust the release's macOS and Windows builds use: their workflow installs
+# it (dtolnay/rust-toolchain), and rustup reads this file there. The build
+# image builds with the archive's rustc, and its cargo ignores this file.
+# Dependabot moves it a week after a Rust release; CI's Pin ages dates it.
+[toolchain]
+channel = "1.99.1"

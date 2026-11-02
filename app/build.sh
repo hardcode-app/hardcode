@@ -32,8 +32,10 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 TAURI="$ROOT/app/src-tauri"
 
+# Every build is --locked: Cargo.lock as it is, never resolved afresh, so no
+# crate enters that the age gate (maintenance/pins.py ages) hasn't seen.
 build() {
-  cargo build --quiet
+  cargo build --quiet --locked
   ls -la "$TAURI/target/debug/hardcode-app"
 }
 
@@ -103,7 +105,38 @@ bundle() {
   if [ -n "${HARDCODE_UPDATER_CONFIG:-}" ]; then
     configs+=(--config "$HARDCODE_UPDATER_CONFIG")
   fi
-  (cd "$ROOT/app" && cargo tauri build "${configs[@]}")
+
+  # The AppImage's tools: the Tauri CLI downloads them unchecked unless its
+  # tools folder (XDG_CACHE_HOME/tauri) has them. A fresh folder each time,
+  # with the build image's pinned copies (images/build/Dockerfile), copied
+  # since the CLI patches linuxdeploy in place.
+  # TOOLS_CACHE is global, for the trap, which runs after this returns.
+  local tools
+  TOOLS_CACHE="$(mktemp -d)"
+  trap 'rm -rf "$TOOLS_CACHE"' EXIT
+  tools="$TOOLS_CACHE/tauri"
+  mkdir "$tools"
+  cp /opt/tauri-tools/* "$tools/"
+
+  # Arguments after -- go to cargo build.
+  (cd "$ROOT/app" && XDG_CACHE_HOME="$TOOLS_CACHE" cargo tauri build "${configs[@]}" -- --locked)
+
+  # Afterwards, nothing but those and the two plugin scripts the CLI carries:
+  # anything else is a tool it fetched itself (a newer CLI naming a new
+  # one), unchecked, so the bundle is refused until that tool is pinned.
+  local fetched
+  fetched="$(
+    cd "$tools" \
+      && ls -A \
+      | grep -vxF -f <(ls -A /opt/tauri-tools) \
+      | grep -vxF -e linuxdeploy-plugin-gtk.sh -e linuxdeploy-plugin-gstreamer.sh \
+      || true
+  )"
+  if [ -n "$fetched" ]; then
+    echo "the Tauri CLI fetched AppImage tools of its own, unchecked: $fetched" >&2
+    echo "pin them in images/build/Dockerfile, beside the others" >&2
+    return 1
+  fi
 
   echo
   echo "installers:"

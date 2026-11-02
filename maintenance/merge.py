@@ -223,12 +223,19 @@ class Merger:
             return Decision(number, "waiting", "CI is running")
 
         if run["conclusion"] == "success":
+            # A run passes with its pin-age check skipped (a run of an older
+            # workflow, say): what would land must have been aged.
+            jobs = self.get(f"/actions/runs/{run['id']}/jobs?per_page=100")["jobs"]
+            aged = any(job["name"] == PIN_AGES_JOB and job["conclusion"] == "success" for job in jobs)
+            if not aged:
+                return Decision(number, "left", "CI passed without checking its pins' ages")
+
             self.request(
                 "PUT",
                 f"/repos/{self.repository}/pulls/{number}/merge",
                 {"merge_method": "rebase", "sha": head},
             )
-            return Decision(number, "merged", "CI passed, and it is a patch or minor update")
+            return Decision(number, "merged", "CI passed, its pins aged, and it is a patch or minor update")
 
         return self.retry_or_leave(number, run)
 

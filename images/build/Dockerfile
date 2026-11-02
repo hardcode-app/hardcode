@@ -96,6 +96,44 @@ RUN set -eu; \
       rm -rf /tmp/cargo; \
     fi
 
+# The AppImage's tools, which the Tauri CLI would otherwise download without
+# checking them each time it makes an AppImage, one from a moving tag:
+# AppRun and linuxdeploy at the release tags this Tauri CLI names, and
+# linuxdeploy's AppImage plugin at a numbered release rather than its
+# "continuous" one. In /opt/tauri-tools under the names the CLI looks for;
+# app/build.sh gives them to it, and fails a bundle for which it fetched
+# anything itself. GitHub's digests where it publishes them; the plugin's
+# release predates those, so its are the files' own, taken when it was
+# pinned. They move with the Tauri CLI, by hand: pins.py ages dates them.
+ARG APPRUN_TAG=apprun-old
+ARG APPRUN_SHA256_AMD64=f30140a43a0a59e46db21bdefdf749b9e9f2c6946e92afabbacf98b8ae73fb4f
+ARG APPRUN_SHA256_ARM64=072f17c0895a85c490282fe5395c5007e5fc75da727e553b3b8fb680feb11578
+ARG LINUXDEPLOY_TAG=linuxdeploy-07333c6
+ARG LINUXDEPLOY_SHA256_AMD64=36a2d7e274d12e1050d0e9ecfe11d339ed54720b2bec464c286d53f8b07f5c62
+ARG LINUXDEPLOY_SHA256_ARM64=556ab80baa98e600aa80f0dcedfb70bca0e1ce7e9f147fb345be3fcc3e91b2b1
+ARG LINUXDEPLOY_PLUGIN_APPIMAGE_TAG=1-alpha-20250213-1
+ARG LINUXDEPLOY_PLUGIN_APPIMAGE_SHA256_AMD64=992d502a248e14ab185448ddf6f6e7d25558cb84d4623c354c3af350c25fccb3
+ARG LINUXDEPLOY_PLUGIN_APPIMAGE_SHA256_ARM64=83c292149274965a865dcd44c135cfca8ba28c6b7de3eb628d4b8b5f248af17c
+RUN set -eu; \
+    case "$(dpkg --print-architecture)" in \
+      amd64) arch=x86_64 apprun_sha="$APPRUN_SHA256_AMD64" linuxdeploy_sha="$LINUXDEPLOY_SHA256_AMD64" plugin_sha="$LINUXDEPLOY_PLUGIN_APPIMAGE_SHA256_AMD64" ;; \
+      arm64) arch=aarch64 apprun_sha="$APPRUN_SHA256_ARM64" linuxdeploy_sha="$LINUXDEPLOY_SHA256_ARM64" plugin_sha="$LINUXDEPLOY_PLUGIN_APPIMAGE_SHA256_ARM64" ;; \
+      *) echo "no pinned AppImage tools for $(dpkg --print-architecture)" >&2; exit 1 ;; \
+    esac; \
+    tauri="https://github.com/tauri-apps/binary-releases/releases/download"; \
+    plugin="https://github.com/linuxdeploy/linuxdeploy-plugin-appimage/releases/download"; \
+    mkdir -p /opt/tauri-tools; \
+    cd /opt/tauri-tools; \
+    curl -fsSLo "AppRun-${arch}" "${tauri}/${APPRUN_TAG}/AppRun-${arch}"; \
+    curl -fsSLo "${LINUXDEPLOY_TAG}-${arch}.AppImage" "${tauri}/${LINUXDEPLOY_TAG}/linuxdeploy-${arch}.AppImage"; \
+    curl -fsSLo linuxdeploy-plugin-appimage.AppImage "${plugin}/${LINUXDEPLOY_PLUGIN_APPIMAGE_TAG}/linuxdeploy-plugin-appimage-${arch}.AppImage"; \
+    printf '%s  %s\n' \
+      "$apprun_sha" "AppRun-${arch}" \
+      "$linuxdeploy_sha" "${LINUXDEPLOY_TAG}-${arch}.AppImage" \
+      "$plugin_sha" linuxdeploy-plugin-appimage.AppImage \
+      | sha256sum -c -; \
+    chmod 0755 ./*
+
 # uv, from PyPI as uv/requirements.txt pins it, every file checked against its
 # hash: the archive's pip installs it into a venv of its own, /opt/uv; the
 # archive has no uv. It stays, to lock the Python packages again.

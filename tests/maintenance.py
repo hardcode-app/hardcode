@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
 The scripts that keep dependencies moving (maintenance/): what the
-repository pins, how old a pin is (against fake registries), the build
-image's vendor binaries' newest releases a week old, and which dependency
-updates merge themselves (against a fake GitHub). Nothing here reaches the
-network.
+repository pins, how old a pin is (against fake registries), the images'
+Python environments, the build image's vendor binaries' newest releases a
+week old, and which dependency updates merge themselves (against a fake
+GitHub). Nothing here reaches the network.
 """
 
 from __future__ import annotations
@@ -93,9 +93,18 @@ def check_pins_found(suite: Suite) -> None:
         len(kinds["crate"]) > 300
         and {pin.name for pin in kinds["pypi"]}
         >= {"uv", "pyinstaller", "pefile", "ruff", "pyyaml", "flask", "gunicorn", "markupsafe"}
-        and {pin.name for pin in kinds["image"]} >= {"coredns/coredns", "docker"}
+        and {pin.name for pin in kinds["image"]} >= {"coredns/coredns", "docker", "moby/buildkit"}
         and {pin.name for pin in kinds["release"]}
-        == {"kubernetes-sigs/kind", "kubernetes/kubernetes", "helm/helm", "google/osv-scanner", "tauri-apps/tauri"},
+        == {
+            "kubernetes-sigs/kind",
+            "kubernetes/kubernetes",
+            "helm/helm",
+            "google/osv-scanner",
+            "tauri-apps/tauri",
+            "tauri-apps/binary-releases",
+            "linuxdeploy/linuxdeploy-plugin-appimage",
+            "rust-lang/rust",
+        },
         "\n".join(sorted(f"{pin.kind} {pin.name} {pin.version}" for pin in found if pin.kind != "crate")),
     )
 
@@ -142,6 +151,20 @@ name = "local"
 version = "1.0"
 source = { path = "../local" }
 """
+
+    def toolchain(channel: str) -> str:
+        try:
+            return str(pins.rust_toolchain(f'[toolchain]\nchannel = "{channel}"\n'))
+        except pins.PinError as error:
+            return str(error)
+
+    suite.check(
+        "the Rust toolchain is read as rust-lang/rust's release; a moving channel is refused",
+        toolchain("1.99.1") == str({pins.Pin("release", "rust-lang/rust", "1.99.1")})
+        and "not a Rust release" in toolchain("stable"),
+        toolchain("stable"),
+    )
+
     suite.check(
         "a uv.lock's packages from PyPI are read; the environment itself and other sources are not",
         pins.uv_lock(text) == {pins.Pin("pypi", "flask", "3.1.3")},
@@ -176,6 +199,13 @@ def check_ages(suite: Suite) -> None:
                 "tag_last_pushed": days_ago(20),
             },
             "https://api.github.com/repos/helm/helm/releases/tags/v4.3.1": {"published_at": days_ago(17)},
+            "https://api.github.com/repos/kubernetes-sigs/kind/releases/tags/v0.34.0": {
+                "published_at": days_ago(30),
+                "assets": [
+                    {"name": "kind-linux-amd64", "created_at": days_ago(30), "updated_at": days_ago(30)},
+                    {"name": "kind-linux-arm64", "created_at": days_ago(2), "updated_at": days_ago(2)},
+                ],
+            },
         }
     )
 
@@ -191,6 +221,10 @@ def check_ages(suite: Suite) -> None:
         and published(pins.Pin("pypi", "ruff", "0.17.3")) == NOW - timedelta(days=9)
         and published(pins.Pin("image", "ubuntu", "resolute-20261006@sha256:aaa")) == NOW - timedelta(days=15)
         and published(pins.Pin("release", "helm/helm", "v4.3.1")) == NOW - timedelta(days=17),
+    )
+    suite.check(
+        "a GitHub release is as old as its newest file: one uploaded again this week counts from then",
+        published(pins.Pin("release", "kubernetes-sigs/kind", "v0.34.0")) == NOW - timedelta(days=2),
     )
     suite.check(
         "a digest the tag has moved on from can't be dated",
@@ -238,6 +272,19 @@ def check_ages(suite: Suite) -> None:
             (accepted, refused) == (0, 1) and unchanged == 1,
             f"accepted={accepted} refused={refused}; asked {registries.asked}",
         )
+
+    # CI's own check, on the runs that bring pins: pull requests, and the
+    # vendor binaries' pull request, whose CI its workflow starts by hand.
+    job = yaml.safe_load((ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8"))["jobs"]["pin-ages"]
+    command = job["steps"][-1]["run"]
+    suite.check(
+        "CI ages the pins of a pull request, and of a run started by hand on another branch, against main",
+        "github.event_name == 'pull_request'" in job["if"]
+        and "github.event_name == 'workflow_dispatch'" in job["if"]
+        and "github.ref != 'refs/heads/main'" in job["if"]
+        and 'maintenance/pins.py ages "origin/${GITHUB_BASE_REF:-main}"' in command,
+        f"{job['if']}\n{command}",
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -303,12 +350,19 @@ def check_python_environments(suite: Suite) -> None:
         )
 
     release = (ROOT / ".github/workflows/release.yml").read_text(encoding="utf-8")
+    python = (ROOT / ".github/actions/python/action.yml").read_text(encoding="utf-8")
     suite.check(
-        "the release's macOS and Windows builds install uv by hash, then the build image's lock, wheels only",
-        release.count("--require-hashes --only-binary :all: -r images/build/uv/requirements.txt") == 2
-        and release.count("--project images/build") == 2
-        and release.count("--no-build") == 2
-        and "pip install -r" not in release,
+        "the release's macOS and Windows builds install uv by hash, then uv's Python and the build image's lock, "
+        "wheels only",
+        release.count("uses: ./.github/actions/python") == 2
+        and "setup-python" not in release
+        and "pip install -r" not in release
+        and "--require-hashes" in python
+        and "-r images/build/uv/requirements.txt" in python
+        and "--project images/build" in python
+        and "--locked" in python
+        and "--no-build" in python
+        and "--managed-python" in python,
     )
 
     updates = yaml.safe_load((ROOT / ".github/dependabot.yml").read_text(encoding="utf-8"))["updates"]
@@ -325,6 +379,11 @@ def check_python_environments(suite: Suite) -> None:
         "/images/build/uv" in directories["pip"]
         and directories["uv"] == {"/images/admin", "/images/build"}
         and cooldowns["pip"] == cooldowns["uv"] == 7,
+        str(directories),
+    )
+    suite.check(
+        "...and the macOS and Windows builds' Rust toolchain, a week after a release",
+        directories.get("rust-toolchain") == {"/app/src-tauri"} and cooldowns.get("rust-toolchain") == 7,
         str(directories),
     )
     suite.check(
@@ -358,7 +417,19 @@ def check_vendor(suite: Suite) -> None:
         return {f"{page}1": items, f"{page}2": []}
 
     answers = {}
-    answers.update(releases("kubernetes-sigs/kind", [release("v0.33.0", 60)]))
+    answers.update(
+        releases(
+            "kubernetes-sigs/kind",
+            [
+                release(
+                    "v0.34.0",
+                    30,
+                    [{"name": "kind-linux-amd64", "digest": "sha256:" + "d" * 64, "updated_at": days_ago(2)}],
+                ),
+                release("v0.33.0", 60),
+            ],
+        )
+    )
     answers.update(releases("kubernetes/kubernetes", [release("v1.37.1", 40)]))
     answers.update(releases("google/osv-scanner", [release("v2.7.0", 20)]))
     answers.update(
@@ -425,7 +496,8 @@ def check_vendor(suite: Suite) -> None:
         code = pins.vendor(True, message, root, registries, NOW)
         text = dockerfile.read_text(encoding="utf-8")
         suite.check(
-            "each binary moves to its newest release a week old: not a younger one, a prerelease, or another package's",
+            "each binary moves to its newest release a week old: not a younger one, a prerelease, another "
+            "package's, or one with a file uploaded again this week",
             code == 0
             and "ARG HELM_VERSION=4.3.1\n" in text
             and "ARG TAURI_CLI_VERSION=2.13.0\n" in text
@@ -582,13 +654,20 @@ def check_merging(suite: Suite) -> None:
         pins_pull(12, "pins/vendor-binaries", "github-actions[bot]"),
         pins_pull(13, "feature/someones", "a-person"),
         pins_pull(14, "dependabot/cargo/conflict", dependabot),
+        pins_pull(15, "pins/unaged", "github-actions[bot]"),
     ]
+    pin_ages_passed = [{"name": "Pin ages", "conclusion": "success"}, {"name": "CLI", "conclusion": "success"}]
+    pin_ages_skipped = [{"name": "Pin ages", "conclusion": "skipped"}, {"name": "CLI", "conclusion": "success"}]
     pin_ages_failed = [{"name": "Pin ages", "conclusion": "failure"}, {"name": "CLI", "conclusion": "success"}]
     per_pull = {
-        1: {"commits": [commit_of(patch)], "run": ci_run(1)},
+        1: {"commits": [commit_of(patch)], "run": ci_run(1), "jobs": pin_ages_passed},
         2: {"commits": [commit_of(patch)], "run": ci_run(2)},
         3: {"commits": [commit_of(metadata(("3.0.0", "major")))], "run": ci_run(3)},
-        4: {"commits": [commit_of(metadata(("resolute-20261024.1", "major"), ("1.16.0", "minor")))], "run": ci_run(4)},
+        4: {
+            "commits": [commit_of(metadata(("resolute-20261024.1", "major"), ("1.16.0", "minor")))],
+            "run": ci_run(4),
+            "jobs": pin_ages_passed,
+        },
         5: {"commits": [commit_of(patch), commit_of("fix: my own change", "a-person")], "run": ci_run(5)},
         6: {"commits": [commit_of(patch, days=2)], "behind": 3, "run": ci_run(6)},
         7: {
@@ -605,7 +684,12 @@ def check_merging(suite: Suite) -> None:
         },
         11: {"commits": [commit_of(patch)], "run": ci_run(11, "in_progress", status="in_progress")},
         12: {"commits": [commit_of(metadata(("4.3.1", "patch")), "github-actions[bot]")], "behind": 2},
-        14: {"commits": [commit_of(patch)], "run": ci_run(14)},
+        14: {"commits": [commit_of(patch)], "run": ci_run(14), "jobs": pin_ages_passed},
+        15: {
+            "commits": [commit_of(metadata(("4.3.1", "patch")), "github-actions[bot]")],
+            "run": ci_run(15),
+            "jobs": pin_ages_skipped,
+        },
     }
 
     github = FakeGitHub(world(pulls, per_pull), refuse=(f"/repos/{REPOSITORY}/pulls/14/merge",))
@@ -656,6 +740,11 @@ def check_merging(suite: Suite) -> None:
     suite.check(
         "the vendor binaries' pull request behind main waits for its workflow to make it afresh",
         actions[12] == "waiting" and not sent("POST", "/issues/12/comments"),
+        detail,
+    )
+    suite.check(
+        "a green run whose pin-age check didn't run merges nothing",
+        actions[15] == "left" and "ages" in decisions[15].reason and not sent("PUT", "/pulls/15/merge"),
         detail,
     )
     suite.check(

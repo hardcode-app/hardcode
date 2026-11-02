@@ -1,7 +1,8 @@
 # Keeps dependencies moving without anyone pinning by hand (docs/development.md,
 # "Dependencies"). Dependabot proposes updates a week old (its cooldown); CI
 # checks every pin a pull request changes is a week old too (the Pin ages
-# job). This workflow does the rest:
+# job; on the vendor binaries' pull request, in the run this workflow
+# starts). This workflow does the rest:
 #
 # - merge: after every CI run, and daily, merges the updates that may merge
 #   themselves, asks Dependabot to rebase those behind main, and runs a
