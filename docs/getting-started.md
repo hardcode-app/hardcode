@@ -83,7 +83,10 @@ time you open the app your computer warns you:
 
 Each release also has a `SHA256SUMS` file with every file's checksum. On
 Linux, `sha256sum -c SHA256SUMS --ignore-missing` in the folder you
-downloaded to checks that your download is what was published.
+downloaded to checks that your download is what was published. With
+GitHub's [`gh`](https://cli.github.com/) command, on any computer,
+`gh attestation verify <the file> --repo hardcode-app/hardcode` checks
+that HardCode's own release workflow built it.
 
 ### The `hardcode` command
 

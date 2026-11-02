@@ -7,9 +7,10 @@
 # with all of it, the source, latest.json for the app's updater, checksums
 # and notes. A manual run from main, and a nightly one when main has moved
 # since the last, is a development build of the same, marked with its
-# commit (release/release.py dev): the "dev" prerelease, which the next one
+# commit (release/release.py dev): a dev-N prerelease, which the next one
 # replaces, the images' edge and sha-<commit> tags, and an X.Y.Z-dev.N
-# chart. A manual run from another branch builds everything and publishes
+# chart. Everything published is attested: GitHub's record that this
+# workflow built it, from this commit. A manual run from another branch builds everything and publishes
 # nothing. Linux builds happen in the build image
 # (images/build), like everything else. Each description ends with the
 # known vulnerabilities in what was built and the images that are the
@@ -34,7 +35,8 @@ permissions:
 
 jobs:
   # Whether to build: a nightly run only when main has moved since the last
-  # development build, whose commit the dev tag names; any other run always.
+  # development build, the newest dev-N prerelease, whose tag names its
+  # commit; any other run always.
   # Every other job waits on the version job, which waits on this.
   changed:
     name: Changed since the last development build
@@ -51,7 +53,14 @@ jobs:
           build=true
 
           if [ "$GITHUB_EVENT_NAME" = schedule ]; then
-            last="$(gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/dev" --jq .object.sha 2>/dev/null || true)"
+            tag="$(
+              gh release list --repo "$GITHUB_REPOSITORY" --limit 50 --json tagName \
+                --jq '[.[] | select(.tagName | test("^dev-[0-9]+$"))][0].tagName // ""' 2>/dev/null || true
+            )"
+            last=""
+            if [ -n "$tag" ]; then
+              last="$(gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$tag" --jq .object.sha 2>/dev/null || true)"
+            fi
             if [ "$last" = "$GITHUB_SHA" ]; then
               echo "main is still at ${GITHUB_SHA::7}, the last development build's commit: nothing to build"
               build=false
@@ -131,6 +140,9 @@ jobs:
     permissions:
       contents: read
       packages: write
+      # The attestation: a token proving the run, and the right to record it.
+      id-token: write
+      attestations: write
     strategy:
       fail-fast: false
       matrix:
@@ -180,7 +192,8 @@ jobs:
             type=raw,value=latest,enable=${{ needs.version.outputs.version != '' && !contains(needs.version.outputs.version, '-') }}
             type=raw,value=edge,enable=${{ needs.version.outputs.dev == 'true' }}
             type=raw,value=sha-${{ needs.version.outputs.commit }},enable=${{ needs.version.outputs.dev == 'true' }}
-      - uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+      - id: build
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
           context: ${{ matrix.image.context }}
           file: ${{ matrix.image.dockerfile }}
@@ -188,6 +201,15 @@ jobs:
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           no-cache: true
+      # GitHub's record that this run built the image, by its digest, stored
+      # beside it in the registry: gh attestation verify
+      # oci://<image> --repo <owner>/hardcode checks it.
+      - if: needs.version.outputs.image-tag != ''
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-name: ${{ needs.version.outputs.prefix }}-${{ matrix.image.name }}
+          subject-digest: ${{ steps.build.outputs.digest }}
+          push-to-registry: true
 
   # Linux artifacts are built in the build image (images/build): the same
   # Ubuntu 26.04 toolchain as everywhere else. macOS and Windows installers
@@ -562,6 +584,9 @@ jobs:
     timeout-minutes: 20
     permissions:
       contents: write
+      # The attestation: a token proving the run, and the right to record it.
+      id-token: write
+      attestations: write
     env:
       VERSION: ${{ needs.version.outputs.version }}
     steps:
@@ -595,6 +620,11 @@ jobs:
           cat dist/vulnerabilities/vulnerabilities.md >> dist/notes.md
           cp dist/vulnerabilities/vulnerabilities.json dist/release/
           images/build/run.sh release/release.py checksums dist/release
+      # GitHub's record that this run built each file, from this commit:
+      # gh attestation verify FILE --repo <owner>/hardcode checks one.
+      - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: dist/release/*
       # With gh on the runner, not a third-party action holding this job's
       # token. The release is the pushed tag's (--verify-tag: no tag is made
       # here); its description is the notes, then GitHub's list of what was
@@ -617,9 +647,10 @@ jobs:
             --generate-notes \
             "${prerelease[@]}"
 
-  # A development build (a manual run from main): the "dev" prerelease, with
-  # everything the run built, replacing the last one. A prerelease is never
-  # GitHub's latest release, so the app's updater never offers it.
+  # A development build (a manual or nightly run from main): a dev-N
+  # prerelease with everything the run built, replacing the last one. A
+  # prerelease is never GitHub's latest release, so the app's updater never
+  # offers it.
   dev-release:
     name: Development build
     if: needs.version.outputs.dev == 'true'
@@ -631,6 +662,9 @@ jobs:
       group: dev-release
     permissions:
       contents: write
+      # The attestation: a token proving the run, and the right to record it.
+      id-token: write
+      attestations: write
     env:
       COMMIT: ${{ needs.version.outputs.commit }}
       CHART: ${{ needs.version.outputs.chart }}
@@ -659,34 +693,48 @@ jobs:
           cat dist/vulnerabilities/vulnerabilities.md >> dist/dev-notes.md
           cp dist/vulnerabilities/vulnerabilities.json dist/dev/
           images/build/run.sh release/release.py checksums dist/dev
-      - name: Replace the last development build
+      # Only main's newest build is published. When main has moved on since
+      # this run's commit, nothing is, and the last build stays until the
+      # nightly run builds main as it is (GitHub would refuse this job's token
+      # a tag on a commit whose workflows differ from main's anyway).
+      - id: current
+        name: Still main's newest
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          # Only main's newest build replaces the last one. When main has
-          # moved on since this run's commit, nothing is published and the
-          # last build stays, until the nightly run builds main as it is; and
-          # GitHub refuses this job's token a tag on a commit whose workflows
-          # differ from main's anyway.
           main="$(gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/main" --jq .object.sha)"
-          if [ "$main" != "$GITHUB_SHA" ]; then
+          if [ "$main" = "$GITHUB_SHA" ]; then
+            echo "publish=true" >> "$GITHUB_OUTPUT"
+          else
             echo "::notice::main has moved on to ${main::7} since this build's ${GITHUB_SHA::7}: not published; the last development build stays"
-            exit 0
+            echo "publish=false" >> "$GITHUB_OUTPUT"
           fi
-
-          if gh release view dev --repo "$GITHUB_REPOSITORY" > /dev/null 2>&1; then
-            gh release delete dev --repo "$GITHUB_REPOSITORY" --cleanup-tag --yes
-          fi
-
-          # A tag a failed run left behind would keep the release at its commit.
-          if gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/dev" > /dev/null 2>&1; then
-            gh api --method DELETE "repos/$GITHUB_REPOSITORY/git/refs/tags/dev"
-          fi
-
-          gh release create dev dist/dev/* \
+      # GitHub's record that this run built each file, from this commit.
+      - if: steps.current.outputs.publish == 'true'
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: dist/dev/*
+      # A tag of its own each time, dev-<run>: a published release's tag is
+      # never used again once releases are immutable. The new build first,
+      # then the ones before it go, so there is always one.
+      - name: Publish, then retire the last development build
+        if: steps.current.outputs.publish == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: dev-${{ github.run_number }}
+        run: |
+          gh release create "$TAG" dist/dev/* \
             --repo "$GITHUB_REPOSITORY" \
             --target "$GITHUB_SHA" \
             --prerelease \
             --latest=false \
             --title "Development build ($COMMIT)" \
             --notes-file dist/dev-notes.md
+
+          gh release list --repo "$GITHUB_REPOSITORY" --limit 100 --json tagName \
+            --jq '.[].tagName | select(test("^dev-[0-9]+$"))' \
+            | while read -r old; do
+                if [ "$old" != "$TAG" ]; then
+                  gh release delete "$old" --repo "$GITHUB_REPOSITORY" --cleanup-tag --yes
+                fi
+              done

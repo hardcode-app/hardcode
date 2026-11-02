@@ -677,13 +677,19 @@ def check_nightly(suite: Suite) -> None:
     head = "a" * 40
 
     def decided(event: str, dev_commit: str) -> str:
-        done, _ = run_with_gh(script, {"GITHUB_EVENT_NAME": event, "GITHUB_SHA": head, "FAKE_DEV_COMMIT": dev_commit})
+        variables = {
+            "GITHUB_EVENT_NAME": event,
+            "GITHUB_SHA": head,
+            "FAKE_RELEASE_LIST": "dev-7" if dev_commit else "",
+            "FAKE_DEV_COMMIT": dev_commit,
+        }
+        done, _ = run_with_gh(script, variables)
         return done.stdout.strip() if done.returncode == 0 else done.stderr
 
     decisions = {
         "nightly, main unchanged": decided("schedule", head),
         "nightly, main moved": decided("schedule", "b" * 40),
-        "nightly, no dev tag": decided("schedule", ""),
+        "nightly, no development build": decided("schedule", ""),
         "by hand, main unchanged": decided("workflow_dispatch", head),
         "a tag": decided("push", head),
     }
@@ -693,27 +699,38 @@ def check_nightly(suite: Suite) -> None:
         == {
             "nightly, main unchanged": "build=false",
             "nightly, main moved": "build=true",
-            "nightly, no dev tag": "build=true",
+            "nightly, no development build": "build=true",
             "by hand, main unchanged": "build=true",
             "a tag": "build=true",
         },
         str(decisions),
     )
 
-    # The development build's last step, against the stand-in for gh.
-    script = step(jobs["dev-release"], "Replace the last development build")["run"]
-    variables = {"GITHUB_SHA": head, "COMMIT": head[:7], "CHART": "0.1.0-dev.1", "FAKE_DEV_COMMIT": "c" * 40}
+    # The development build's publishing, against the stand-in for gh.
+    current = step(jobs["dev-release"], "Still main's newest")["run"]
+    publish = step(jobs["dev-release"], "Publish, then retire the last development build")["run"]
+    variables = {"GITHUB_SHA": head, "COMMIT": head[:7], "CHART": "0.1.0-dev.9"}
 
-    moved, moved_calls = run_with_gh(script, {**variables, "FAKE_MAIN_COMMIT": "b" * 40})
-    current, current_calls = run_with_gh(script, {**variables, "FAKE_MAIN_COMMIT": head})
+    moved, moved_calls = run_with_gh(current, {**variables, "FAKE_MAIN_COMMIT": "b" * 40})
+    still, _ = run_with_gh(current, {**variables, "FAKE_MAIN_COMMIT": head})
     suite.check(
-        "a development build replaces the last one only while main is its commit; otherwise the last one stays",
+        "a development build is published only while main is its commit; otherwise the last one stays",
         moved.returncode == 0
+        and moved.stdout.strip() == "publish=false"
         and not any(call.startswith("release ") for call in moved_calls)
-        and current.returncode == 0
-        and any(call.startswith("release delete dev") for call in current_calls)
-        and any(call.startswith("release create dev") for call in current_calls),
-        f"main moved: {moved_calls}\nmain current: {current_calls}\n{current.stderr}",
+        and still.stdout.strip() == "publish=true",
+        f"main moved: {moved.stdout} {moved_calls}\nmain current: {still.stdout}",
+    )
+
+    published, calls = run_with_gh(publish, {**variables, "TAG": "dev-9", "FAKE_RELEASE_LIST": "dev-9\ndev-8\ndev-7"})
+    releases = [call for call in calls if call.startswith(("release create", "release delete"))]
+    suite.check(
+        "...under a tag of its own, dev-<run>, before the ones it replaces are retired",
+        published.returncode == 0
+        and releases[0].startswith("release create dev-9 ")
+        and sorted(call.split()[2] for call in releases[1:]) == ["dev-7", "dev-8"]
+        and all(call.startswith("release delete") and "--cleanup-tag" in call for call in releases[1:]),
+        "\n".join(calls) + published.stderr,
     )
 
 
@@ -790,6 +807,33 @@ def check_build_supply(suite: Suite) -> None:
     suite.check(
         "the app carries no zip extractor: its updates are installers, never zipped bundles",
         '\nname = "zip"\n' not in lock and not any(name.endswith(".zip") for _, name in release.INSTALLERS),
+    )
+
+    def attests(job: dict) -> list[dict]:
+        return [item.get("with") or {} for item in job["steps"] if "attest-build-provenance@" in item.get("uses", "")]
+
+    def before(job: dict, first: str, then: str) -> bool:
+        names = [item.get("uses", "") + " " + (item.get("name") or "") for item in job["steps"]]
+        return min(i for i, name in enumerate(names) if first in name) < min(
+            i for i, name in enumerate(names) if then in name
+        )
+
+    image, files, dev = attests(jobs["images"]), attests(jobs["release"]), attests(jobs["dev-release"])
+    suite.check(
+        "everything published is attested first: the images by digest, in the registry, and every release file",
+        image
+        == [
+            {
+                "subject-name": "${{ needs.version.outputs.prefix }}-${{ matrix.image.name }}",
+                "subject-digest": "${{ steps.build.outputs.digest }}",
+                "push-to-registry": True,
+            }
+        ]
+        and files == [{"subject-path": "dist/release/*"}]
+        and dev == [{"subject-path": "dist/dev/*"}]
+        and before(jobs["release"], "attest-build-provenance@", "Publish")
+        and before(jobs["dev-release"], "attest-build-provenance@", "Publish, then retire"),
+        f"{image}\n{files}\n{dev}",
     )
 
     native = jobs["app-native"]

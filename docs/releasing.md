@@ -38,6 +38,17 @@ git push origin v1.2.0
 | Known vulnerabilities | `vulnerabilities.json`, each finding in the lock files and the boundary's images, and a summary at the end of the description ([below](#known-vulnerabilities)) |
 | Checksums | `SHA256SUMS`, every file's: `sha256sum -c SHA256SUMS --ignore-missing` |
 
+The release is **immutable** (the repository's *Release immutability*
+setting): once published, its files and its tag can't be changed, and
+GitHub attests the release, its commit and its files
+(`gh release verify-asset vX.Y.Z FILE`). Before publishing, the workflow
+also records its own attestation for every file and image, that this
+workflow built it from this commit (`actions/attest-build-provenance`):
+`gh attestation verify FILE --repo <owner>/hardcode`, or
+`gh attestation verify oci://ghcr.io/<owner>/hardcode-squid:X.Y.Z --repo <owner>/hardcode`
+for an image. Only the repository's admins can push a `v*` tag, and no one
+can move or delete one (the *release tags* ruleset).
+
 The release's description is [`release/notes.md`](../release/notes.md)
 (how to install each of these), followed by GitHub's generated notes: the
 pull requests merged since the last release, Dependabot's under their own
@@ -103,7 +114,7 @@ Every night at 15:37 UTC, and on a manual run from `main` (Actions →
 Release → Run workflow, or `gh workflow run release.yml --ref main`), the
 release workflow builds everything a release does, from `main` as it is,
 and publishes it for testing. The nightly run first compares `main` with
-the commit the `dev` tag names, and builds nothing when they're the same;
+the newest development build's commit, and builds nothing when they're the same;
 a manual run always builds. A build whose commit `main` has moved on from
 by the time it finishes publishes nothing, and the last one stays: the
 next nightly build publishes `main` as it is then. What a development
@@ -111,7 +122,7 @@ build publishes:
 
 | | Where |
 |---|---|
-| The app, the `hardcode` command, its Python package, the chart | the **`dev` prerelease** on the Releases page, with `SHA256SUMS`. Each development build deletes the last one and its `dev` tag, and publishes itself at its own commit |
+| The app, the `hardcode` command, its Python package, the chart | a **`dev-N` prerelease** on the Releases page (N is the run's number), with `SHA256SUMS`, attested like a release's files. Each development build publishes itself at its own commit under its own tag, since an immutable release's tag is never used again, and then deletes the ones before it, so there is always one |
 | The images | `ghcr.io/<owner>/hardcode-{vscode,squid,gateway,admin}`, tagged `sha-<commit>` and `edge` (the newest development build); never `latest`, which is a release's |
 | The chart | `oci://ghcr.io/<owner>/charts/hardcode`, version `X.Y.Z-dev.N` (the checkout's version, which is the next release's, and the run's number), pointing at the `sha-<commit>` images. Helm takes it only when asked: `--devel`, or its exact version |
 

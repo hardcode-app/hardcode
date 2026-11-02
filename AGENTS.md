@@ -77,6 +77,12 @@ A change is complete when all of these are true:
   `ip_forward`, read-only filesystems, `no-new-privileges`, resource limits,
   `max_filedescriptors`) without saying so explicitly and updating
   [docs/security.md](docs/security.md).
+- The repository's settings are part of the model: the rulesets on `main`
+  and on `v*` tags, immutable releases, actions pinned by commit, approval
+  for outside contributors, secret push protection
+  ([docs/development.md](docs/development.md#repository-settings)). Don't
+  loosen one without saying so; a new CI job that should gate merges is
+  added to the ruleset's required checks.
 - The app's updater trusts one key, `release/updater.pub`: changing it is
   a security change, and its commit says why. Its private key is in the
   repository's secrets and the owner's safekeeping, never in a checkout.

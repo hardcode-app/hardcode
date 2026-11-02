@@ -228,6 +228,26 @@ binaries' workflow starts CI on its branch itself; GitHub must also allow
 workflows to open pull requests (Settings → Actions → General → *Allow
 GitHub Actions to create and approve pull requests*).
 
+## Repository settings
+
+Part of what keeps HardCode's build safe lives in GitHub's settings rather
+than in these files; keep it so:
+
+| Setting | What it does |
+|---|---|
+| Ruleset *main: history* | no one, admins included, can force-push to `main` or delete it |
+| Ruleset *main: CI before a merge* | a merge into `main` needs every CI check to pass and the branch to be up to date; admins may push directly |
+| Ruleset *release tags* | only admins create `v*` tags; no one moves or deletes one |
+| Release immutability | a published release's files and tag are locked, and GitHub attests it |
+| Actions: workflow permissions | the token is read-only unless a job asks for more; workflows may open pull requests (the vendor binaries') |
+| Actions: require actions pinned to a full commit | an action by tag or branch doesn't run |
+| Actions: approval for outside contributors | every outside contributor's workflow run waits for approval |
+| Secret scanning and push protection | a push carrying a known kind of secret is refused |
+| Private vulnerability reporting | people report a way out of the sandbox privately (the *Security* tab) |
+
+A new CI job that should gate merges goes into the second ruleset's
+required checks, under the job's name.
+
 ## Versioning
 
 The version lives in the release's tag. The files that carry one (the

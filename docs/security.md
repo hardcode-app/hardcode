@@ -204,6 +204,14 @@ languages while the chart's `profileDefaults.languages` is empty.
   Dockerfiles and lock files say. Its actions are pinned by commit, and
   only the jobs that publish hold the permissions to; those run no
   third-party action, and no checkout leaves its token behind.
+- **What is published can't be changed, and says where it came from.**
+  Releases are immutable: once published, their files and tags are locked,
+  and GitHub attests each release. Every file and image is also attested
+  as built by the release workflow from its commit, which
+  `gh attestation verify` checks ([releasing.md](releasing.md#what-a-release-publishes)).
+  Only the repository's admins can push a release tag; no one can move or
+  delete one, nor rewrite `main`'s history, and nothing merges into `main`
+  until CI has passed.
 - **What builds a release is pinned and a week old.** The BuildKit every
   image is built with, the build image's tools (the AppImage's included,
   which the Tauri CLI would otherwise download unchecked), the Rust and
