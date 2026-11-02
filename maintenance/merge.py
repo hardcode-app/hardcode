@@ -231,7 +231,11 @@ class Merger:
         if compared.get("behind_by", 0) > 0:
             return self.rebase(pull, _when(commits[-1]["commit"]["committer"]["date"]))
 
+        # A pull request one of our jobs opens with its token also gets a run
+        # GitHub holds for approval, which never runs: its CI is the run the
+        # job started itself.
         runs = self.get(f"/actions/workflows/{CI_WORKFLOW}/runs?head_sha={head}&per_page=20")["workflow_runs"]
+        runs = [run for run in runs if run.get("conclusion") != "action_required"]
         if not runs:
             return Decision(number, "waiting", "CI hasn't run on its newest commit")
 

@@ -720,16 +720,15 @@ def world(pulls: list[dict], per_pull: dict) -> dict:
         details = per_pull.get(number, {})
         head = pull["head"]["sha"]
         run = details.get("run")
+        runs = details.get("runs") or ([run] if run else [])
 
         answers[f"{base}/pulls/{number}/commits?per_page=100"] = details.get("commits", [])
         answers[f"{base}/compare/main...{head}"] = {"behind_by": details.get("behind", 0)}
-        answers[f"{base}/actions/workflows/ci.yml/runs?head_sha={head}&per_page=20"] = {
-            "workflow_runs": [run] if run else []
-        }
+        answers[f"{base}/actions/workflows/ci.yml/runs?head_sha={head}&per_page=20"] = {"workflow_runs": runs}
         answers[f"{base}/issues/{number}/comments?per_page=100"] = details.get("comments", [])
         answers[f"{base}/pulls/{number}/files?per_page=100"] = [{"filename": name} for name in details.get("files", [])]
-        if run:
-            answers[f"{base}/actions/runs/{run['id']}/jobs?per_page=100"] = {"jobs": details.get("jobs", [])}
+        for item in runs:
+            answers[f"{base}/actions/runs/{item['id']}/jobs?per_page=100"] = {"jobs": details.get("jobs", [])}
 
     return answers
 
@@ -768,6 +767,7 @@ def check_merging(suite: Suite) -> None:
         pins_pull(14, "dependabot/cargo/conflict", dependabot),
         pins_pull(15, "pins/locks", "github-actions[bot]"),
         pins_pull(16, "pins/locks", "github-actions[bot]"),
+        pins_pull(17, "pins/locks", "github-actions[bot]"),
     ]
     pin_ages_passed = [{"name": "Pin ages", "conclusion": "success"}, {"name": "CLI", "conclusion": "success"}]
     pin_ages_skipped = [{"name": "Pin ages", "conclusion": "skipped"}, {"name": "CLI", "conclusion": "success"}]
@@ -813,6 +813,13 @@ def check_merging(suite: Suite) -> None:
             "run": ci_run(16),
             "jobs": pin_ages_passed,
             "files": ["app/src-tauri/Cargo.lock", ".github/workflows/ci.yml"],
+        },
+        # The run its job started, then the one GitHub holds for approval.
+        17: {
+            "commits": [commit_of(metadata(("1.5.3", "patch")), "github-actions[bot]")],
+            "runs": [ci_run(17, finished=0.2), {**ci_run(117, "action_required", finished=0.1), "run_attempt": 1}],
+            "jobs": pin_ages_passed,
+            "files": ["app/src-tauri/Cargo.lock"],
         },
     }
 
@@ -869,6 +876,11 @@ def check_merging(suite: Suite) -> None:
     suite.check(
         "a green run whose pin-age check didn't run merges nothing",
         actions[15] == "left" and "ages" in decisions[15].reason and not sent("PUT", "/pulls/15/merge"),
+        detail,
+    )
+    suite.check(
+        "the run GitHub holds for approval on our own jobs' pull requests is passed over for the one that ran",
+        actions[17] == "merged" and sent("PUT", "/pulls/17/merge"),
         detail,
     )
     suite.check(
