@@ -95,6 +95,12 @@
 
   /** One CLI call for the current profile (or every profile), parsed from --json. */
   async function cli(args, { forProfile = profile, scope = 'profile' } = {}) {
+    // Before the first profile there is none to name: a call that needs one
+    // is a mistake here, not a null for Tauri to refuse.
+    if (!forProfile) {
+      throw new Error(`hardcode ${args.join(' ')} needs a profile, and there is none yet`);
+    }
+
     const everyProfile = scope === 'all' ? ['--all'] : [];
     const full = ['--json', '-p', forProfile, ...everyProfile, ...args];
 
@@ -207,7 +213,9 @@
     async 'profiles:create'(name, from, languages) {
       const source = from && from !== '_template' ? ['--from', from] : [];
       const chosen = Array.isArray(languages) ? [`--lang=${languages.join(',')}`] : [];
-      await cli(['profile', 'add', ...source, ...chosen, '--', name]);
+
+      // Not for a profile (there is none before the first): no -p.
+      await raw(['profile', 'add', ...source, ...chosen, '--', name]);
 
       profile = name;
       await save();

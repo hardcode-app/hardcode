@@ -2443,6 +2443,24 @@ function checkFirstProfile(errors) {
 }
 
 /**
+ * Then make it, as someone new does: Create, with what the dialog offers.
+ * It must open the new profile, with no error in the dialog.
+ */
+async function createFirstProfile(errors) {
+  await $('#np-create').onclick();
+
+  const shown = $('#np-error').textContent;
+  if (shown) {
+    errors.push(`creating the first profile failed: ${shown}`);
+    return;
+  }
+
+  if (!state.data || state.data.profile !== 'default' || !$('#modal').classList.contains('hidden')) {
+    errors.push('creating the first profile did not open it');
+  }
+}
+
+/**
  * The start-up check for a newer release answered, and the page shows what
  * it said: an offer with its version, or nothing (a development build, or
  * no newer release). The smoke run reports the version it was offered.
@@ -2480,12 +2498,14 @@ async function smoke() {
     }
   });
 
-  // Before the first profile there is only the dialog that makes it: no views.
+  // Before the first profile there is only the dialog that makes it: no
+  // views. It is checked, then used.
   if (!state.data) {
     await sleep(300);
     checkFirstProfile(errors);
     checkVersion(errors);
     await checkUpdate(errors);
+    await createFirstProfile(errors);
     api.invoke('smoke:done', 0, errors, state.update && state.update.version);
     return;
   }

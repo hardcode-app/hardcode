@@ -71,21 +71,29 @@ def check_headless_launch(suite: Suite) -> None:
                 timeout=300,
             )
 
-        # An empty home: the app asks for the first profile, and nothing else.
+        # An empty home: the app asks for the first profile, and nothing else;
+        # the smoke run then makes it, as someone new does, with Create.
         output = launch()
         report = "\n".join(line for line in output.text.splitlines() if "SMOKE" in line or "panicked" in line)
-        suite.check(f"an empty home: {report or 'no report'}", "SMOKE OK: views=0" in output.text, output.tail(40))
+        suite.check(
+            f"an empty home: the first profile is asked for, and made with Create: {report or 'no report'}",
+            "SMOKE OK: views=0 profile=default" in output.text,
+            output.tail(40),
+        )
+
+        hardcode = [sys.executable, ROOT / "cli" / "hardcode", "--config", home]
+        listed = harness.run([*hardcode, "--json", "profiles"])
+        names = [item["name"] for item in json.loads(listed.text)["profiles"]] if listed.ok else []
+        suite.require("...and the home has it, default, made by the app", names == ["default"], listed.text)
 
         profile = f"smoke-{secrets.token_hex(4)}"
-        hardcode = [sys.executable, ROOT / "cli" / "hardcode", "--config", home]
-        for name in [profile, "default"]:
-            created = harness.run([*hardcode, "profile", "add", name, "--lang", "python,docker"])
-            suite.require(f"the smoke run's profile {name} is created", created.ok, created.text)
+        created = harness.run([*hardcode, "profile", "add", profile, "--lang", "python,docker"])
+        suite.require(f"the smoke run's profile {profile} is created", created.ok, created.text)
 
         # The app opens on the profile its settings name, the last one used,
         # though there is a default too.
         settings = Path(temporary) / "config" / APP_IDENTIFIER / "settings.json"
-        settings.parent.mkdir(parents=True)
+        settings.parent.mkdir(parents=True, exist_ok=True)
         settings.write_text(json.dumps({"profile": profile}), encoding="utf-8")
 
         output = launch()
@@ -232,7 +240,8 @@ def check_updater(suite: Suite) -> None:
         report = "\n".join(line for line in output.text.splitlines() if "SMOKE" in line or "panicked" in line)
         suite.check(
             f"it asks for a newer release as it starts, and offers it: {report or 'no report'}",
-            "SMOKE OK: views=0 update=99.0.0" in output.text and asked == ["/latest.json"],
+            # An empty home, so the run makes the first profile too.
+            "SMOKE OK: views=0 profile=default update=99.0.0" in output.text and asked == ["/latest.json"],
             f"asked for {asked}\n{output.tail(40)}",
         )
 
