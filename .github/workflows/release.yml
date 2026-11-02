@@ -5,11 +5,12 @@
 # after the builds, which never hold the key), the hardcode command as binaries and as
 # a Python package, the Helm chart as an OCI artifact, and a GitHub Release
 # with all of it, the source, latest.json for the app's updater, checksums
-# and notes. A manual run from main is a development build of the same,
-# marked with its commit (release/release.py dev): the "dev" prerelease,
-# which the next one replaces, the images' edge and sha-<commit> tags, and
-# an X.Y.Z-dev.N chart. A manual run from another branch builds everything
-# and publishes nothing. Linux builds happen in the build image
+# and notes. A manual run from main, and a nightly one when main has moved
+# since the last, is a development build of the same, marked with its
+# commit (release/release.py dev): the "dev" prerelease, which the next one
+# replaces, the images' edge and sha-<commit> tags, and an X.Y.Z-dev.N
+# chart. A manual run from another branch builds everything and publishes
+# nothing. Linux builds happen in the build image
 # (images/build), like everything else. Each description ends with the
 # known vulnerabilities in what was built and the images that are the
 # boundary (the scan job; OSV-Scanner, sealed). Nothing is restored from a cache:
@@ -22,20 +23,54 @@ on:
   push:
     tags: ['v*']
   workflow_dispatch:
+  # Nightly, at 15:37 UTC: a development build of main (the schedule runs on
+  # the default branch), skipped when main hasn't moved since the last one.
+  schedule:
+    - cron: "37 15 * * *"
 
 # Read-only by default; the jobs that publish ask for what they push.
 permissions:
   contents: read
 
 jobs:
+  # Whether to build: a nightly run only when main has moved since the last
+  # development build, whose commit the dev tag names; any other run always.
+  # Every other job waits on the version job, which waits on this.
+  changed:
+    name: Changed since the last development build
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      build: ${{ steps.changed.outputs.build }}
+    steps:
+      - id: changed
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          build=true
+
+          if [ "$GITHUB_EVENT_NAME" = schedule ]; then
+            last="$(gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/dev" --jq .object.sha 2>/dev/null || true)"
+            if [ "$last" = "$GITHUB_SHA" ]; then
+              echo "main is still at ${GITHUB_SHA::7}, the last development build's commit: nothing to build"
+              build=false
+            fi
+          fi
+
+          echo "build=$build" >> "$GITHUB_OUTPUT"
+
   version:
     name: Version
+    needs: changed
+    if: needs.changed.outputs.build == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 15
     outputs:
       # The tag without its v; empty on a manual run.
       version: ${{ steps.version.outputs.version }}
-      # "true" on a manual run from main: a development build, published.
+      # "true" on a manual or nightly run from main: a development build,
+      # published.
       dev: ${{ steps.version.outputs.dev }}
       # The commit, as a development build's mark and its images' tag name it.
       commit: ${{ steps.version.outputs.commit }}

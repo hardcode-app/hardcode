@@ -22,8 +22,9 @@ git push origin v1.2.0
   repository they stay at the development version; `tests/release.py`
   checks they agree.
 - **A manual run** (Actions → Release → Run workflow) from `main` is a
-  [development build](#development-builds); from any other branch it
-  builds everything and publishes nothing.
+  [development build](#development-builds), and so is the **nightly run**
+  when `main` has moved since the last one; a manual run from any other
+  branch builds everything and publishes nothing.
 
 ## What a release publishes
 
@@ -87,9 +88,12 @@ last through `images/build/run.sh`.
 
 ## Development builds
 
-A manual run from `main` (Actions → Release → Run workflow, or
-`gh workflow run release.yml --ref main`) builds everything a release does,
-from `main` as it is, and publishes it for testing:
+Every night at 15:37 UTC, and on a manual run from `main` (Actions →
+Release → Run workflow, or `gh workflow run release.yml --ref main`), the
+release workflow builds everything a release does, from `main` as it is,
+and publishes it for testing. The nightly run first compares `main` with
+the commit the `dev` tag names, and builds nothing when they're the same;
+a manual run always builds. What a development build publishes:
 
 | | Where |
 |---|---|
@@ -108,9 +112,9 @@ the prerelease's description
 prerelease, it is never GitHub's latest release: the app's updater, and
 `releases/latest`, never see it.
 
-While the repository is private, a run's macOS minutes count ten times
-against the account's Actions minutes and its Windows minutes twice, so
-development builds are started by hand.
+GitHub stops a public repository's scheduled workflows after 60 days
+without activity in it, and says so; a push, or enabling the workflow
+again (Actions → Release), starts the nightly builds again.
 
 ## The app's updater
 

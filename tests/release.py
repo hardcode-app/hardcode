@@ -5,7 +5,8 @@ written into every file that carries it, a development build's mark, the
 updater's configuration, the builds' files gathered into one folder, the
 latest.json the app's updater reads (from
 installers signed for real, with a throwaway key), the release's and the
-development build's descriptions, and the checksums.
+development build's descriptions, the checksums, the known vulnerabilities'
+section, and whether a nightly run builds.
 """
 
 from __future__ import annotations
@@ -20,6 +21,8 @@ import sys
 import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
+
+import yaml
 
 import harness
 from harness import ROOT, Suite
@@ -590,6 +593,81 @@ def check_scan(suite: Suite) -> None:
         )
 
 
+def check_nightly(suite: Suite) -> None:
+    workflow = yaml.safe_load((ROOT / ".github/workflows/release.yml").read_text(encoding="utf-8"))
+    jobs = workflow["jobs"]
+
+    # YAML 1.1, which PyYAML reads, takes the key "on" for true.
+    triggers = workflow.get("on", workflow.get(True))
+
+    # Every job but the check waits on the version job, which waits on the
+    # check: skipping the version job skips the build.
+    not_waiting = []
+    for name, job in jobs.items():
+        needs = job.get("needs", [])
+        needs = [needs] if isinstance(needs, str) else needs
+        if name not in ("changed", "version") and "version" not in needs:
+            not_waiting.append(name)
+
+    suite.check(
+        "a nightly run is scheduled; every job waits on the version job, which waits on the check",
+        len(triggers["schedule"]) == 1
+        and jobs["version"]["needs"] == "changed"
+        and jobs["version"]["if"] == "needs.changed.outputs.build == 'true'"
+        and not not_waiting,
+        f"not waiting on the version job: {not_waiting}",
+    )
+
+    # The check's own script, run as GitHub runs a bash step, with
+    # tests/fixtures/fake_gh.py answering for gh.
+    script = jobs["changed"]["steps"][0]["run"]
+    head = "a" * 40
+
+    with tempfile.TemporaryDirectory(prefix="hc-nightly-") as temporary:
+        folder = Path(temporary)
+        (folder / "gh").symlink_to(ROOT / "tests" / "fixtures" / "fake_gh.py")
+        output = folder / "output"
+
+        def decided(event: str, dev_commit: str) -> str:
+            output.write_text("", encoding="utf-8")
+            environment = {
+                **os.environ,
+                "PATH": f"{folder}{os.pathsep}{os.environ['PATH']}",
+                "GITHUB_EVENT_NAME": event,
+                "GITHUB_SHA": head,
+                "GITHUB_REPOSITORY": "owner/hardcode",
+                "GITHUB_OUTPUT": str(output),
+                "FAKE_DEV_COMMIT": dev_commit,
+            }
+            subprocess.run(
+                ["bash", "--noprofile", "--norc", "-eo", "pipefail", "-c", script],
+                env=environment,
+                check=True,
+                capture_output=True,
+            )
+            return output.read_text(encoding="utf-8").strip()
+
+        decisions = {
+            "nightly, main unchanged": decided("schedule", head),
+            "nightly, main moved": decided("schedule", "b" * 40),
+            "nightly, no dev tag": decided("schedule", ""),
+            "by hand, main unchanged": decided("workflow_dispatch", head),
+            "a tag": decided("push", head),
+        }
+        suite.check(
+            "...which skips a nightly run while main is the last development build's commit, and builds otherwise",
+            decisions
+            == {
+                "nightly, main unchanged": "build=false",
+                "nightly, main moved": "build=true",
+                "nightly, no dev tag": "build=true",
+                "by hand, main unchanged": "build=true",
+                "a tag": "build=true",
+            },
+            str(decisions),
+        )
+
+
 def run_checks(suite: Suite) -> None:
     suite.section("the version")
     check_versions(suite)
@@ -611,6 +689,9 @@ def run_checks(suite: Suite) -> None:
 
     suite.section("known vulnerabilities")
     check_scan(suite)
+
+    suite.section("the nightly development build")
+    check_nightly(suite)
 
 
 if __name__ == "__main__":
