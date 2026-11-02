@@ -784,6 +784,14 @@ def check_build_supply(suite: Suite) -> None:
         publish,
     )
 
+    # The updater's zip feature unpacks Tauri v1's zipped bundles; HardCode's
+    # updates are the installers themselves (release.INSTALLERS).
+    lock = (ROOT / "app" / "src-tauri" / "Cargo.lock").read_text(encoding="utf-8")
+    suite.check(
+        "the app carries no zip extractor: its updates are installers, never zipped bundles",
+        '\nname = "zip"\n' not in lock and not any(name.endswith(".zip") for _, name in release.INSTALLERS),
+    )
+
     native = jobs["app-native"]
     uses = [item.get("uses", "") for item in native["steps"]]
     rust = next(item for item in native["steps"] if item.get("uses", "").startswith("dtolnay/rust-toolchain@"))
