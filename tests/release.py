@@ -146,6 +146,80 @@ def check_dev_mark(suite: Suite) -> None:
                 refused.append(commit)
         suite.check("a commit that isn't a hash is refused", len(refused) == 5, f"refused {refused}")
 
+    with tempfile.TemporaryDirectory(prefix="hc-dev-") as temporary:
+        root = Path(temporary)
+        for name in (release.BUILD_MARK[0], release.WHEEL_VERSION[0], release.TAURI_CONF):
+            (root / name).parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(ROOT / name, root / name)
+        version = next(iter(release.versions().values()))
+        config_before = json.loads((root / release.TAURI_CONF).read_text(encoding="utf-8"))
+
+        release.mark_dev("2c419ae", root, run="12")
+        pyproject = (root / release.WHEEL_VERSION[0]).read_text(encoding="utf-8")
+        config = json.loads((root / release.TAURI_CONF).read_text(encoding="utf-8"))
+        rpm = config["bundle"].pop("linux")
+        suite.check(
+            "with its run number, the Python package becomes X.Y.Z.devN and the RPM's release 0.devN, "
+            "and nothing else in Tauri's configuration changes",
+            f'\nversion = "{version}.dev12"\n' in pyproject
+            and rpm == {"rpm": {"release": "0.dev12"}}
+            and config == config_before,
+            f"{rpm}\n{pyproject[:300]}",
+        )
+
+        try:
+            release.mark_dev("2c419ae", root, run="12; true")
+            refused = ""
+        except release.ReleaseError as error:
+            refused = str(error)
+        suite.check("a run number that isn't one is refused", "run number" in refused, refused)
+
+    # PEP 440 orders the Python package's versions so.
+    from packaging.version import Version
+
+    suite.check(
+        "...which sort after the last development build's and before the release's",
+        Version(f"{version}.dev9") < Version(f"{version}.dev12") < Version(version),
+    )
+
+    # The Debian package, built for real and given the development version.
+    with tempfile.TemporaryDirectory(prefix="hc-dev-deb-") as temporary:
+        folder = Path(temporary)
+        tree = folder / "tree"
+        (tree / "DEBIAN").mkdir(parents=True)
+        (tree / "usr" / "bin").mkdir(parents=True)
+        (tree / "usr" / "bin" / "hardcode-app").write_text("#!/bin/sh\n", encoding="utf-8")
+        (tree / "DEBIAN" / "control").write_text(
+            "Package: hard-code\nVersion: 0.1.0\nArchitecture: amd64\n"
+            "Maintainer: HardCode <hardcode@example.com>\nDescription: a test\n",
+            encoding="utf-8",
+        )
+        (folder / "bundle").mkdir()
+        package = folder / "bundle" / "HardCode_0.1.0_amd64.deb"
+        built = harness.run(["dpkg-deb", "--root-owner-group", "--build", tree, package])
+
+        changes = release.dev_deb(folder / "bundle", "12")
+        field = harness.run(["dpkg-deb", "--field", package, "Version"])
+        contents = harness.run(["dpkg-deb", "--contents", package])
+
+        def before(older: str, newer: str) -> bool:
+            return harness.run(["dpkg", "--compare-versions", older, "lt", newer]).ok
+
+        suite.check(
+            "dev-deb gives a built .deb the development version, X.Y.Z~devN, under the same name and contents",
+            built.ok
+            and changes == ["HardCode_0.1.0_amd64.deb: 0.1.0 -> 0.1.0~dev12"]
+            and field.text.strip() == "0.1.0~dev12"
+            and "root/root" in contents.text
+            and "./usr/bin/hardcode-app" in contents.text
+            and [path.name for path in (folder / "bundle").iterdir()] == ["HardCode_0.1.0_amd64.deb"],
+            f"{changes}\n{field.text}\n{contents.text}",
+        )
+        suite.check(
+            "...which Debian sorts after the last development build's and before the release's",
+            before("0.1.0~dev9", "0.1.0~dev12") and before("0.1.0~dev12", "0.1.0"),
+        )
+
 
 def check_updater_config(suite: Suite) -> None:
     with tempfile.TemporaryDirectory(prefix="hc-updater-") as temporary:
@@ -375,12 +449,12 @@ def check_notes_and_checksums(suite: Suite) -> None:
             suite.check("a name a release doesn't have is refused", "nonsense" in str(error), str(error))
 
     version = next(iter(release.versions().values()))
-    text = release.dev_notes("2c419ae", f"{version}-dev.7", REPOSITORY)
+    text = release.dev_notes("2c419ae", "7", f"{version}-dev.7", REPOSITORY)
     suite.check(
         "the development build's description names its commit, files, images and chart",
         "{{" not in text
         and f"`{version} (dev, 2c419ae)`" in text
-        and f"hardcode_cli-{version}-py3-none-any.whl" in text
+        and f"hardcode_cli-{version}.dev7-py3-none-any.whl" in text
         and f"oci://ghcr.io/example-owner/charts/hardcode --version {version}-dev.7" in text
         and "ghcr.io/example-owner/hardcode-{vscode,squid,gateway,admin}:sha-2c419ae" in text,
         text,
@@ -395,6 +469,8 @@ def check_notes_and_checksums(suite: Suite) -> None:
                 "dev-notes",
                 "--commit",
                 "2c419ae",
+                "--run",
+                "7",
                 "--chart",
                 f"{version}-dev.7",
                 "--repository",

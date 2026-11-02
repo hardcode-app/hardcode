@@ -5,9 +5,14 @@ The steps of a release that aren't a build: the release workflow
 
     release/release.py stamp VERSION
         write VERSION into every file that carries HardCode's version
-    release/release.py dev COMMIT
+    release/release.py dev COMMIT [--run N]
         mark a development build of COMMIT: the command's --version, and the
-        app, say "0.1.0 (dev, COMMIT)"
+        app, say "0.1.0 (dev, COMMIT)"; with the workflow's run number N, the
+        Python package becomes 0.1.0.devN and the RPM's release 0.devN, so
+        each development build's packages upgrade the last one's
+    release/release.py dev-deb --run N DIR
+        give each .deb in DIR, once built, the development build's version,
+        0.1.0~devN, for the same reason (its file keeps its name)
     release/release.py updater-config --repository OWNER/REPO OUT
         the Tauri configuration a release builds the app with: the updater,
         when release/updater.pub holds the key it trusts (else nothing)
@@ -22,7 +27,7 @@ The steps of a release that aren't a build: the release workflow
         DIR/latest.json, which the app's updater reads, from DIR's signed installers
     release/release.py notes --version VERSION --repository OWNER/REPO OUT
         the release's description, from release/notes.md
-    release/release.py dev-notes --commit COMMIT --chart VERSION --repository OWNER/REPO OUT
+    release/release.py dev-notes --commit COMMIT --run N --chart VERSION --repository OWNER/REPO OUT
         the development build's description, from release/dev-notes.md
     release/release.py checksums DIR
         DIR/SHA256SUMS, for every file in DIR
@@ -40,6 +45,7 @@ import os
 import re
 import subprocess
 import sys
+import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable, Optional
@@ -72,6 +78,16 @@ VERSIONED = [
 # Where a development build is marked as one, and how to find the mark
 # there: the pattern's one group is the mark, empty in a release.
 BUILD_MARK = ("cli/hardcode_cli/__init__.py", r'^__build__ = "([^"]*)"$')
+
+# A development build's packages carry versions of their own, which sort
+# after the last development build's and before the release's: the Python
+# package's (PEP 440's X.Y.Z.devN, in its pyproject.toml), the RPM's release
+# (0.devN, below a release's 1, in Tauri's configuration), and the Debian
+# package's (X.Y.Z~devN, written into the built .deb: dev_deb). Windows and
+# macOS installers replace what is installed whatever their version.
+WHEEL_VERSION = ("cli/pyproject.toml", r'^version = "([^"]+)"$')
+TAURI_CONF = "app/src-tauri/tauri.conf.json"
+RUN = re.compile(r"^[0-9]+$")
 
 # A commit, as git names it: its hash, or the start of it.
 COMMIT = re.compile(r"^[0-9a-f]{7,40}$")
@@ -157,14 +173,20 @@ def versions(root: Path = ROOT) -> dict[str, str]:
     return found
 
 
-def mark_dev(commit: str, root: Path = ROOT) -> str:
+def mark_dev(commit: str, root: Path = ROOT, run: Optional[str] = None) -> str:
     """
     Mark the files at *root* as a development build of *commit*: the
     command's ``--version``, and the app, which shows the command's, say
-    "0.1.0 (dev, *commit*)". The change, as ``path: old -> new``.
+    "0.1.0 (dev, *commit*)". With the workflow's *run* number, the Python
+    package's version and the RPM's release become the development
+    build's. The changes, as ``path: old -> new``, a line each.
     """
     if not COMMIT.match(commit):
         raise ReleaseError(f"{commit!r} is not a commit: its hash, or the start of it, in lowercase hex")
+    if run is not None and not RUN.match(run):
+        raise ReleaseError(f"{run!r} is not a run number")
+
+    changes = []
 
     name, pattern = BUILD_MARK
     path = root / name
@@ -177,8 +199,75 @@ def mark_dev(commit: str, root: Path = ROOT) -> str:
     mark = f"dev, {commit}"
     start, end = match.span(1)
     path.write_text(text[:start] + mark + text[end:], encoding="utf-8")
+    changes.append(f"{name}: {match.group(1)!r} -> {mark!r}")
 
-    return f"{name}: {match.group(1)!r} -> {mark!r}"
+    if run is None:
+        return "\n".join(changes)
+
+    # The Python package: X.Y.Z.devN.
+    name, pattern = WHEEL_VERSION
+    path = root / name
+    text = path.read_text(encoding="utf-8")
+    match = re.search(pattern, text, re.MULTILINE)
+    if match is None:
+        raise ReleaseError(f"no version in {name} (looked for {pattern})")
+
+    wheel = f"{match.group(1)}.dev{run}"
+    start, end = match.span(1)
+    path.write_text(text[:start] + wheel + text[end:], encoding="utf-8")
+    changes.append(f"{name}: {match.group(1)!r} -> {wheel!r}")
+
+    # The RPM: release 0.devN.
+    path = root / TAURI_CONF
+    config = json.loads(path.read_text(encoding="utf-8"))
+    rpm = config.setdefault("bundle", {}).setdefault("linux", {}).setdefault("rpm", {})
+    old = rpm.get("release", "1")
+    rpm["release"] = f"0.dev{run}"
+    path.write_text(json.dumps(config, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+    changes.append(f"{TAURI_CONF}: the RPM's release {old!r} -> {rpm['release']!r}")
+
+    return "\n".join(changes)
+
+
+def dev_deb(
+    directory: Path, run: str, runner: Callable[..., subprocess.CompletedProcess] = subprocess.run
+) -> list[str]:
+    """
+    Give each Debian package in *directory* the development build's version,
+    its version with ~devRUN after it, which Debian sorts after the last
+    development build's and before the release's. Only the control file's
+    Version changes, by unpacking and packing it again with dpkg-deb; the
+    file keeps its name. The changes, as ``name: old -> new``.
+    """
+    if not RUN.match(run):
+        raise ReleaseError(f"{run!r} is not a run number")
+
+    packages = sorted(directory.glob("*.deb"))
+    if not packages:
+        raise ReleaseError(f"no .deb in {directory}")
+
+    changes = []
+    for package in packages:
+        with tempfile.TemporaryDirectory(prefix="dev-deb-") as temporary:
+            tree = Path(temporary) / "package"
+            runner(["dpkg-deb", "--raw-extract", str(package), str(tree)], check=True)
+
+            control = tree / "DEBIAN" / "control"
+            text = control.read_text(encoding="utf-8")
+            match = re.search(r"^Version: (\S+)$", text, re.MULTILINE)
+            if match is None:
+                raise ReleaseError(f"{package.name} has no Version in its control file")
+
+            version = f"{match.group(1)}~dev{run}"
+            start, end = match.span(1)
+            control.write_text(text[:start] + version + text[end:], encoding="utf-8")
+
+            runner(
+                ["dpkg-deb", "--root-owner-group", "--build", str(tree), str(package)], check=True, capture_output=True
+            )
+            changes.append(f"{package.name}: {match.group(1)} -> {version}")
+
+    return changes
 
 
 def build_mark(root: Path = ROOT) -> str:
@@ -388,6 +477,7 @@ def notes(version: str, repository: str, template: Path = ROOT / "release" / "no
 
 def dev_notes(
     commit: str,
+    run: str,
     chart: str,
     repository: str,
     root: Path = ROOT,
@@ -396,14 +486,19 @@ def dev_notes(
     """
     The development build's description: *template* with the commit it was
     built from, the version its files carry (the checkout's, at *root*),
-    and its chart's version, filled in.
+    its Python package's (that version's .devRUN), and its chart's version,
+    filled in.
     """
     if not COMMIT.match(commit):
         raise ReleaseError(f"{commit!r} is not a commit: its hash, or the start of it, in lowercase hex")
+    if not RUN.match(run):
+        raise ReleaseError(f"{run!r} is not a run number")
 
+    version = next(iter(versions(root).values()))
     values = {
         "commit": commit,
-        "version": next(iter(versions(root).values())),
+        "version": version,
+        "wheel": f"{version}.dev{run}",
         "chart": chart,
         "repository": repository,
         "owner": repository.split("/")[0].lower(),
@@ -445,6 +540,11 @@ def main(argv: list[str]) -> int:
 
     command = commands.add_parser("dev", help="mark a development build of COMMIT")
     command.add_argument("commit")
+    command.add_argument("--run")
+
+    command = commands.add_parser("dev-deb", help="give DIR's .deb packages the development build's version")
+    command.add_argument("--run", required=True)
+    command.add_argument("directory", type=Path)
 
     command = commands.add_parser("updater-config", help="the Tauri configuration a release builds the app with")
     command.add_argument("--repository", required=True)
@@ -469,6 +569,7 @@ def main(argv: list[str]) -> int:
 
     command = commands.add_parser("dev-notes", help="the development build's description")
     command.add_argument("--commit", required=True)
+    command.add_argument("--run", required=True)
     command.add_argument("--chart", required=True)
     command.add_argument("--repository", required=True)
     command.add_argument("out", type=Path)
@@ -484,7 +585,10 @@ def main(argv: list[str]) -> int:
                 print(change)
 
         elif arguments.command == "dev":
-            print(mark_dev(arguments.commit))
+            print(mark_dev(arguments.commit, run=arguments.run))
+
+        elif arguments.command == "dev-deb":
+            print("\n".join(dev_deb(arguments.directory, arguments.run)))
 
         elif arguments.command == "updater-config":
             config = updater_config(arguments.repository)
@@ -511,7 +615,7 @@ def main(argv: list[str]) -> int:
             arguments.out.write_text(notes(arguments.version, arguments.repository), encoding="utf-8")
 
         elif arguments.command == "dev-notes":
-            text = dev_notes(arguments.commit, arguments.chart, arguments.repository)
+            text = dev_notes(arguments.commit, arguments.run, arguments.chart, arguments.repository)
             arguments.out.write_text(text, encoding="utf-8")
 
         elif arguments.command == "checksums":

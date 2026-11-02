@@ -127,8 +127,12 @@ build publishes:
 | The chart | `oci://ghcr.io/<owner>/charts/hardcode`, version `X.Y.Z-dev.N` (the checkout's version, which is the next release's, and the run's number), pointing at the `sha-<commit>` images. Helm takes it only when asked: `--devel`, or its exact version |
 
 Its files carry the checkout's version, since Windows installers take
-nothing but numbers, and say they are a development build where people
-look: `hardcode --version` and the app's sidebar say
+nothing but numbers, except the packages a newer build must install over:
+the `.deb` is `X.Y.Z~devN`, the `.rpm` `X.Y.Z-0.devN`, and the Python
+package `X.Y.Z.devN` (N is the run's number), so each upgrades the last
+development build's and the release upgrades them all
+(`release/release.py dev --run N`, and `dev-deb` for the built `.deb`). They
+say they are a development build where people look: `hardcode --version` and the app's sidebar say
 `0.1.0 (dev, 2c419ae)` (`release/release.py dev` marks the build). The app
 has no updater, like any build without a release's version, and nothing
 is signed: macOS refuses the app until its quarantine is cleared, which

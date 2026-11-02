@@ -238,10 +238,15 @@ jobs:
           echo "HARDCODE_UPDATER_CONFIG=src-tauri/tauri.updater.conf.json" >> "$GITHUB_ENV"
       - name: A development build's mark
         if: env.VERSION == ''
-        run: images/build/run.sh release/release.py dev "$COMMIT"
+        run: images/build/run.sh release/release.py dev "$COMMIT" --run "$GITHUB_RUN_NUMBER"
       # The updater's key is nowhere here: the build runs every crate's
       # build script. The sign job signs what it built.
       - run: app/build.sh bundle
+      # A development build's .deb as 0.1.0~devN, so that it installs over
+      # the last one (the RPM's release is in Tauri's configuration).
+      - name: A development build's Debian package
+        if: env.VERSION == ''
+        run: images/build/run.sh release/release.py dev-deb --run "$GITHUB_RUN_NUMBER" app/src-tauri/target/release/bundle/deb
         env:
           BUILD_ENV: HARDCODE_UPDATER_CONFIG
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
@@ -289,7 +294,7 @@ jobs:
       - name: A development build's mark
         if: env.VERSION == ''
         shell: bash
-        run: python release/release.py dev "$COMMIT"
+        run: python release/release.py dev "$COMMIT" --run "$GITHUB_RUN_NUMBER"
       - name: The CLI as a sidecar
         shell: bash
         run: |
@@ -356,7 +361,7 @@ jobs:
       - run: tests/cli.py
       - name: A development build's mark
         if: env.VERSION == ''
-        run: images/build/run.sh release/release.py dev "$COMMIT"
+        run: images/build/run.sh release/release.py dev "$COMMIT" --run "$GITHUB_RUN_NUMBER"
       - run: app/build.sh cli
       - run: app/build.sh wheel
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
@@ -395,7 +400,7 @@ jobs:
       - name: A development build's mark
         if: env.VERSION == ''
         shell: bash
-        run: python release/release.py dev "$COMMIT"
+        run: python release/release.py dev "$COMMIT" --run "$GITHUB_RUN_NUMBER"
       - name: Build
         shell: bash
         run: |
@@ -688,7 +693,7 @@ jobs:
       - name: Assemble (in the build image)
         run: |
           images/build/run.sh release/release.py gather dist/dev
-          images/build/run.sh release/release.py dev-notes --commit "$COMMIT" --chart "$CHART" --repository "$GITHUB_REPOSITORY" dist/dev-notes.md
+          images/build/run.sh release/release.py dev-notes --commit "$COMMIT" --run "$GITHUB_RUN_NUMBER" --chart "$CHART" --repository "$GITHUB_REPOSITORY" dist/dev-notes.md
           printf '\n' >> dist/dev-notes.md
           cat dist/vulnerabilities/vulnerabilities.md >> dist/dev-notes.md
           cp dist/vulnerabilities/vulnerabilities.json dist/dev/
