@@ -29,6 +29,7 @@ import re
 import subprocess
 import sys
 import time
+import tomllib
 import urllib.error
 import urllib.request
 from dataclasses import dataclass
@@ -43,7 +44,8 @@ MINIMUM_AGE = timedelta(days=7)
 
 # The files that pin something, by what they pin.
 CARGO_LOCK = "app/src-tauri/Cargo.lock"
-REQUIREMENTS = ["cli/requirements.txt", "images/build/requirements.txt"]
+REQUIREMENTS = ["cli/requirements.txt", "images/build/uv/requirements.txt"]
+UV_LOCKS = ["images/admin/uv.lock", "images/build/uv.lock"]
 IMAGE_FILES = [
     "compose.yaml",
     "helm/hardcode/values.yaml",
@@ -56,13 +58,15 @@ IMAGE_FILES = [
 BUILD_DOCKERFILE = "images/build/Dockerfile"
 
 CRATES_IO = "registry+https://github.com/rust-lang/crates.io-index"
+PYPI = "https://pypi.org/simple"
 
 # "image: coredns/coredns:1.15.0@sha256:..." in YAML, "FROM ubuntu:..." in a
 # Dockerfile: the reference is the first word after either.
 IMAGE_LINE = re.compile(r"^[ \t]*(?:image:|FROM)[ \t]+(\S+)", re.MULTILINE | re.IGNORECASE)
 
-# "pyinstaller==6.22.3" in a requirements file.
-REQUIREMENT_LINE = re.compile(r"^([A-Za-z0-9][A-Za-z0-9._-]*)==(\S+)\s*$", re.MULTILINE)
+# "pyyaml==6.0.3" in a requirements file, alone on its line or followed by
+# " \" and its hashes on the lines after.
+REQUIREMENT_LINE = re.compile(r"^([A-Za-z0-9][A-Za-z0-9._-]*)==([^\s\\]+)[ \t]*\\?[ \t\r]*$", re.MULTILINE)
 
 # "ARG HELM_VERSION=4.3.0" in the build image's Dockerfile.
 ARG_LINE = "ARG {name}={value}"
@@ -186,9 +190,24 @@ def crates(text: str) -> set[Pin]:
 
 def requirements(text: str) -> set[Pin]:
     """
-    The Python packages a requirements file pins with ``==``.
+    The Python packages a requirements file pins with ``==``, with their
+    hashes or without.
     """
     return {Pin("pypi", name.lower(), version) for name, version in REQUIREMENT_LINE.findall(text)}
+
+
+def uv_lock(text: str) -> set[Pin]:
+    """
+    The PyPI packages a uv.lock holds: not the project itself, nor anything
+    from another source.
+    """
+    pins = set()
+
+    for package in tomllib.loads(text).get("package", []):
+        if package.get("source", {}).get("registry") == PYPI:
+            pins.add(Pin("pypi", package["name"], package["version"]))
+
+    return pins
 
 
 def images(text: str) -> set[Pin]:
@@ -241,6 +260,11 @@ def pins_in(read: Callable[[str], Optional[str]]) -> set[Pin]:
         text = read(name)
         if text is not None:
             found |= requirements(text)
+
+    for name in UV_LOCKS:
+        text = read(name)
+        if text is not None:
+            found |= uv_lock(text)
 
     for name in IMAGE_FILES:
         text = read(name)

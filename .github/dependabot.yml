@@ -27,13 +27,24 @@ updates:
     cooldown: { default-days: 7 }
     groups:
       app: { patterns: ["*"] }
+  # uv itself (images/build/uv), pinned with its hashes, which this moves too.
   - package-ecosystem: pip
-    directories: ["/admin", "/cli", "/images/build"]
+    directories: ["/admin", "/cli", "/images/build/uv"]
     commit-message: { prefix: build, include: scope }
     schedule: { interval: weekly }
     cooldown: { default-days: 7 }
     groups:
       python: { patterns: ["*"] }
+  # The images' Python packages, as their uv.lock files lock them; the
+  # cooldown is the projects' exclude-newer, a week, so that uv can lock what
+  # is proposed.
+  - package-ecosystem: uv
+    directories: ["/images/admin", "/images/build"]
+    commit-message: { prefix: build, include: scope }
+    schedule: { interval: weekly }
+    cooldown: { default-days: 7 }
+    groups:
+      python-images: { patterns: ["*"] }
   # Local composite actions aren't followed from the workflows that use them:
   # each one's folder is listed. An action is code the workflows run with
   # their tokens: these are never merged without a person.

@@ -11,12 +11,16 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import re
 import subprocess
 import sys
 import tempfile
+import tomllib
 import types
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+
+import yaml
 
 import harness
 from harness import ROOT, Suite
@@ -87,7 +91,8 @@ def check_pins_found(suite: Suite) -> None:
     suite.check(
         f"the checkout's pins: {', '.join(f'{len(value)} {key}' for key, value in kinds.items())}",
         len(kinds["crate"]) > 300
-        and {pin.name for pin in kinds["pypi"]} >= {"pyinstaller", "ruff", "pyyaml"}
+        and {pin.name for pin in kinds["pypi"]}
+        >= {"uv", "pyinstaller", "pefile", "ruff", "pyyaml", "flask", "gunicorn", "markupsafe"}
         and {pin.name for pin in kinds["image"]} >= {"coredns/coredns", "docker"}
         and {pin.name for pin in kinds["release"]}
         == {"kubernetes-sigs/kind", "kubernetes/kubernetes", "helm/helm", "google/osv-scanner", "tauri-apps/tauri"},
@@ -112,6 +117,35 @@ FROM ubuntu:${UBUNTU_VERSION}
             pins.Pin("image", "ubuntu", "resolute-20261006@sha256:def"),
         },
         str(pins.images(text)),
+    )
+
+    text = "# pyyaml==6.0.3\nflask==3.1.3 \\\n    --hash=sha256:aaa \\\n    --hash=sha256:bbb\nruff==0.17.2\n"
+    suite.check(
+        "a Python package is read with its hashes or without, and not from a comment",
+        pins.requirements(text) == {pins.Pin("pypi", "flask", "3.1.3"), pins.Pin("pypi", "ruff", "0.17.2")},
+        str(pins.requirements(text)),
+    )
+
+    text = """
+[[package]]
+name = "hardcode-admin-image"
+version = "0"
+source = { virtual = "." }
+
+[[package]]
+name = "flask"
+version = "3.1.3"
+source = { registry = "https://pypi.org/simple" }
+
+[[package]]
+name = "local"
+version = "1.0"
+source = { path = "../local" }
+"""
+    suite.check(
+        "a uv.lock's packages from PyPI are read; the environment itself and other sources are not",
+        pins.uv_lock(text) == {pins.Pin("pypi", "flask", "3.1.3")},
+        str(pins.uv_lock(text)),
     )
 
 
@@ -171,11 +205,11 @@ def check_ages(suite: Suite) -> None:
     with tempfile.TemporaryDirectory(prefix="hc-pins-") as temporary:
         root = Path(temporary)
         (root / "app/src-tauri").mkdir(parents=True)
-        (root / "images/build").mkdir(parents=True)
+        (root / "cli").mkdir(parents=True)
 
         lock = '[[package]]\nname = "serde"\nversion = "1.0.200"\nsource = "{source}"\n'
         (root / pins.CARGO_LOCK).write_text(lock.format(source=pins.CRATES_IO), encoding="utf-8")
-        (root / "images/build/requirements.txt").write_text("ruff==0.17.3\n", encoding="utf-8")
+        (root / "cli/requirements.txt").write_text("ruff==0.17.3\n", encoding="utf-8")
         git(root, "init", "-q", "-b", "main")
         git(root, "add", ".")
         git(root, "commit", "-q", "-m", "base")
@@ -204,6 +238,91 @@ def check_ages(suite: Suite) -> None:
             (accepted, refused) == (0, 1) and unchanged == 1,
             f"accepted={accepted} refused={refused}; asked {registries.asked}",
         )
+
+
+# ---------------------------------------------------------------------------
+# The Python environments
+# ---------------------------------------------------------------------------
+
+
+def check_python_environments(suite: Suite) -> None:
+    pin = (ROOT / "images/build/uv/requirements.txt").read_text(encoding="utf-8")
+    hashed = re.compile(r"^uv==\S+ \\\n(?:    --hash=sha256:[0-9a-f]{64} \\\n)*    --hash=sha256:[0-9a-f]{64}$", re.M)
+    suite.check(
+        "uv is pinned with its files' hashes, alone in its file",
+        len(hashed.findall(pin)) == 1 and {found.name for found in pins.requirements(pin)} == {"uv"},
+        pin,
+    )
+
+    for directory in ("images/admin", "images/build"):
+        project = tomllib.loads((ROOT / directory / "pyproject.toml").read_text(encoding="utf-8"))["tool"]["uv"]
+        locked = tomllib.loads((ROOT / directory / "uv.lock").read_text(encoding="utf-8"))
+
+        # Every package but the environment itself, from PyPI, each with
+        # wheels and a hash for every one.
+        packages = [package for package in locked["package"] if "virtual" not in package["source"]]
+        unhashed = [
+            package["name"]
+            for package in packages
+            if package["source"].get("registry") != pins.PYPI
+            or not package.get("wheels")
+            or not all(wheel.get("hash", "").startswith("sha256:") for wheel in package["wheels"])
+        ]
+        suite.check(
+            f"{directory}: an environment of packages a week old, each from PyPI with its wheels' hashes",
+            project.get("package") is False
+            and project.get("exclude-newer") == "1 week"
+            and locked["options"].get("exclude-newer-span") == "P1W"
+            and len(packages) == len(locked["package"]) - 1
+            and not unhashed,
+            f"not from PyPI with hashed wheels: {unhashed}",
+        )
+
+        checked = harness.run(["uv", "lock", "--check", "--offline", "--project", str(ROOT / directory)], cwd=ROOT)
+        suite.check(f"{directory}: uv.lock is what pyproject.toml asks for", checked.ok, checked.text)
+
+    for dockerfile, project in (
+        ("images/admin/Dockerfile", "/tmp/admin-python"),
+        ("images/build/Dockerfile", "/tmp/build-python"),
+    ):
+        text = (ROOT / dockerfile).read_text(encoding="utf-8")
+        code = "\n".join(line for line in text.splitlines() if not line.lstrip().startswith("#"))
+        archive_python = set(re.findall(r"\bpython3-[a-z0-9.+-]+", code)) - {"python3-venv"}
+        suite.check(
+            f"{dockerfile} installs uv by hash, then its lock with uv: wheels only, on the archive's Python, "
+            "beside none of the archive's Python libraries",
+            "--require-hashes" in code
+            and "-r /tmp/uv-requirements.txt" in code
+            and f"--project {project}" in code
+            and "--locked" in code
+            and "--no-build" in code
+            and "--python /usr/bin/python3" in code
+            and "UV_PYTHON_DOWNLOADS=never" in code
+            and not archive_python,
+            f"from the archive: {sorted(archive_python)}",
+        )
+
+    release = (ROOT / ".github/workflows/release.yml").read_text(encoding="utf-8")
+    suite.check(
+        "the release's macOS and Windows builds install uv by hash, then the build image's lock, wheels only",
+        release.count("--require-hashes --only-binary :all: -r images/build/uv/requirements.txt") == 2
+        and release.count("--project images/build") == 2
+        and release.count("--no-build") == 2
+        and "pip install -r" not in release,
+    )
+
+    updates = yaml.safe_load((ROOT / ".github/dependabot.yml").read_text(encoding="utf-8"))["updates"]
+    directories = {
+        update["package-ecosystem"]: set(update.get("directories") or [update.get("directory")]) for update in updates
+    }
+    cooldowns = {update["package-ecosystem"]: update["cooldown"]["default-days"] for update in updates}
+    suite.check(
+        "Dependabot moves uv's pin and both locks, a week after a release",
+        "/images/build/uv" in directories["pip"]
+        and directories["uv"] == {"/images/admin", "/images/build"}
+        and cooldowns["pip"] == cooldowns["uv"] == 7,
+        str(directories),
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -543,6 +662,9 @@ def run_checks(suite: Suite) -> None:
 
     suite.section("how old a pin is")
     check_ages(suite)
+
+    suite.section("the Python environments")
+    check_python_environments(suite)
 
     suite.section("the build image's vendor binaries")
     check_vendor(suite)

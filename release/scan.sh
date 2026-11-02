@@ -57,15 +57,17 @@ scan() {
   fi
 }
 
-# The lock files: the app's crates, and the Python packages the command and
-# the build use.
+# The lock files: the app's crates, and the Python packages the command, the
+# admin and the build use.
 scan scan source \
   --offline \
   --format json \
   --output-file /reports/source.json \
   --lockfile /repo/app/src-tauri/Cargo.lock \
   --lockfile /repo/cli/requirements.txt \
-  --lockfile /repo/images/build/requirements.txt
+  --lockfile /repo/images/admin/uv.lock \
+  --lockfile /repo/images/build/uv.lock \
+  --lockfile /repo/images/build/uv/requirements.txt
 
 # Each image: its packages, and the Go binaries in it.
 for archive in "$images"/*.tar; do

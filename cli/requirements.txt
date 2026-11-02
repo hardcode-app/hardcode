@@ -1,5 +1,5 @@
-# PyPI packages for the CLI outside the build image: CI's tests on macOS,
-# Windows and Python 3.9, and the macOS and Windows binaries. PyYAML is the
-# optional YAML library (pyproject.toml's "yaml" extra); the build image has
-# it from the Ubuntu archive (python3-yaml).
+# PyPI packages for the CLI's unit tests in CI outside the build image, on
+# macOS, Windows and Python 3.9. PyYAML is the optional YAML library
+# (pyproject.toml's "yaml" extra); the build image and the release's builds
+# have it from images/build/uv.lock.
 pyyaml==6.0.3

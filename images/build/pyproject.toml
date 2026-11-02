@@ -1,0 +1,25 @@
+# The build image's Python packages (images/build/Dockerfile), which the
+# release's macOS and Windows builds install too: PyInstaller for the
+# standalone hardcode binary, ruff and isort for the formatting, PyYAML for the
+# command and the suites, Flask and qrcode for the admin's tests, and
+# setuptools to build the command's wheel. uv.lock beside this locks them, and
+# all they pull in, by hash, for Linux, macOS and Windows; uv installs them
+# from it onto the archive's Python, beside none of the archive's Python
+# libraries.
+#
+# After changing the list, lock again in the build image:
+#   images/build/run.sh uv lock --project images/build
+# Dependabot moves the lock after that.
+
+[project]
+name = "hardcode-build-image"
+version = "0"
+requires-python = ">=3.14"
+dependencies = ["pyinstaller", "ruff", "isort", "pyyaml", "flask", "qrcode", "setuptools"]
+
+[tool.uv]
+# An environment, not a package to build.
+package = false
+# Only what was published a week ago or earlier, as the age gate
+# (maintenance/pins.py ages) and Dependabot's cooldown have it.
+exclude-newer = "1 week"

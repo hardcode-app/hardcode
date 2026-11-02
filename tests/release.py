@@ -416,10 +416,10 @@ def check_notes_and_checksums(suite: Suite) -> None:
         )
 
 
-def report(*packages: tuple) -> dict:
+def report(*packages: tuple, path: str = "/repo/app/src-tauri/Cargo.lock") -> dict:
     """
     A scanner report (OSV-Scanner's JSON) with a finding per (package,
-    version, id, CVSS score, fixed version or None).
+    version, id, CVSS score, fixed version or None), all found in *path*.
     """
     listed = []
     for name, version, key, score, fixed in packages:
@@ -438,7 +438,7 @@ def report(*packages: tuple) -> dict:
             }
         )
 
-    return {"results": [{"source": {"path": "Cargo.lock"}, "packages": listed}]}
+    return {"results": [{"source": {"path": path}, "packages": listed}]}
 
 
 def check_scan(suite: Suite) -> None:
@@ -506,13 +506,21 @@ def check_scan(suite: Suite) -> None:
             "\n".join(" ".join(command) for command in commands),
         )
 
+    # The lock files' report: the app's crates, and a Python package in the
+    # admin's lock.
+    source = report(
+        ("zip", "4.6.1", "RUSTSEC-1", "10.0", "9.0.0"),
+        ("zip", "4.6.1", "RUSTSEC-4", "9.1", "9.0.5"),
+        ("glib", "0.18.5", "RUSTSEC-2", "6.9", "0.20.0"),
+        ("zvariant", "5.15.0", "RUSTSEC-3", "", None),
+    )
+    source["results"] += report(
+        ("werkzeug", "3.1.9", "PYSEC-1", "7.5", "3.1.10"),
+        path="/repo/images/admin/uv.lock",
+    )["results"]
+
     reports = {
-        "source": report(
-            ("zip", "4.6.1", "RUSTSEC-1", "10.0", "9.0.0"),
-            ("zip", "4.6.1", "RUSTSEC-4", "9.1", "9.0.5"),
-            ("glib", "0.18.5", "RUSTSEC-2", "6.9", "0.20.0"),
-            ("zvariant", "5.15.0", "RUSTSEC-3", "", None),
-        ),
+        "source": source,
         "squid": report(("openssl", "3.5.0", "UBUNTU-1", "7.5", "3.5.1")),
         "docker": report(
             # The same module in two binaries: one issue.
@@ -528,7 +536,8 @@ def check_scan(suite: Suite) -> None:
     text, details = scan.summary(reports, "OSV-Scanner 9.9.9", datetime(2026, 11, 1, tzinfo=timezone.utc))
     suite.check(
         "the description's section counts each issue once, by severity, for each thing scanned",
-        "| The app's crates, and the Python packages the command and the build use | 2 | 0 | 1 | 0 | 1 | 0 |" in text
+        "| The app's crates, and the Python packages the command, the admin and the build use | 2 | 1 | 1 | 0 | 1 | 0 |"
+        in text
         and "| The proxy and allowlist renderer (hardcode-squid) | 0 | 1 | 0 | 0 | 0 | 0 |" in text
         and "OSV-Scanner 9.9.9 against OSV's databases of 2026-11-01" in text,
         text,
@@ -540,12 +549,14 @@ def check_scan(suite: Suite) -> None:
     )
     fixed = [line for line in text.splitlines() if line.startswith("- ")]
     suite.check(
-        "...and the critical and high a newer version fixes, a line for each package, the most severe first",
+        "...and the critical and high a newer version fixes, a line for each package, the most severe first, "
+        "each named for its image or its lock",
         fixed
         == [
             "- zip 4.6.1 → 9.0.5, in the app's crates: 2 critical",
             "- github.com/moby/go-archive 0.2.0 → 0.3.0, in the Docker sidecar: 1 high",
             "- openssl 3.5.0 → 3.5.1, in the proxy: 1 high",
+            "- werkzeug 3.1.9 → 3.1.10, in the admin's Python packages: 1 high",
         ]
         and [entry["scanned"] for entry in details] == ["source", "squid", "docker"]
         and len(details[2]["findings"]) == 4,

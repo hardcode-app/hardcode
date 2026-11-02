@@ -69,13 +69,20 @@ cli() {
 }
 
 # wheel [directory]: the CLI's Python package, in dist/ unless another
-# directory is named. setup.py stages the stack into it; the archive's
-# setuptools builds it, so nothing is fetched. setuptools works in the
-# source folder, and what it leaves there goes afterwards.
+# directory is named. setup.py stages the stack into it; uv builds it with
+# the setuptools the build image's lock installed, so nothing is fetched.
+# setuptools works in the source folder, and what it leaves there goes
+# afterwards.
 wheel() {
   local directory="${1:-$ROOT/dist}"
 
-  pip wheel --quiet --no-deps --no-build-isolation --wheel-dir "$directory" "$ROOT/cli"
+  uv build \
+    --quiet \
+    --wheel \
+    --no-build-isolation \
+    --python "$(command -v python3)" \
+    --out-dir "$directory" \
+    "$ROOT/cli"
   rm -rf "$ROOT/cli/build" "$ROOT/cli/hardcode_cli.egg-info"
   ls -la "$directory"/hardcode_cli-*.whl
 }

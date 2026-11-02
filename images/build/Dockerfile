@@ -3,7 +3,9 @@
 # images/build/run.sh runs a command in here with the checkout mounted, and
 # the Docker socket for the suites that drive Docker (tests/*.py and
 # app/build.sh run themselves in it). Archive packages first; the vendor pins
-# below are what the archive doesn't carry, each with its reason.
+# below are what the archive doesn't carry, each with its reason. Python
+# libraries are the exception: uv installs them all from PyPI, as uv.lock
+# locks them by hash, and none come from the archive, so the two never mix.
 #
 #   images/build/run.sh tests/run_all.py      every suite
 #   images/build/run.sh app/build.sh bundle   the app's installers
@@ -16,11 +18,10 @@ ENV DEBIAN_FRONTEND=noninteractive LANG=C.UTF-8
 
 RUN apt-get update \
  && apt-get install -y --no-install-recommends \
-      # the suites' tools: Python with what the CLI, the admin and the chart tests import
+      # the suites' tools; Python, venv (and its pip) to install uv, and the
+      # shared library PyInstaller bundles; the libraries are in uv.lock
       ca-certificates curl git file jq openssl openssh-client xvfb \
-      python3 python3-venv python3-yaml python3-flask python3-qrcode isort libpython3.14 \
-      # the CLI's Python package (app/build.sh wheel)
-      python3-setuptools \
+      python3 python3-venv libpython3.14 \
       # the app: Rust (and rustfmt) and Tauri's libraries; patchelf and squashfs for the AppImage
       rustc cargo rustfmt build-essential pkg-config libssl-dev patchelf squashfs-tools \
       libwebkit2gtk-4.1-dev libgtk-3-dev librsvg2-dev libayatana-appindicator3-dev \
@@ -34,7 +35,7 @@ RUN apt-get update \
 # of it. Published checksums, both architectures. These ARG pins (and the
 # Tauri CLI's and OSV-Scanner's) move with maintenance/pins.py vendor, each
 # version with its publisher's checksums, a week after its release;
-# Dependabot moves the base image and requirements.txt.
+# Dependabot moves the base image, uv and uv.lock.
 ARG KIND_VERSION=0.33.0
 ARG KIND_SHA256_AMD64=aee6151561422756b764a4ae28e7f44cda5af5a9eead3cc9985112b1de8d8e0d
 ARG KIND_SHA256_ARM64=20022bee6cfcd5086cb7234d218e3454e6090022f2a8f55d1fa7fcf42c3867a2
@@ -95,15 +96,34 @@ RUN set -eu; \
       rm -rf /tmp/cargo; \
     fi
 
-# From PyPI (requirements.txt, pinned): PyInstaller for the standalone
-# hardcode binary and ruff for formatting; the archive has neither. The venv
-# sees the archive's packages, so the binary bundles the archive's PyYAML,
-# and the venv's pip builds the CLI's wheel with the archive's setuptools.
-COPY requirements.txt /tmp/requirements.txt
-RUN python3 -m venv --system-site-packages /opt/venv \
- && /opt/venv/bin/pip install --no-cache-dir -r /tmp/requirements.txt \
- && ln -s /opt/venv/bin/pyinstaller /opt/venv/bin/ruff /opt/venv/bin/pip /usr/local/bin/ \
- && rm /tmp/requirements.txt
+# uv, from PyPI as uv/requirements.txt pins it, every file checked against its
+# hash: the archive's pip installs it into a venv of its own, /opt/uv; the
+# archive has no uv. It stays, to lock the Python packages again.
+COPY uv/requirements.txt /tmp/uv-requirements.txt
+RUN python3 -m venv /opt/uv \
+ && /opt/uv/bin/pip install \
+      --no-cache-dir \
+      --require-hashes \
+      --only-binary :all: \
+      -r /tmp/uv-requirements.txt \
+ && ln -s /opt/uv/bin/uv /usr/local/bin/uv \
+ && rm /tmp/uv-requirements.txt
+
+# The Python libraries, as uv.lock locks them, into /opt/venv: uv checks every
+# file against its hash, refuses a lock that doesn't match pyproject.toml,
+# takes wheels only (so no package's build script runs), and uses the
+# archive's Python, never downloading one (UV_PYTHON_DOWNLOADS). First on
+# PATH, so python3, pyinstaller, ruff and isort are the venv's everywhere.
+ENV UV_PYTHON_DOWNLOADS=never
+COPY pyproject.toml uv.lock /tmp/build-python/
+RUN UV_PROJECT_ENVIRONMENT=/opt/venv uv sync \
+      --project /tmp/build-python \
+      --locked \
+      --no-build \
+      --no-cache \
+      --python /usr/bin/python3 \
+ && rm -r /tmp/build-python
+ENV PATH="/opt/venv/bin:$PATH"
 
 COPY entrypoint.sh /usr/local/bin/build-entrypoint
 # HARDCODE_BUILD_IMAGE tells the scripts they're inside. Caches live in

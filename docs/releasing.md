@@ -44,9 +44,10 @@ heading ([`.github/release.yml`](../.github/release.yml)).
 
 The Linux builds, the chart and the release's assembly run in the build
 image, as everything does. The macOS and Windows builds can only run on
-those platforms; they install the same pinned PyInstaller
-(`images/build/requirements.txt`), PyYAML (`cli/requirements.txt`) and
-Tauri CLI (the build image's version) as the build image has. macOS builds
+those platforms; they install the build image's Python packages, PyInstaller
+among them, from its `uv.lock` (with uv, pinned by hash as the build image
+has it, `images/build/uv/requirements.txt`), every file checked against its
+hash, and the build image's version of the Tauri CLI. macOS builds
 are unsigned unless the `APPLE_CERTIFICATE`, `APPLE_CERTIFICATE_PASSWORD`
 and `APPLE_SIGNING_IDENTITY` secrets hold a certificate.
 

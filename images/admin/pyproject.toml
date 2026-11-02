@@ -1,0 +1,24 @@
+# The admin image's Python packages (images/admin/Dockerfile): Flask for the
+# UI, gunicorn to serve it, and qrcode for the enrolment page's QR code, drawn
+# as SVG, which needs no Pillow. uv.lock beside this locks them, and all they
+# pull in, by hash; uv installs them from it onto the archive's Python, beside
+# none of the archive's Python libraries.
+#
+# After changing the list, lock again in the build image:
+#   images/build/run.sh uv lock --project images/admin
+# Dependabot moves the lock after that.
+
+[project]
+name = "hardcode-admin-image"
+version = "0"
+requires-python = ">=3.14"
+dependencies = ["flask", "gunicorn", "qrcode"]
+
+[tool.uv]
+# An environment, not a package to build.
+package = false
+# Only what was published a week ago or earlier, as the age gate
+# (maintenance/pins.py ages) and Dependabot's cooldown have it.
+exclude-newer = "1 week"
+# The image is Linux only.
+environments = ["sys_platform == 'linux'"]

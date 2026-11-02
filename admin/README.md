@@ -3,8 +3,9 @@
 The Kubernetes operator and admin web UI: one Python process (Flask behind
 gunicorn, the operator in a thread), sharing the allowlist, blocked-traffic
 and language code with the `hardcode` command (`hardcode_cli`). Packaged by
-[images/admin/Dockerfile](../images/admin/Dockerfile) from the Ubuntu 26.04
-archive's `python3-flask`, `gunicorn` and `python3-qrcode`; deployed by the
+[images/admin/Dockerfile](../images/admin/Dockerfile): Python from the Ubuntu
+26.04 archive, and Flask, gunicorn and qrcode from PyPI as
+[images/admin/uv.lock](../images/admin/uv.lock) locks them; deployed by the
 [Helm chart](../helm/README.md).
 
 ```

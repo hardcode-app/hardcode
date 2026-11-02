@@ -8,8 +8,9 @@ template/                   what a new profile starts from: .env (every setting,
 images/vscode/              the VS Code image: Dockerfile, entrypoint.sh, sync-extensions.sh, verify-extensions.sh, ssh_config
 images/squid/               the proxy image: squid.conf, entrypoint, make-ca.sh (pki), allowlist-render.sh
 images/gateway/             publishes ports from the internal network to the host (socat)
-images/admin/               the Kubernetes operator + admin UI image
-images/build/               the build image: the Ubuntu 26.04 environment everything is built and tested in (run.sh runs a command there)
+images/admin/               the Kubernetes operator + admin UI image; pyproject.toml and uv.lock, its Python packages
+images/build/               the build image: the Ubuntu 26.04 environment everything is built and tested in (run.sh runs a command there);
+                            pyproject.toml and uv.lock, its Python packages; uv/requirements.txt, uv itself
 cli/hardcode                the command, runnable from the checkout (with the checkout's stack)
 cli/hardcode_cli/           the Python package; cli/tests/ its unit tests; cli/pyproject.toml, and cli/setup.py, which puts the stack into the package
 app/src/                    the desktop app's page; app/src-tauri/ the Rust shell
@@ -52,7 +53,7 @@ AGENTS.md                   ground rules for anyone changing the code
   `systemd-run --user --scope -p MemoryMax=` for host processes.
 - **Everything builds and tests in Ubuntu 26.04 containers.** The build
   image (`images/build`) is the environment: the archive's toolchains plus
-  a few pinned binaries. `tests/*.py` and `app/build.sh` re-run themselves
+  a few pinned binaries, and Python packages locked by uv. `tests/*.py` and `app/build.sh` re-run themselves
   in it through `images/build/run.sh`; nothing is installed on
   workstations or CI runners, so every build is the same build. What's
   missing goes into the Dockerfile, pinned, not onto the machine.
@@ -148,6 +149,7 @@ app/build.sh desktop                                           # a launcher for 
 app/build.sh cli                                               # the standalone hardcode binary -> dist/
 app/build.sh wheel                                             # the CLI's Python package, with its stack -> dist/
 images/build/run.sh                                            # a shell in the build image, checkout and caches mounted
+images/build/run.sh uv lock --project images/admin             # lock an image's Python packages again, after changing its pyproject.toml
 cd admin && K8S_API=http://127.0.0.1:8001 K8S_NAMESPACE=sandbox ADMIN_EMAIL=… ADMIN_PASSWORD=… python3 -m hardcode_admin   # the admin, via kubectl proxy
 docker build -f images/admin/Dockerfile -t hardcode-admin .    # the admin image (context: the repository root)
 hardcode build squid && hardcode up squid                      # after editing squid.conf
@@ -161,14 +163,14 @@ writes on a Linux desktop (it starts the release build), or install the
 ## Dependencies
 
 Nobody pins by hand. Everything that builds HardCode is pinned exactly (a
-crate's version in `Cargo.lock`, a Python package's `==`, an action's
-commit, an image's tag, a vendor binary's version and checksums), and
+crate's version in `Cargo.lock`, a Python package's in a `uv.lock`, an
+action's commit, an image's tag, a vendor binary's version and checksums), and
 something moves each pin, at a pace that leaves time for a compromised
 release to be found first:
 
 | What | Moved by |
 |---|---|
-| The app's crates, the Python pins (`cli/requirements.txt`, the build image's), the actions | Dependabot, weekly, one grouped pull request per ecosystem |
+| The app's crates, the images' Python packages (their `uv.lock`), uv itself (`images/build/uv`), `cli/requirements.txt`, the actions | Dependabot, weekly, one grouped pull request per ecosystem |
 | The images: CoreDNS and the Docker sidecar (`compose.yaml` and the chart's `docker.image`, `coredns.image`), the Dockerfiles' base | Dependabot, weekly, one pull request for all of them |
 | The build image's vendor binaries: kind, kubectl, helm, OSV-Scanner, the Tauri CLI | `maintenance/pins.py vendor`, weekly ([`dependencies.yml`](../.github/workflows/dependencies.yml)), as the `pins/vendor-binaries` pull request, with each publisher's checksums |
 
@@ -176,10 +178,29 @@ release to be found first:
 days old (its `cooldown`; security updates aren't held back), and so does
 the vendor binaries' workflow. CI's *Pin ages* job then looks up every pin a
 pull request changes where it was published (crates.io, PyPI, Docker Hub,
-GitHub's releases), the crates a lock file update pulls in included, and
+GitHub's releases), the crates and Python packages a lock file update
+pulls in included, and
 fails if one is younger than a week or can't be dated
 (`maintenance/pins.py ages`). The actions aren't aged there: Dependabot's
 cooldown holds them, and a person merges them.
+
+**Python packages through uv, by hash.** The admin image and the build
+image take their Python libraries from PyPI, never from the archive's
+`python3-*` packages, so the two never mix. Each image's `pyproject.toml`
+lists what it needs, and `uv.lock` beside it locks that and everything it
+pulls in, with every file's hash: the build image's for Linux, macOS and
+Windows, since the release's macOS and Windows builds install it too. The
+archive's pip installs uv itself, pinned by hash in
+`images/build/uv/requirements.txt`; uv then installs a lock with
+`uv sync --locked --no-build`: every file checked against its hash, wheels
+only, so no package's build script runs, onto the archive's Python (it
+never downloads one). In the admin image, neither uv nor pip is left. A
+project's `exclude-newer = "1 week"` keeps everything it locks, the
+packages pulled in included, a week old, as Dependabot's cooldown does.
+After changing a `pyproject.toml`, lock again in the build image:
+`images/build/run.sh uv lock --project images/admin` (or
+`images/build`); `uv lock --upgrade` moves everything to its newest
+week-old version.
 
 **Merged without anyone, when nothing needs anyone.** After every CI run,
 and daily, `maintenance/merge.py` merges, by rebase, each dependency update

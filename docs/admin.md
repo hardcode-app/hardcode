@@ -363,5 +363,6 @@ admin/hardcode_admin/totp.py       TOTP and otpauth URLs
 admin/hardcode_admin/wsgi.py       builds everything from the environment; `app` for gunicorn
 admin/hardcode_admin/web/          index.html, app.js, admin.css (base.css and the icon are copied from app/ into the image)
 admin/tests/                       unit and API tests against an in-memory Kubernetes API
-images/admin/Dockerfile            the image: python3-flask, gunicorn, python3-qrcode, openssl from the Ubuntu archive
+images/admin/Dockerfile            the image: Python and openssl from the Ubuntu archive; Flask, gunicorn and qrcode as uv.lock locks them
+images/admin/pyproject.toml        the image's Python packages, and uv.lock, which locks them by hash
 ```

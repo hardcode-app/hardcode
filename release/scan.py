@@ -54,12 +54,21 @@ OWN_IMAGES = ["squid", "gateway", "admin"]
 # What each report is about, by its name (the report is NAME.json): in the
 # table, and in the list of fixes.
 LABELS = {
-    "source": ("The app's crates, and the Python packages the command and the build use", "the app's crates"),
+    "source": ("The app's crates, and the Python packages the command, the admin and the build use", "the lock files"),
     "squid": ("The proxy and allowlist renderer (hardcode-squid)", "the proxy"),
     "gateway": ("The gateway (hardcode-gateway)", "the gateway"),
     "admin": ("The operator and admin (hardcode-admin)", "the admin"),
     "coredns": ("CoreDNS", "CoreDNS"),
     "docker": ("The Docker sidecar", "the Docker sidecar"),
+}
+
+# In the lock files' report, what each lock is, for the list of fixes.
+LOCKS = {
+    "app/src-tauri/Cargo.lock": "the app's crates",
+    "cli/requirements.txt": "the command's Python packages",
+    "images/admin/uv.lock": "the admin's Python packages",
+    "images/build/uv.lock": "the build's Python packages",
+    "images/build/uv/requirements.txt": "the build's uv",
 }
 
 # CVSS scores, by the word for them.
@@ -214,13 +223,15 @@ def findings(report: dict) -> list[dict]:
     Every issue in a scanner report, once (a group of aliases is one issue,
     and a package found twice, in two binaries, is one): the package, its
     version, the issue's ids, its severity, a summary, the versions that fix
-    it, the smallest of those above the installed one, and whether it is
+    it, the smallest of those above the installed one, whether it is
     counted (not when the version is unknown, nor when every fix is older
-    than the installed version).
+    than the installed version), and the path it was found in.
     """
     found = {}
 
     for result in report.get("results") or []:
+        path = (result.get("source") or {}).get("path", "")
+
         for package in result.get("packages") or []:
             name = package["package"]["name"]
             version = package["package"].get("version", "")
@@ -254,9 +265,23 @@ def findings(report: dict) -> list[dict]:
                     "fixed": fixed,
                     "fix": newer[0] if newer else "",
                     "counted": not version_unknown(version) and not (fixed and not newer),
+                    "path": path,
                 }
 
     return list(found.values())
+
+
+def where_found(name: str, path: str) -> str:
+    """
+    What a finding of the report *name* is in, for the list of fixes: the
+    image, or in the lock files' report, the lock at *path*.
+    """
+    if name == "source":
+        for lock, label in LOCKS.items():
+            if path == lock or path.endswith("/" + lock):
+                return label
+
+    return LABELS.get(name, (name, name))[1]
 
 
 def summary(reports: dict[str, dict], scanner: str, now: Optional[datetime] = None) -> tuple[str, list]:
@@ -298,7 +323,10 @@ def summary(reports: dict[str, dict], scanner: str, now: Optional[datetime] = No
             if not item["counted"] or not item["fix"] or item["severity"] not in ("critical", "high"):
                 continue
 
-            entry = fixes.setdefault((item["package"], item["version"], name), {"critical": 0, "high": 0, "fix": ""})
+            entry = fixes.setdefault(
+                (item["package"], item["version"], name),
+                {"critical": 0, "high": 0, "fix": "", "where": where_found(name, item["path"])},
+            )
             entry[item["severity"]] += 1
             entry["fix"] = max(entry["fix"], item["fix"], key=_numbers)
 
@@ -307,8 +335,7 @@ def summary(reports: dict[str, dict], scanner: str, now: Optional[datetime] = No
         ordered = sorted(fixes.items(), key=lambda pair: (-pair[1]["critical"], -pair[1]["high"], pair[0]))
         for (package, version, name), entry in ordered:
             severities = ", ".join(f"{entry[word]} {word}" for word in ("critical", "high") if entry[word])
-            where = LABELS.get(name, (name, name))[1]
-            lines.append(f"- {package} {version} → {entry['fix']}, in {where}: {severities}")
+            lines.append(f"- {package} {version} → {entry['fix']}, in {entry['where']}: {severities}")
 
     return "\n".join(lines) + "\n", [{"scanned": name, "findings": items} for name, items in every.items()]
 

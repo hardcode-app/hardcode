@@ -9,8 +9,8 @@ description = "HardCode on Kubernetes: the operator and the admin UI"
 readme = "README.md"
 requires-python = ">=3.9"
 license = { text = "AGPL-3.0-only" }
-# All three are in the Ubuntu archive (python3-flask, gunicorn, python3-qrcode);
-# qrcode is optional (the enrolment page shows the secret as text without it).
+# The image installs all three as images/admin/uv.lock locks them; qrcode is
+# optional (the enrolment page shows the secret as text without it).
 dependencies = ["Flask>=3", "hardcode-cli"]
 
 [project.optional-dependencies]

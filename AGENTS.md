@@ -92,8 +92,15 @@ A change is complete when all of these are true:
 
 - Ubuntu 26.04 archive packages first; vendor sources only where the
   archive has nothing usable, with the reason next to the line.
-- The CLI stays standard-library Python 3.9+; the admin stays Flask plus
-  what the archive ships; the app's page stays plain JS; Rust stays the thin
+- Python libraries are the exception: HardCode's images take them from
+  PyPI through uv, as each image's `uv.lock` locks them by hash, and never
+  the archive's `python3-*` packages, so the two never mix in one
+  environment. The archive's Python itself is fine; uv comes from PyPI,
+  pinned by hash (`images/build/uv/requirements.txt`). After changing an
+  image's `pyproject.toml`, lock it again in the build image
+  (`images/build/run.sh uv lock --project images/admin`).
+- The CLI stays standard-library Python 3.9+; the admin stays Flask,
+  gunicorn and qrcode; the app's page stays plain JS; Rust stays the thin
   shell it is. A new runtime dependency anywhere is a discussion, not a
   commit.
 - Pin what you add (image tags, chart versions, actions) where something
@@ -110,7 +117,8 @@ A change is complete when all of these are true:
   get a build or a test out, and don't run a suite on the host "just this
   once"; add what's missing to the Dockerfile, pinned, with the reason.
   The archive's package first; a vendor binary only when the archive has
-  nothing, checksum-pinned. The one exception is the dependency workflow's
+  nothing, checksum-pinned; a Python library to the image's
+  `pyproject.toml`, locked again. The one exception is the dependency workflow's
   two jobs (`dependencies.yml`): they hold a write token, so they run
   nothing but `maintenance/`'s standard-library scripts, on the runner's
   own Python, without the build image or its cache.

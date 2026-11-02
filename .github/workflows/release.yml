@@ -212,10 +212,27 @@ jobs:
         if: env.VERSION == ''
         shell: bash
         run: python release/release.py dev "$COMMIT"
+      # uv, by hash, as the build image has it; then the build image's Python
+      # packages, as images/build/uv.lock locks them for this platform, by
+      # hash, wheels only, onto this Python: a venv first on PATH.
+      - name: Python packages, locked
+        shell: bash
+        run: |
+          pip install --require-hashes --only-binary :all: -r images/build/uv/requirements.txt
+          venv="$RUNNER_TEMP/venv"
+          UV_PROJECT_ENVIRONMENT="$venv" UV_PYTHON_DOWNLOADS=never uv sync \
+            --project images/build \
+            --locked \
+            --no-build \
+            --python 3.14
+          if [ "$RUNNER_OS" = Windows ]; then
+            echo "$venv/Scripts" >> "$GITHUB_PATH"
+          else
+            echo "$venv/bin" >> "$GITHUB_PATH"
+          fi
       - name: The CLI as a sidecar
         shell: bash
         run: |
-          pip install -r cli/requirements.txt -r images/build/requirements.txt
           PYTHONPATH=cli python -m hardcode_cli.stack cli/hardcode_cli/stack
           pyinstaller --onefile --name hardcode --paths cli cli/hardcode --add-data "cli/hardcode_cli/stack:hardcode_cli/stack"
           mkdir -p app/src-tauri/binaries
@@ -320,7 +337,23 @@ jobs:
         if: env.VERSION != ''
         shell: bash
         run: python release/release.py stamp "$VERSION"
-      - run: pip install -r cli/requirements.txt -r images/build/requirements.txt
+      # As the app's job does: uv by hash, then the build image's locked
+      # Python packages in a venv first on PATH.
+      - name: Python packages, locked
+        shell: bash
+        run: |
+          pip install --require-hashes --only-binary :all: -r images/build/uv/requirements.txt
+          venv="$RUNNER_TEMP/venv"
+          UV_PROJECT_ENVIRONMENT="$venv" UV_PYTHON_DOWNLOADS=never uv sync \
+            --project images/build \
+            --locked \
+            --no-build \
+            --python 3.14
+          if [ "$RUNNER_OS" = Windows ]; then
+            echo "$venv/Scripts" >> "$GITHUB_PATH"
+          else
+            echo "$venv/bin" >> "$GITHUB_PATH"
+          fi
       - run: python -m unittest discover -s cli -t cli
       - name: A development build's mark
         if: env.VERSION == ''
