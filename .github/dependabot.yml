@@ -37,12 +37,15 @@ updates:
       python: { patterns: ["*"] }
   # The images' Python packages, as their uv.lock files lock them; the
   # cooldown is the projects' exclude-newer, a week, so that uv can lock what
-  # is proposed.
+  # is proposed. uv's own pin, under /images/build, is the pip entry's: left
+  # out here, or each uv release would bring two pull requests.
   - package-ecosystem: uv
     directories: ["/images/admin", "/images/build"]
     commit-message: { prefix: build, include: scope }
     schedule: { interval: weekly }
     cooldown: { default-days: 7 }
+    ignore:
+      - dependency-name: uv
     groups:
       python-images: { patterns: ["*"] }
   # Local composite actions aren't followed from the workflows that use them:

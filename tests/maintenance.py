@@ -316,12 +316,21 @@ def check_python_environments(suite: Suite) -> None:
         update["package-ecosystem"]: set(update.get("directories") or [update.get("directory")]) for update in updates
     }
     cooldowns = {update["package-ecosystem"]: update["cooldown"]["default-days"] for update in updates}
+    ignored = {
+        update["package-ecosystem"]: {rule["dependency-name"] for rule in update.get("ignore") or []}
+        for update in updates
+    }
     suite.check(
         "Dependabot moves uv's pin and both locks, a week after a release",
         "/images/build/uv" in directories["pip"]
         and directories["uv"] == {"/images/admin", "/images/build"}
         and cooldowns["pip"] == cooldowns["uv"] == 7,
         str(directories),
+    )
+    suite.check(
+        "...uv's pin by the pip entry alone: the uv entry, whose /images/build holds it too, leaves it out",
+        "uv" in ignored["uv"] and "uv" not in ignored["pip"],
+        str(ignored),
     )
 
 
