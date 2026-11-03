@@ -164,15 +164,12 @@ host**, and read-only to `rw`. Nothing is allowed until you add it.
 - When the sandbox needs a credential, make one just for it: a token
   scoped to one repository or one project, short-lived if the service
   allows, revoked when you're done.
-- For GitHub, [GitHub from the sandbox](github.md) is the narrowest
-  way: one repository, over HTTPS, with a token for that repository.
-- For SSH, the sandbox makes its own key the first time it starts,
-  `~/.ssh/id_ed25519`; `cat ~/.ssh/id_ed25519.pub` shows its public half.
-  Add it as a deploy key to the repositories the sandbox works on rather
-  than to your account, since anything running in the sandbox can use it,
-  and delete it there when you're done. SSH also needs an `ssh` entry,
-  which opens the whole host: HTTPS with a path entry and a scoped token
-  is the narrower way.
+- For GitHub, follow [GitHub from the sandbox](github.md). The sandbox
+  gets one repository, with a token for that repository only.
+- For other git servers over SSH, the sandbox has an SSH key of its own,
+  made the first time it starts. `cat ~/.ssh/id_ed25519.pub` shows it. Add
+  it only to the repositories the sandbox works on, not to your account,
+  because anything in the sandbox can use it. Remove it when you're done.
 - Use one profile per level of trust: a client's code in its own profile
   with its own allowlist, an experiment with a tool you don't trust in
   another. Profiles don't share containers, networks, storage or

@@ -101,9 +101,10 @@ Before you allow anything, read
 
 ### `git push` is refused
 
-Pushing is an upload: the repository needs an `rw` entry, such as
-`hardcode allow github.com/your-name/app rw`, and the sandbox needs
-credentials for it.
+Pushing needs read-write access to the repository, and a way for the
+sandbox to sign in. For a GitHub repository, follow
+[GitHub from the sandbox](github.md): `hardcode allow github:OWNER/REPO rw`
+allows it, and `hardcode-github OWNER/REPO` sets up the sign-in.
 
 ### `certificate verify failed`, or `unable to get local issuer certificate`
 

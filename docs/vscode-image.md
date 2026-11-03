@@ -79,10 +79,9 @@ Software you install for yourself lands in your home folder, and lasts:
 `gem install` (`~/.gem`), `cpanm` (`~/perl5`). Their folders are on the
 `PATH`.
 
-A Go project whose `go.mod` asks for a newer Go than the image's gets it
-too: `go` downloads that toolchain from Go's module proxy, checks it
-against Go's checksum database, and keeps it in `~/go`. Go's
-[allowlist block](allowlist.md#what-hardcode-provides) opens both.
+If a Go project needs a newer version of Go than the one installed, Go
+downloads it the first time you build the project, and keeps it in your
+home folder.
 
 ## VS Code and its extensions
 
@@ -118,10 +117,9 @@ leaves extensions you install or uninstall in VS Code itself alone.)
 
 ## GitHub
 
-`hardcode-github OWNER/REPO` sets the sandbox up to work on one GitHub
-repository, with a token that reaches only that one; `gh` then uses that
-repository's token by itself. [GitHub from the sandbox](github.md) has
-the steps, and why it beats SSH or `gh auth login`.
+To work on a GitHub repository, run `hardcode-github OWNER/REPO` in the
+sandbox's terminal and follow its steps. [GitHub from the sandbox](github.md)
+explains each one.
 
 ## Claude Code
 
@@ -171,32 +169,25 @@ and crash reports stay closed.
 
 ## Android
 
-With **Android**, the image has OpenJDK 21 and `sdkmanager`. The Android
-SDK itself goes into your home folder, `~/Android/Sdk` (`ANDROID_HOME`),
-where it lasts.
+The Android tool installs Java 21 and the Android SDK manager. The SDK
+itself is downloaded into your home folder, so it is kept.
 
-1. **Accept Google's licences**, once: `sdkmanager --licenses` shows them
-   and asks. They are yours to accept, so HardCode doesn't accept them for
-   you.
-2. **Build**: `./gradlew assembleDebug`. Android's Gradle plugin downloads
-   the SDK platforms and build tools the project needs. To install a
-   package yourself: `sdkmanager --install "platform-tools"`. This
-   `sdkmanager` is F-Droid's, from Ubuntu, and checks every package
-   against F-Droid's public log of the SDK's checksums.
+To build an app:
 
-- **JDK 21 is the default `java`**, with Java on as well (its JDK 25 stays
-  in `/usr/lib/jvm`): the Gradle 8 that most Android projects' wrappers
-  name can't run on JDK 25.
-- **Kotlin by JetBrains** gives VS Code Kotlin's completion, errors and
-  navigation. It is an alpha, and its Android support experimental. Its
-  `intellij.dataSharing` setting decides what it would send JetBrains; the
-  allowlist doesn't open JetBrains' hosts.
-- **Running the app is for your computer.** The sandbox has no hardware
-  virtualisation for the emulator, and can't reach USB devices or your
-  network, so neither an emulator nor a phone works from inside it. Keep
-  the project in a [shared folder](#what-is-kept-and-what-isnt), build it
-  here, and install it from your computer:
-  `adb install app/build/outputs/apk/debug/app-debug.apk`.
+1. Accept Google's licences, once: `sdkmanager --licenses`.
+2. Build as usual, for example `./gradlew assembleDebug`. The first build
+   downloads the parts of the SDK your project needs.
+
+VS Code's Kotlin support comes from JetBrains' Kotlin extension. It is
+still in early release, and its Android support is experimental.
+
+If you switch on Java as well, `java` is Java 21, because most Android
+projects need it. Java 25 is still installed.
+
+You can't run the app inside the sandbox: there is no emulator, and a
+phone can't be connected. Keep the project in a
+[shared folder](#what-is-kept-and-what-isnt), build it here, and install
+it from your computer with `adb install`.
 
 ## Using Docker inside the sandbox
 
@@ -244,42 +235,18 @@ row of the app's Overview.
 
 ## Kubernetes
 
-With the **Kubernetes** tool, the image has `kubectl`, `helm` and `kind`,
-each its project's newest release when the image was built, and VS Code
-has Microsoft's Kubernetes extension, for manifests, Helm charts and the
-clusters kubectl knows.
+The Kubernetes tool installs `kubectl`, Helm and kind, and VS Code's
+Kubernetes extension.
 
-- **Manifests and charts** need nothing more: `kubectl kustomize`, `helm
-  template`, `helm lint`, `helm package`, and charts pulled from the
-  container registries every profile has (`helm pull
-  oci://registry-1.docker.io/…`, `ghcr.io`). A chart repository on a site
-  of its own (`helm repo add`) needs an [entry of yours](allowlist.md) for
-  that site.
-- **A cluster of yours** is reached through the proxy, like everything
-  else, so its API server needs an entry of yours too: `hardcode allow
-  k8s.example.com rw` (`rw`, as kubectl makes changes with `POST`, `PUT`,
-  `PATCH` and `DELETE`; read-only is enough for `get`, `describe` and
-  `logs`). The Kubernetes block never opens one. The proxy looks inside
-  HTTPS, which narrows what it can reach: an API server on port 443, with
-  a certificate from a public certificate authority, and a kubeconfig that
-  signs in with a token rather than a client certificate and leaves out
-  the cluster's `certificate-authority-data`, so that kubectl trusts the
-  system's certificates, the proxy's among them. Most managed clusters'
-  API servers have a certificate from the cluster's own authority, which
-  the proxy refuses. `kubectl exec`, `attach`, `cp` and `port-forward`
-  don't work through the proxy: they need connections it doesn't pass.
-- **kind can't start a cluster here.** Its nodes would be containers of
-  the profile's Docker daemon, which runs rootless and without cgroups
-  (`docker info` says `Cgroup Driver: none`), and kind refuses such a
-  daemon.
-- **The extension** uses the image's `kubectl` and `helm`. Its
-  `vs-kubernetes.kubectlVersioning` setting, `user-provided` unless you
-  change it, keeps it that way; `infer` has it download a kubectl to
-  match each cluster into your home folder, from `dl.k8s.io`, which the
-  Kubernetes block opens.
-- **Updating.** kubectl, Helm and kind come with the image: rebuild to
-  update them, and set `KUBECTL_VERSION`, `HELM_VERSION` and
-  `KIND_VERSION` in the profile's `.env` to stay on one release.
+You can write, check and package Kubernetes files and Helm charts. Charts
+from Docker Hub and GitHub's container registry work as they are. A chart
+repository on another site needs an [allowlist entry](allowlist.md) for
+that site.
+
+Connecting to a cluster is limited for now. Most clusters can't be reached
+from the sandbox yet, and kind can't create a cluster in it.
+
+The tools are updated when you rebuild the image.
 
 ## Rebuilding and updating
 
@@ -318,7 +285,7 @@ nothing usable:
 | Gradle (from gradle.org, checksum-checked; `GRADLE_VERSION`) | Ubuntu's 4.4.1 can't run on JDK 25 |
 | kubectl (from dl.k8s.io, checksum-checked; `KUBECTL_VERSION`) | not in Ubuntu |
 | Helm (from get.helm.sh, checksum-checked; `HELM_VERSION`) | not in Ubuntu |
-| kind (its release on GitHub, checked against the checksum published with it; `KIND_VERSION`) | Ubuntu's 0.30.0 makes Kubernetes 1.34 clusters, and kubectl supports clusters at most one minor version from its own |
+| kind (its release on GitHub, checksum-checked; `KIND_VERSION`) | Ubuntu's is too old for the current kubectl |
 | Claude Code CLI (Anthropic's installer, from claude.ai) | not in Ubuntu |
 | Codex CLI (OpenAI's release on GitHub, checked against the checksum GitHub publishes; `CODEX_VERSION`) | not in Ubuntu |
 
@@ -330,12 +297,10 @@ the app compare with the profile's to say when a rebuild is due.
 
 1. Takes ownership of the home folder and `/shared` if they were created
    as root's.
-2. Makes the Android SDK's folder in the home, when the image has Android,
-   and the sandbox's own SSH key, when the home has none: an ed25519 key,
-   `~/.ssh/id_ed25519`, without a passphrase. Its log says so, once; `cat
-   ~/.ssh/id_ed25519.pub` shows the public half to add to a git host
-   ([staying safe](staying-safe.md#keep-secrets-out-of-the-sandbox) says
-   how). A home with a key already keeps it.
+2. Creates the Android SDK's folder when Android is on, and an SSH key
+   for the sandbox, `~/.ssh/id_ed25519`, if it has none yet
+   ([Staying safe](staying-safe.md#keep-secrets-out-of-the-sandbox) says
+   what to do with it).
 3. Adds the proxy's certificate to the system's trusted certificates
    (which also refreshes Java's). For tools that keep their own, the
    container's environment points `SSL_CERT_FILE`, `REQUESTS_CA_BUNDLE`,

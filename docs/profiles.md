@@ -246,7 +246,7 @@ Every setting a profile's `.env` can hold, with its default:
 | `VSCODE_VERSION` | `latest` | The VS Code package the image starts from (`latest`, or a release such as `1.140.0`); VS Code updates its own server as it runs regardless. |
 | `GRADLE_VERSION` | `latest` | The Gradle release for Java (`latest`, a release such as `9.8.0`, or `none`). |
 | `CODEX_VERSION` | `latest` | The Codex CLI release (`latest`, or one such as `0.162.1`). A rebuild updates it. |
-| `KUBECTL_VERSION`, `HELM_VERSION`, `KIND_VERSION` | `latest` | The kubectl, Helm and kind releases for Kubernetes (`latest`, or ones such as `1.37.1`, `4.3.0` and `0.33.0`). A rebuild updates them. |
+| `KUBECTL_VERSION`, `HELM_VERSION`, `KIND_VERSION` | `latest` | The kubectl, Helm and kind releases (`latest`, or one such as `1.37.1`). A rebuild updates them. |
 | `DEVNET_SUBNET`, `DNS_IP` | `172.31.253.0/24`, `172.31.253.53` | The profile's internal network, and its DNS server's address on it. Change both together (`DNS_IP` is `.53` of the network). |
 | `UPSTREAM_DNS` | `/etc/resolv.conf` | Where allowed names are looked up: a resolv.conf path or addresses (`1.1.1.1 9.9.9.9`). Unset: your computer's resolvers, through Docker. |
 | `DOCKER_APPARMOR_PROFILE` | `rootlesskit` | The AppArmor profile for the Docker daemon. `unconfined` on Linux hosts without Ubuntu's `rootlesskit` profile ([Troubleshooting](troubleshooting.md#the-docker-container-keeps-restarting)). |

@@ -151,18 +151,18 @@ installed* once they are.
 
 ![Allowlist](images/app-allowlist.png)
 
-Every entry of the profile's allowlist: first the profile's own (*Custom
-· this profile's own*), then those HardCode provides, block by block
-(*VS Code · every profile*, …, then *Python · comes with the language*,
-…).
+Every entry in the profile's allowlist. Your own entries come first
+(*Custom · this profile's own*), then HardCode's, grouped by where they
+come from (*VS Code · every profile*, *Python · comes with the
+language*, and so on).
 Each row has its type (host, subdomains, path, ssh), its access
 (read-only, `rw`, `ssh`) and a note.
 
 - **Add**: type an entry, choose its **Access** (*read-only (GET,
   clone/pull)*, *read-write (uploads, push)* or *ssh tunnel*) and click
-  **Add**. The entry shows at once with the profile's own, marked
-  *adding…*, while a running proxy restarts with it, which takes a few
-  seconds; one the CLI refuses goes back into the form, with the reason.
+  **Add**. The entry appears in the list straight away, marked
+  *adding…*, and is ready a few seconds later. If HardCode can't use
+  it, it goes back into the box with the reason.
 - **The switch** at the start of a row turns an entry off or back on.
 - **✕** deletes one of the profile's own. A provided entry has no ✕
   (deleted, it would come back with its block): switch it off instead, and

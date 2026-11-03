@@ -128,7 +128,7 @@ The tools are:
 | Claude Code CLI | Anthropic's coding agent, `claude` in the terminal, with its VS Code extension. **Keep this one** to use Claude Code. |
 | Codex CLI | OpenAI's coding agent, `codex` in the terminal, with its VS Code extension. Leave it out if you won't use it: it opens OpenAI's hosts for uploads. |
 | Docker CLI | `docker` in the terminal, to run containers inside the sandbox. |
-| Kubernetes | `kubectl`, `helm` and `kind` in the terminal, with the Kubernetes extension, for manifests and Helm charts. Leave it out if you won't use it. |
+| Kubernetes | Tools for Kubernetes files and Helm charts. Leave it out unless you work with Kubernetes. |
 | Build essentials | compilers and libraries that many packages need when they install. |
 
 ### With the app

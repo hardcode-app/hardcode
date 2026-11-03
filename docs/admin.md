@@ -130,10 +130,10 @@ removes the extension in the background, without a restart.
 
 ![Allowlist tab](images/admin-profile-allowlist.png)
 
-Every entry, as in the desktop app: the profile's own first, then those
-HardCode provides, block by block (*VS Code · every profile*, …, *Python
-· comes with the language*, scrolled to in the picture), with switches,
-delete buttons and a form to add one ([entries explained](allowlist.md)).
+Every entry, as in the desktop app: the profile's own first, then
+HardCode's, grouped by where they come from. Each has a switch and, for
+your own, a delete button; the form at the top adds one
+([entries explained](allowlist.md)).
 
 - A row's switch and delete button act on that row's rule, so an SSH
   entry and the HTTPS entry for the same host are handled apart; a switch
