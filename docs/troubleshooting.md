@@ -176,6 +176,12 @@ home folder ([what is kept](vscode-image.md#what-is-kept-and-what-isnt)).
 To have a package in every container, add it to the image instead:
 `hardcode package add NAME`, then `hardcode rebuild`.
 
+### `hardcode up` says a device isn't available
+
+The profile is set to use a device this computer doesn't have, or the
+computer isn't running Linux. Switch it off with `hardcode device off
+NAME`, or its switch on the Overview page, and start again.
+
 ### A rebuild says `Unable to locate package`
 
 One of the profile's Ubuntu packages isn't in Ubuntu 26.04 under that

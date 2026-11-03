@@ -160,6 +160,7 @@ profiles/
     proxy-allowlist.txt      what the proxy is given: allowlist.txt with HardCode's entries (written by hardcode)
     proxy-allowlist.applied  a digest of what the running proxy last loaded (written by hardcode)
     vscode-extensions.txt    the VS Code extensions the sandbox keeps installed (written by hardcode)
+    compose.devices.yaml     the devices of this computer it may use, for Compose (written by hardcode)
     .lock                    held while a command changes the profile
 ```
 
@@ -234,6 +235,7 @@ Every setting a profile's `.env` can hold, with its default:
 |---|---|---|
 | `INSTALL_<LANG>` | off | The profile's languages and tools ([the list](vscode-image.md#languages-and-tools)): what the image installs, which allowlist entries HardCode provides, which extensions VS Code gets. Exactly `true` is on; anything else (unset, `True`, `yes`) is off, so a language a newer HardCode adds stays off in the profiles you have. `hardcode enable` and `disable` write these. |
 | `VSCODE_EXTENSIONS` | empty | VS Code extensions of the profile's own, beside its languages' (`publisher.name`, comma-separated). Only from publishers whose domain the Marketplace has verified. `hardcode extension add` and `remove` write it. |
+| `VSCODE_DEVICES` | empty | Devices of this computer the VS Code container may use, comma-separated: `kvm`, `gpu`, `nvidia`. Each weakens the sandbox. `hardcode device on` and `off` write it. |
 | `VSCODE_PACKAGES` | empty | Ubuntu packages of the profile's own, separated by spaces. A rebuild installs them. `hardcode package add` and `remove` write it. |
 | `VSCODE_BIND` | `127.0.0.1` | The address VS Code (and every port forward) is published on. Keep it local unless you put HTTPS and a sign-in in front. |
 | `VSCODE_PORT` | `11111` | VS Code's port on your computer. Each profile needs its own; a new profile gets the lowest free one from 11111. `hardcode port <number>` (or *change* on the app's Overview) moves it. |

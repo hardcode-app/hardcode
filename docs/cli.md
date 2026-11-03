@@ -189,6 +189,8 @@ force is then unknown until `hardcode logs allowlist squid` says why.
 | Command | Does |
 |---|---|
 | `docker on\|off` | The Docker daemon beside the VS Code container. `off` leaves it out of the profile: nothing privileged runs for it, and there is no `docker` inside (the harder sandbox). On a running profile it applies at once: the daemon's container is stopped and removed (its data is kept for `on`), the VS Code container is recreated, and nothing recreates the daemon while it is off. `down` always covers it. |
+| `devices` | The devices of this computer the VS Code container may use (`kvm`, `gpu`, `nvidia`): each one on or off, and whether this computer has it. |
+| `device on\|off <name> [--yes]` | Give the VS Code container a device of this computer, or take it away; the container restarts. `on` asks first, since it weakens the sandbox, and needs `--yes` without a terminal. Linux only ([devices of your computer](vscode-image.md#devices-of-your-computer)). |
 | `show` | The profile's languages, extensions, allowlist, forwards and mounts at a glance, and whether the image needs a rebuild. |
 
 ### Environment variables
@@ -225,6 +227,7 @@ Queries print their own objects:
 | `ps` | `{"services": [{"service", "state", "status", "health"}], "docker": true, "error": "", "extensions": {"state", "installed", "total"}}` (`docker: false` when the Docker CLI isn't found; `error` says why Compose couldn't list the containers, such as a daemon that isn't running, and is empty when it could; `extensions` is how far the running VS Code container's extensions have got, `state` `installing` or `done`, and `null` when it isn't running) |
 | `show` | `{"profile", "env": {…}, "vscodePort", "allowlist": [entries], "forwards": [{port, host, target}], "mounts": [{local, remote, mode}], "langs": [languages], "extensions": [extensions], "lan": [pins], "packages": [names], "dockerfile": {"path", "exists"}, "image": {"built", "languages", "packages", "dockerfile"}, "rebuildNeeded", "rebuildReasons", "docker": bool, "profiles": [{name, port}]}` (`image.built` is `false` with no image and `null` when Docker can't say; `image.languages` is `[]` with no image, the image's languages and tools when it has the label, `null` when nobody can tell; `rebuildNeeded` is `null` when nobody can tell) |
 | `languages` | `{"languages": [languages], "rebuildNeeded": bool}` |
+| `devices` | `{"devices": [{"key", "name", "summary", "warning", "enabled", "available", "reason"}]}` |
 | `packages` | `{"packages": [names], "image": [names the image was built with], "rebuildNeeded", "rebuildReasons"}` |
 | `image` | `{"path", "exists", "dockerfile", "starter", "base", "rebuildNeeded", "rebuildReasons", …}` |
 | `extensions` | `{"extensions": [extensions], "refused": [ids], "status": {"state", "total", "installed", "pending": [ids], "refused": [ids], "failed": [ids], "updated"}}` (`status` is what the running VS Code container's extension sync last wrote; `null` when it isn't running) |

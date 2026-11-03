@@ -282,6 +282,16 @@ languages while the chart's `profileDefaults.languages` is empty.
 
 ## Not covered
 
+- **A device you give a profile weakens the sandbox.** `hardcode device on`
+  gives the VS Code container a device of your computer: `/dev/kvm`,
+  `/dev/dri` (and `/dev/kfd`), or NVIDIA's GPUs through its container
+  toolkit. Each is a part of your kernel that code in the sandbox can
+  call, and a bug in it is a way out. NVIDIA's toolkit runs as root on
+  your computer, and has had container escapes (CVE-2024-0132,
+  CVE-2025-23266). Devices are off by default, the app and the command
+  ask before switching one on, and the app marks the profile *weakened*
+  while one is on. Only the VS Code container gets them, never the
+  containers of the Docker daemon.
 - **`rw` and `ssh` entries can receive data.** With credentials, anything
   allowed `rw` (the Claude API, a git namespace you push to) can be
   written to, and an `ssh` entry is a whole host with nothing inspected.

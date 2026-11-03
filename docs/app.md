@@ -74,6 +74,14 @@ off. Off, no daemon runs for the profile and `docker` has nothing to talk
 to: the [harder sandbox](staying-safe.md#use-the-harder-sandbox-when-you-can).
 A running sandbox is changed at once (VS Code's container is recreated).
 
+**Devices**, below VS Code's card, lists the devices of your computer the
+sandbox may use: KVM, an AMD or Intel GPU, NVIDIA GPUs. Each is off until
+you switch it on, and switching one on asks you to tick that you
+understand it weakens the sandbox
+([devices of your computer](vscode-image.md#devices-of-your-computer)).
+While one is on, the header says **weakened**. A device this computer
+doesn't have is greyed out, with the reason.
+
 **The buttons under the containers:**
 
 | Button | Does |

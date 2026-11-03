@@ -110,7 +110,9 @@ A profile with Dockerfile steps of its own (`profiles/NAME/image/Dockerfile`)
 also gets `-f <stack>/compose.image.yaml` after `compose.yaml`. It builds
 HardCode's image as `hardcode-vscode-base:NAME`, a service that never
 runs, and then the profile's steps on it, from the profile's `image/`
-folder, as the VS Code image.
+folder, as the VS Code image. A profile with devices of this computer on
+(`VSCODE_DEVICES`) gets `-f <home>/profiles/NAME/compose.devices.yaml`
+next, which hardcode writes from that setting.
 
 with `COMPOSE_PROFILES` empty when the profile's `.env` says
 `ENABLE_DOCKER=false` (the Docker daemon's service sits behind that Compose

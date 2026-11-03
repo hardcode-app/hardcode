@@ -266,6 +266,36 @@ row of the app's Overview.
   read-only on the allowlist.
 - **Testcontainers** works: `TESTCONTAINERS_HOST_OVERRIDE=docker` is set.
 
+## Devices of your computer
+
+A sandbox can't use your computer's devices. If you need one, such as
+KVM to run the Android emulator, or a GPU, you can give it to a profile.
+**Each one weakens the sandbox**, so leave them off unless you need them,
+and keep that work in a profile of its own.
+
+| Device | Gives the sandbox | The risk |
+|---|---|---|
+| `kvm` | your kernel's virtualisation interface, to run virtual machines | a bug in that interface is a way out of the sandbox, onto your computer |
+| `gpu` | your AMD or Intel graphics driver | the driver is a large part of your kernel, and a bug in it is a way out; GPU memory may not be cleared between programs |
+| `nvidia` | your NVIDIA GPUs | NVIDIA's container toolkit runs as root on your computer, and it has had container escapes |
+
+To switch one on, use its switch on the app's **Overview** page, which
+asks you to confirm. Or:
+
+```sh
+hardcode devices              # each one: on or off, and whether this computer has it
+hardcode device on kvm        # asks first
+hardcode device off kvm
+```
+
+While a device is on, the app's header says **weakened: kvm**. Switching
+one on or off restarts the VS Code container.
+
+Devices work on Linux only, and only in the VS Code container, not in
+containers you start with Docker inside. NVIDIA GPUs also need NVIDIA's
+container toolkit on your computer. On Kubernetes, devices aren't
+available.
+
 ## Kubernetes
 
 The Kubernetes tool installs `kubectl`, Helm and kind, and VS Code's

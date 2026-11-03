@@ -175,6 +175,9 @@ host**, and read-only to `rw`. Nothing is allowed until you add it.
   made the first time it starts. `cat ~/.ssh/id_ed25519.pub` shows it. Add
   it only to the repositories the sandbox works on, not to your account,
   because anything in the sandbox can use it. Remove it when you're done.
+- **Leave devices off.** A device you give a profile (KVM, a GPU) is a
+  way out of the sandbox if it has a bug. Give one only to a profile for
+  that work, and switch it off when you're done.
 - Use one profile per level of trust: a client's code in its own profile
   with its own allowlist, an experiment with a tool you don't trust in
   another. Profiles don't share containers, networks, storage or
