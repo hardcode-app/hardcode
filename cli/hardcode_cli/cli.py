@@ -840,7 +840,10 @@ def _add_allowlist_commands(sub) -> None:
     ssh_help = "the host's SSH entry rather than its HTTPS one"
 
     allow = sub.add_parser("allow", help="allow a site through the proxy")
-    allow.add_argument("entry", help="example.com, .example.com, example.com/path, or host[:port] with ssh")
+    allow.add_argument(
+        "entry",
+        help="example.com, .example.com, example.com/path, host[:port] with ssh, or github:OWNER/REPO",
+    )
     allow.add_argument("flag", nargs="?", choices=["rw", "ssh"], help="rw: uploads too; ssh: an SSH tunnel")
     allow.set_defaults(func=cmd_allow)
 

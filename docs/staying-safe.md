@@ -164,6 +164,8 @@ host**, and read-only to `rw`. Nothing is allowed until you add it.
 - When the sandbox needs a credential, make one just for it: a token
   scoped to one repository or one project, short-lived if the service
   allows, revoked when you're done.
+- For GitHub, [GitHub from the sandbox](github.md) is the narrowest
+  way: one repository, over HTTPS, with a token for that repository.
 - For SSH, the sandbox makes its own key the first time it starts,
   `~/.ssh/id_ed25519`; `cat ~/.ssh/id_ed25519.pub` shows its public half.
   Add it as a deploy key to the repositories the sandbox works on rather

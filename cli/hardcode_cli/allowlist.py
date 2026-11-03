@@ -51,6 +51,12 @@ HEADER_WIDTH = len(CUSTOM_HEADER)
 # Where an entry comes from, in a full list: one of the blocks' keys, or this.
 CUSTOM = "custom"
 
+# "github:OWNER/REPO", which allow and deny take for one GitHub repository:
+# an owner (letters, digits, inner hyphens) and a repository name (letters,
+# digits, ".", "-", "_"), as GitHub allows them. It is never written as it
+# is: it stands for the repository's two entries (github_entries).
+_GITHUB_REPOSITORY = re.compile(r"^github:([a-z0-9](?:[a-z0-9-]{0,38}))/([a-z0-9._-]{1,100})$", re.IGNORECASE)
+
 
 class AllowlistError(ValueError):
     """
@@ -651,6 +657,52 @@ def switch_on(text: str, entry: str, ssh: bool = False) -> str:
     return text
 
 
+def github_entries(entry: str) -> Optional[list[str]]:
+    """
+    The entries ``github:OWNER/REPO`` stands for: git's address for the
+    repository (which ends in ``.git``), and GitHub's API for it. ``None``
+    when *entry* isn't one.
+    """
+    if not entry.strip().lower().startswith("github:"):
+        return None
+
+    match = _GITHUB_REPOSITORY.match(entry.strip())
+    if not match or match.group(2).strip(".") == "":
+        raise AllowlistError("github: takes one repository, as OWNER/REPO in its address on GitHub")
+
+    owner, repository = match.groups()
+    if repository.lower().endswith(".git"):
+        repository = repository[: -len(".git")]
+    if not repository:
+        raise AllowlistError("github: takes one repository, as OWNER/REPO in its address on GitHub")
+
+    return [f"github.com/{owner}/{repository}.git", f"api.github.com/repos/{owner}/{repository}"]
+
+
+def _for_each_github_entry(text: str, entry: str, flag: str, edit) -> Optional[tuple[str, str]]:
+    """
+    For ``github:OWNER/REPO``, *edit* applied to each of its entries in
+    turn, each starting from the text the one before left: the last text,
+    and their messages together. ``None`` when *entry* isn't one.
+
+    *edit* takes the text and one entry, and returns the new text and a
+    message, as ``allow`` and ``switch`` do.
+    """
+    entries = github_entries(entry)
+    if entries is None:
+        return None
+
+    if flag == "ssh":
+        raise AllowlistError("github: is git and GitHub's API over HTTPS: read-only, or rw to push")
+
+    messages = []
+    for one in entries:
+        text, message = edit(text, one)
+        messages.append(message)
+
+    return text, "; ".join(messages)
+
+
 def allow(text: str, entry: str, flag: str, enabled: Iterable[str]) -> tuple[str, str]:
     """
     Allow *entry* with *flag* in a profile with the *enabled* languages:
@@ -660,7 +712,19 @@ def allow(text: str, entry: str, flag: str, enabled: Iterable[str]) -> tuple[str
     where read-only is asked for) is switched back on if it was off, and
     otherwise there is nothing to do. For more than it allows (rw of a
     read-only one) the profile gets an entry of its own.
+
+    ``github:OWNER/REPO`` allows that repository's two entries
+    (``github_entries``), with *flag*.
     """
+    repository = _for_each_github_entry(
+        text,
+        entry,
+        flag,
+        lambda now, one: allow(now, one, flag, enabled),
+    )
+    if repository is not None:
+        return repository
+
     shown = _shown(entry, flag)
     ssh = flag == "ssh"
 
@@ -684,7 +748,18 @@ def switch(text: str, entry: str, on: bool, ssh: bool, enabled: Iterable[str]) -
     Switch *entry* on or off in a profile with the *enabled* languages: the
     profile's own lines for it are commented back in or out, and a provided
     one loses or gets its ``off`` line. The new text, and what to say about it.
+
+    ``github:OWNER/REPO`` switches that repository's two entries.
     """
+    repository = _for_each_github_entry(
+        text,
+        entry,
+        "ssh" if ssh else "",
+        lambda now, one: switch(now, one, on, ssh, enabled),
+    )
+    if repository is not None:
+        return repository
+
     shown = canonical(entry) + (" (ssh)" if ssh else "")
     offered = providers(enabled, entry, ssh)
 

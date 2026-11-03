@@ -138,6 +138,7 @@ through this repository's *Security* tab, rather than in an issue.
 
 - [Getting started](docs/getting-started.md): installing and the first sandbox
 - [Profiles](docs/profiles.md) and [the allowlist](docs/allowlist.md)
+- [GitHub from the sandbox](docs/github.md): one repository, one token
 - [The desktop app](docs/app.md) and [the `hardcode` command](docs/cli.md)
 - [Inside the sandbox](docs/vscode-image.md): languages, tools, extensions, Docker inside
 - [Architecture](docs/architecture.md) and [troubleshooting](docs/troubleshooting.md)

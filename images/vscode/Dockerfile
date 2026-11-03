@@ -344,6 +344,10 @@ COPY --chmod=0755 verify-extensions.sh /usr/local/bin/hardcode-verify-extensions
 COPY --chmod=0755 sync-extensions.sh /usr/local/bin/hardcode-sync-extensions
 COPY --chmod=0755 ssh-proxy-config.sh /usr/local/bin/hardcode-ssh-proxy-config
 COPY --chmod=0755 ssh-key.sh /usr/local/bin/hardcode-ssh-key
+# GitHub, one repository and token at a time (docs/github.md); the wrapper
+# comes before the archive's gh on the PATH, and calls it.
+COPY --chmod=0755 github.sh /usr/local/bin/hardcode-github
+COPY --chmod=0755 gh.sh /usr/local/bin/gh
 
 # ---------------------------------------------------------------------------
 # Everything below is installed into the user's home. On first start Docker

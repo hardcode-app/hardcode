@@ -116,6 +116,13 @@ Rust documentation recommends. Add extensions through HardCode rather than
 VS Code's own Extensions view: only HardCode's list is checked. (HardCode
 leaves extensions you install or uninstall in VS Code itself alone.)
 
+## GitHub
+
+`hardcode-github OWNER/REPO` sets the sandbox up to work on one GitHub
+repository, with a token that reaches only that one; `gh` then uses that
+repository's token by itself. [GitHub from the sandbox](github.md) has
+the steps, and why it beats SSH or `gh auth login`.
+
 ## Claude Code
 
 `claude` is in the terminal, and the Claude Code extension in VS Code,

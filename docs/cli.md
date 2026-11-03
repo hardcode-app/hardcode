@@ -156,7 +156,7 @@ work too: `c`, `c++`, `cxx`, `c#`, `csharp`, `net`, `.net`, `js`,
 | Command | Does |
 |---|---|
 | `allowlist` | Every entry of one profile's allowlist, as the app lists them: its own from `allowlist.txt` first, then those HardCode provides, by block (every profile's, then its languages' and tools'); each on or off, with its access and note; an invalid line is marked. |
-| `allow <entry> [rw\|ssh]` | Add the entry (or uncomment and re-flag an existing line), and reload a running proxy. A provided entry that already allows as much isn't added; one that was switched off is switched back on. |
+| `allow <entry> [rw\|ssh]` | Add the entry (or uncomment and re-flag an existing line), and reload a running proxy. A provided entry that already allows as much isn't added; one that was switched off is switched back on. `github:OWNER/REPO` stands for one GitHub repository's two entries, git's address for it and GitHub's API for it (`github.com/OWNER/REPO.git`, `api.github.com/repos/OWNER/REPO`); `deny` takes it too ([GitHub from the sandbox](github.md)). |
 | `deny <entry> [ssh]` | Switch an entry off: one of the profile's own is commented out (wherever it is in the file), a provided one gets an `off <entry>` line. An error if it isn't on. `ssh` means the host's SSH entry; without it, its HTTPS one. |
 | `allowlist enable\|disable\|remove <entry> [ssh]` | Comment the entry's line back in, comment it out, or delete it. A provided entry is switched on or off (its `off` line removed or added) and can't be removed: it would come back with its block. |
 | `reload` | Give a running proxy the allowlist again, after you edited `allowlist.txt` by hand, with the entries this HardCode provides; says what changed. |

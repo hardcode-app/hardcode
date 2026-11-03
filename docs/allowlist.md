@@ -77,7 +77,7 @@ Some entries you may want:
 | To | Entry |
 |---|---|
 | clone and pull your repositories on GitHub | `github.com/your-name` |
-| push to one repository | `github.com/your-name/app rw` |
+| work on one GitHub repository: git and GitHub's API for it ([GitHub from the sandbox](github.md) has the rest) | `github:your-name/app rw` |
 | use GitHub's API for your repositories | `api.github.com/repos/your-name` |
 | use Claude Code's official plugin marketplace (a GitHub repository) | `github.com/anthropics/claude-code` |
 | call an API that takes `POST` requests | `api.example.com rw` |

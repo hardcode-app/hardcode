@@ -496,6 +496,47 @@ class ProvidedEditTests(unittest.TestCase):
         self.assertEqual(lines.index("other.example"), lines.index("mine.example") + 1)
 
 
+class GithubRepositoryTests(unittest.TestCase):
+    """
+    ``github:OWNER/REPO``: one GitHub repository's two entries at once, as
+    allow and deny take it.
+    """
+
+    def test_it_stands_for_gits_address_and_the_api(self):
+        self.assertEqual(
+            allowlist.github_entries("github:me/app"),
+            ["github.com/me/app.git", "api.github.com/repos/me/app"],
+        )
+        self.assertEqual(allowlist.github_entries("github:me/app.git"), allowlist.github_entries("github:me/app"))
+        self.assertIsNone(allowlist.github_entries("github.com/me/app"))
+
+    def test_allowing_writes_both_entries_with_the_access_asked_for(self):
+        text, message = allowlist.allow("", "github:Me/App", "rw", [])
+
+        self.assertEqual([item.flag for item in allowlist.find(text, "github.com/me/app.git")], ["rw"])
+        self.assertEqual([item.flag for item in allowlist.find(text, "api.github.com/repos/me/app")], ["rw"])
+        self.assertEqual(message, "allowed github.com/me/app.git (rw); allowed api.github.com/repos/me/app (rw)")
+        self.assertNotIn("github:", text, "it is never written as it is")
+
+        read_only, _ = allowlist.allow("", "github:me/app", "", [])
+        self.assertEqual([item.flag for item in allowlist.find(read_only, "github.com/me/app.git")], [""])
+
+    def test_denying_switches_both_off(self):
+        text, _ = allowlist.allow("", "github:me/app", "rw", [])
+
+        off, message = allowlist.switch(text, "github:me/app", False, False, [])
+        self.assertEqual(message, "disabled github.com/me/app.git; disabled api.github.com/repos/me/app")
+        self.assertFalse([item for item in allowlist.parse(off) if item.enabled])
+
+    def test_only_one_repository_over_https(self):
+        for bad in ("github:me", "github:me/app/more", "github:-me/app", "github:me/..", "github:me/.git", "github:"):
+            with self.assertRaisesRegex(AllowlistError, "one repository, as OWNER/REPO", msg=bad):
+                allowlist.allow("", bad, "rw", [])
+
+        with self.assertRaisesRegex(AllowlistError, "over HTTPS"):
+            allowlist.allow("", "github:me/app", "ssh", [])
+
+
 class CorpusTests(unittest.TestCase):
     """
     The shared acceptance corpus; tests/proxy.py runs the renderer over it.

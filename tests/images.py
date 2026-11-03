@@ -8,6 +8,11 @@ The VS Code image's start-up scripts, run for real without the 12 GB image.
 - The sandbox's own SSH key, which the entrypoint makes once when the home
   has none: made by the real ssh-keygen, kept private, and never made
   beside a key the home already has.
+- GitHub, one repository at a time: hardcode-github saving each
+  repository's token in a file of its own and setting git up, the real git
+  then answered with the right token, gh's wrapper handing gh the right
+  one, and what's missing said plainly. Against a fake proxy and GitHub
+  (tests/fixtures/fake_github_curl.py).
 - The Kubernetes home-seeding script, run as uid 1000 in a container onto a
   volume root that belongs to root and is world-writable, as a freshly
   provisioned PVC is.
@@ -32,6 +37,7 @@ import subprocess
 import sys
 import time
 from pathlib import Path
+from typing import Optional
 
 import harness
 from harness import ROOT, Docker, Suite
@@ -39,6 +45,8 @@ from harness import ROOT, Docker, Suite
 VSCODE = ROOT / "images" / "vscode"
 SSH_PROXY_CONFIG = VSCODE / "ssh-proxy-config.sh"
 SSH_KEY = VSCODE / "ssh-key.sh"
+GITHUB = VSCODE / "github.sh"
+GH_WRAPPER = VSCODE / "gh.sh"
 FIXTURES = ROOT / "tests" / "fixtures"
 
 # The fake Marketplace: what each extension needs. One pulls in a
@@ -148,6 +156,157 @@ def check_ssh_key(suite: Suite, scratch: Path) -> None:
 
     usage = harness.run(["bash", SSH_KEY], env=environment)
     suite.check("usage is checked", not usage.ok, usage.text)
+
+
+def check_github(suite: Suite, scratch: Path) -> None:
+    """
+    hardcode-github and gh's wrapper, run for real with the real git.
+    """
+    home = scratch / "github-home"
+    home.mkdir()
+
+    # The helper, the wrapper, and in place of curl and the real gh, the fakes.
+    bin_dir = scratch / "github-bin"
+    bin_dir.mkdir()
+    for name, source in (
+        ("hardcode-github", GITHUB),
+        ("gh", GH_WRAPPER),
+        ("curl", FIXTURES / "fake_github_curl.py"),
+        ("real-gh", FIXTURES / "gh_token_probe.py"),
+    ):
+        shutil.copyfile(source, bin_dir / name)
+        (bin_dir / name).chmod(0o755)
+
+    environment = {
+        **os.environ,
+        "HOME": str(home),
+        "PATH": f"{bin_dir}:{os.environ['PATH']}",
+        "HARDCODE_REAL_GH": str(bin_dir / "real-gh"),
+        "FAKE_TOKENS": "github_pat_app=me/app,github_pat_other=me/other",
+        "GIT_CONFIG_NOSYSTEM": "1",
+        "GIT_TERMINAL_PROMPT": "0",
+    }
+    for name in ("GH_TOKEN", "GITHUB_TOKEN"):
+        environment.pop(name, None)
+
+    def run(*command: object, input: Optional[str] = None, cwd: Optional[Path] = None, **extra: str) -> harness.Output:
+        return harness.run(command, input=input, cwd=cwd, env={**environment, **extra})
+
+    tokens = home / ".config" / "github-tokens"
+    app_token = tokens / "me" / "app"
+
+    # Setting a repository up: the token in its own file, git's settings, the check.
+    first = run("hardcode-github", "Me/App", input="github_pat_app\n")
+    saved = app_token.exists() and app_token.read_text(encoding="utf-8") == "github_pat_app\n"
+    suite.check(
+        "a repository's token is saved in a file of its own",
+        first.ok and saved,
+        f"exit {first.code}\n{first.text}",
+    )
+    if not saved:
+        return
+
+    modes = tuple(oct(path.stat().st_mode & 0o777) for path in (app_token, app_token.parent, tokens))
+    suite.check("only its owner can read it, or its folders", modes == ("0o600", "0o700", "0o700"), str(modes))
+
+    link = next((line.strip() for line in first.text.splitlines() if "personal-access-tokens/new" in line), "")
+    filled = all(part in link for part in ("target_name=me", "expires_in=30", "contents=write", "workflows=write"))
+    suite.check("the link fills GitHub's form in", filled, link)
+    suite.check(
+        "the check says it's ready, and when the token expires",
+        "git clone https://github.com/me/app.git" in first.text and "expires 2026-12-03" in first.text,
+        first.text,
+    )
+
+    # The real git asks the helper, which answers for the repository the address names.
+    asked = run("git", "credential", "fill", input="url=https://github.com/Me/App.git\n\n")
+    suite.check("git gets that repository's token", "password=github_pat_app" in asked.text, asked.text)
+    elsewhere = run("git", "credential", "fill", input="url=https://github.com/someone/else.git\n\n")
+    suite.check("and none for a repository without one", "github_pat" not in elsewhere.text, elsewhere.text)
+
+    rewrites = run("git", "config", "--global", "--get-all", "url.https://github.com/.insteadof")
+    suite.check(
+        "SSH addresses go over HTTPS",
+        rewrites.text.split() == ["git@github.com:", "ssh://git@github.com/"],
+        rewrites.text,
+    )
+
+    settings = (home / ".gitconfig").read_text(encoding="utf-8")
+
+    # A token saved by hand, readable by others, is made private again.
+    app_token.chmod(0o644)
+    tokens.chmod(0o755)
+    again = run("hardcode-github", "me/app", input="\n")
+    suite.check(
+        "running it again keeps the token, and git's settings as they were",
+        again.ok and saved and (home / ".gitconfig").read_text(encoding="utf-8") == settings,
+        f"exit {again.code}\n{again.text}",
+    )
+    modes = tuple(oct(path.stat().st_mode & 0o777) for path in (app_token, tokens))
+    suite.check("...and a token left readable by others private again", modes == ("0o600", "0o700"), str(modes))
+
+    second = run("hardcode-github", "me/other", input="github_pat_other\n")
+    suite.check(
+        "a second repository adds a token, and replaces none",
+        second.ok
+        and app_token.read_text(encoding="utf-8") == "github_pat_app\n"
+        and (tokens / "me" / "other").read_text(encoding="utf-8") == "github_pat_other\n",
+        f"exit {second.code}\n{second.text}",
+    )
+
+    # gh's wrapper hands gh the token of the repository it works on.
+    def token_gh_got(*arguments: str, cwd: Optional[Path] = None, **extra: str) -> str:
+        return run("gh", *arguments, cwd=cwd, **extra).text.strip()
+
+    clone = scratch / "github-clone"
+    run("git", "init", "-q", clone)
+    run("git", "-C", clone, "remote", "add", "origin", "git@github.com:me/app.git")
+
+    for description, got, wanted in (
+        ("gh api repos/OWNER/REPO: that repository's", token_gh_got("api", "repos/me/other/pulls"), "github_pat_other"),
+        ("gh -R OWNER/REPO: that repository's", token_gh_got("-R", "me/app", "run", "list"), "github_pat_app"),
+        ("gh in a clone: its origin's", token_gh_got("run", "list", cwd=clone), "github_pat_app"),
+        ("a GH_TOKEN of your own wins", token_gh_got("api", "repos/me/app", GH_TOKEN="mine"), "mine"),
+        ("a repository without a token: none", token_gh_got("api", "repos/someone/else"), "(none)"),
+    ):
+        suite.check(f"gh's token: {description}", got == wanted, f"got {got}, wanted {wanted}")
+
+    # What doesn't work is said, with what to do.
+    refused = run("hardcode-github", "me/app", input="\n", FAKE_REFUSED="https://api.github.com/repos/me/app")
+    suite.check(
+        "a missing allowlist entry: the command that adds it",
+        not refused.ok and "hardcode allow github:me/app rw" in refused.text,
+        refused.text,
+    )
+
+    unseen = run("hardcode-github", "me/third", input="github_pat_app\n")
+    suite.check(
+        "a token that can't see the repository: what to check on GitHub",
+        not unseen.ok and "Resource owner is me" in unseen.text,
+        unseen.text,
+    )
+
+    read_only = run("hardcode-github", "me/app", input="\n", FAKE_READ_ONLY="github_pat_app")
+    suite.check(
+        "a token that may not push: says so",
+        not read_only.ok and "may read but not push" in read_only.text,
+        read_only.text,
+    )
+
+    classic = run("hardcode-github", "me/fourth", input="ghp_classic\n")
+    suite.check(
+        "a classic token is refused, and not saved",
+        not classic.ok and not (tokens / "me" / "fourth").exists() and "fine-grained" in classic.text,
+        classic.text,
+    )
+
+    for bad in ("me", "me/..", "me/app/more"):
+        refusal = run("hardcode-github", bad)
+        suite.check(
+            f"'{bad}' isn't a repository, and is refused",
+            refusal.code == 2,
+            f"exit {refusal.code}\n{refusal.text}",
+        )
 
 
 def seed_home_script() -> str:
@@ -558,6 +717,9 @@ def run_checks(suite: Suite) -> None:
 
         suite.section("the sandbox's own SSH key")
         check_ssh_key(suite, scratch)
+
+        suite.section("GitHub, one repository at a time")
+        check_github(suite, scratch)
 
         suite.section("seeding a home onto a root-owned volume")
         check_home_seeding(suite, docker, scratch)

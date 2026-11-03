@@ -19,6 +19,7 @@ Docker daemon of its own, and an internet connection limited to an
 |---|---|
 | [Profiles](profiles.md) | run several sandboxes side by side; copy, reset and delete them; change their settings |
 | [The allowlist](allowlist.md) | let a sandbox reach what it needs, and nothing more; read what was blocked |
+| [GitHub from the sandbox](github.md) | clone, pull and push one repository, with a token that reaches only that one |
 | [Inside the sandbox](vscode-image.md) | know what's installed, what is kept and what isn't, how Claude Code and Codex are set up, and how to use Docker inside |
 | [The desktop app](app.md) | find your way around the app, page by page, with pictures |
 | [The `hardcode` command](cli.md) | use the command line: everyday commands, then every command, option and `--json` output |
