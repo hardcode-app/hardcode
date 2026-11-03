@@ -10,11 +10,12 @@ that DNS.
 from __future__ import annotations
 
 import copy
+import ipaddress
 import re
 from dataclasses import dataclass
 from typing import Any, Optional
 
-from hardcode_cli import allowlist, langs
+from hardcode_cli import allowlist, lan, langs
 
 # HardCode's API group, and the prefix of its labels and annotations: the
 # project's GitHub organisation's namespace, which only it controls.
@@ -259,11 +260,63 @@ def effective_languages(spec: dict, defaults: Optional[dict] = None) -> list[str
     return [key for key in langs.LANGS if key in chosen]
 
 
+def lan_settings(defaults: Optional[dict] = None) -> dict:
+    """
+    Whether this cluster lets a profile's names reach an address on its
+    network (``profileDefaults.lan.enabled``, off unless the chart says
+    so), and the ranges no name may be pinned into (``.clusterRanges``):
+    the cluster's own pod and service ranges, which the operator can't read
+    for itself with the namespace's permissions only.
+
+    Only the chart decides: a profile's spec can't switch it on.
+    """
+    settings = (defaults or {}).get("lan") or {}
+    if not isinstance(settings, dict):
+        settings = {}
+
+    cluster_ranges = settings.get("clusterRanges") or []
+    if not isinstance(cluster_ranges, list):
+        cluster_ranges = []
+
+    return {"enabled": settings.get("enabled") is True, "clusterRanges": [str(item) for item in cluster_ranges]}
+
+
+# Why the operator ignores a pin, when it does.
+LAN_OFF = "this cluster doesn't let names reach its network (the chart's profileDefaults.lan.enabled)"
+LAN_CLUSTER = "inside the cluster's own pod or service ranges (the chart's profileDefaults.lan.clusterRanges)"
+
+
+def effective_pins(text: str, internal_ranges: str, settings: dict) -> list[dict]:
+    """
+    The names a profile's allowlist (*text*) pins to an address on the
+    network, each as ``allowlist.Pin.as_dict`` with ``ignored``: why the
+    operator leaves it out of the proxy's rules and the NetworkPolicy
+    (pins are off on this cluster, or the address is in the cluster's own
+    ranges), ``""`` when it doesn't. A pin with a problem of its own
+    (``problem``) is passed on, and the proxy refuses to start with it, as
+    it does with any invalid line.
+    """
+    ranges = lan.internal_ranges(internal_ranges)
+    found = []
+
+    for pin in allowlist.pins(text, ranges):
+        ignored = ""
+        if not settings["enabled"]:
+            ignored = LAN_OFF
+        elif not pin.problem and lan.in_ranges(pin.address, settings["clusterRanges"]):
+            ignored = LAN_CLUSTER
+
+        found.append({**pin.as_dict(), "ignored": ignored})
+
+    return found
+
+
 def effective_spec(profile: dict, defaults: Optional[dict] = None) -> dict:
     """
     The profile's spec, with the operator's defaults filled in, and
     ``proxyAllowlist``: the allowlist the proxy is given, the profile's own
-    (``allowlist``) with the entries this HardCode provides to its languages.
+    (``allowlist``) with the entries this HardCode provides to its languages,
+    and without the pins the operator ignores (``lan``, ``effective_pins``).
 
     The Docker sidecar's and CoreDNS's images have no built-in default: the
     chart pins them (``profileDefaults``), and they are None without one
@@ -284,6 +337,11 @@ def effective_spec(profile: dict, defaults: Optional[dict] = None) -> dict:
     own_allowlist = spec.get("allowlist") or ""
     languages = effective_languages(spec, defaults)
 
+    internal_ranges = pick("internalRanges", fallback="")
+    lan_config = lan_settings(defaults)
+    pins = effective_pins(own_allowlist, internal_ranges, lan_config)
+    ignored = {pin["name"]: pin["ignored"] for pin in pins if pin["ignored"]}
+
     return {
         "image": pick("image", fallback="hardcode-vscode:latest"),
         "squidImage": pick("squidImage", fallback="hardcode-squid:latest"),
@@ -292,13 +350,14 @@ def effective_spec(profile: dict, defaults: Optional[dict] = None) -> dict:
         "imagePullPolicy": pick("imagePullPolicy", fallback="IfNotPresent"),
         "imagePullSecrets": pick("imagePullSecrets", fallback=[]),
         "allowlist": own_allowlist,
-        "proxyAllowlist": allowlist.render(own_allowlist, languages),
+        "proxyAllowlist": allowlist.render(allowlist.ignore_pins(own_allowlist, ignored), languages),
+        "lan": {**lan_config, "pins": pins},
         "languages": languages,
         "extensions": list(spec.get("extensions") or []),
         "suspended": bool(spec.get("suspended")),
         "user": spec.get("user") or "dev",
         "upstreamDNS": pick("upstreamDNS", fallback="/etc/resolv.conf"),
-        "internalRanges": pick("internalRanges", fallback=""),
+        "internalRanges": internal_ranges,
         "clientRanges": pick("clientRanges", fallback=""),
         "home": {
             "size": pick("home", "size", fallback="20Gi"),
@@ -971,6 +1030,7 @@ def _network_policies(build: _Build) -> list[dict]:
             "egress": [
                 {"to": [{"ipBlock": internet}]},
                 {"to": [cluster_dns], "ports": dns_ports},
+                *_pin_rules(build),
             ],
         },
     )
@@ -985,6 +1045,35 @@ def _network_policies(build: _Build) -> list[dict]:
     )
 
     return [vscode, squid, coredns]
+
+
+def _pin_rules(build: _Build) -> list[dict]:
+    """
+    The squid egress rules the names pinned to an address on the network
+    need: one per pin the operator takes, to that one address (a /32, or a
+    /128), on the ports its allowlist entries use (an SSH entry's port, or
+    80 and 443). A pin no entry uses gets none, as it allows nothing.
+    """
+    entries = allowlist.effective(build.spec["allowlist"], build.spec["languages"])
+    rules = []
+
+    for pin in build.spec["lan"]["pins"]:
+        if pin["ignored"] or pin["problem"]:
+            continue
+
+        ports = allowlist.entry_ports(entries, pin["name"])
+        if not ports:
+            continue
+
+        address = ipaddress.ip_address(pin["address"])
+        rules.append(
+            {
+                "to": [{"ipBlock": {"cidr": f"{address}/{address.max_prefixlen}"}}],
+                "ports": [{"port": port, "protocol": "TCP"} for port in ports],
+            }
+        )
+
+    return rules
 
 
 def render(profile: dict, defaults: Optional[dict], ctx: dict) -> list[dict]:

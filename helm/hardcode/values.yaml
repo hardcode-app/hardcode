@@ -105,8 +105,21 @@ profileDefaults:
     squidEgressExcept: [10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 100.64.0.0/10, 169.254.0.0/16, 127.0.0.0/8]
   # Address ranges an allowlisted name must never resolve to (squid refuses
   # the request); empty means loopback, link-local, private and shared
-  # space. Narrow it for a registry on an internal address.
+  # space. For one name on an internal address, see lan below rather than
+  # narrowing it.
   internalRanges: ""
+  # Names on your network: a profile's "lan <name> <address>" lines let that
+  # one name reach that one address inside internalRanges (a self-hosted git
+  # server, registry or mirror). Off, the operator ignores them, and the
+  # admin says so. On, each pin a profile's entries use gets a NetworkPolicy
+  # egress rule for squid to that address alone (/32 or /128), on the port
+  # of the name's ssh entry, or 80 and 443. The operator can't read the
+  # cluster's own pod and service ranges with its permissions: list them in
+  # clusterRanges, and it refuses pins into them. Only the chart decides;
+  # a profile can't switch this on.
+  lan:
+    enabled: false
+    clusterRanges: []
   # Who may use a profile's proxy; empty means private, shared and local
   # IPv6 ranges, which covers common pod networks.
   clientRanges: ""

@@ -81,7 +81,7 @@ command's options.
 | Option | Meaning |
 |---|---|
 | `-p NAME`, `--profile NAME` | The profile to act on, before or after the command. Default: `$HARDCODE_PROFILE`, else `default`. |
-| `--all` | Act on every profile. Accepted by `allow`, `deny`, `allowlist` (`enable`, `disable`, `remove`), `reload`, `mount`, `unmount`, `enable`, `disable`, `rebuild`, `docker`, `extension` and `token`. |
+| `--all` | Act on every profile. Accepted by `allow`, `deny`, `allowlist` (`enable`, `disable`, `remove`), `reload`, `mount`, `unmount`, `enable`, `disable`, `rebuild`, `docker`, `extension`, `lan add`, `lan remove` and `token`. |
 | `--json` | Machine-readable output ([below](#--json-output)); what the desktop app uses. |
 | `--config DIR` | The folder the profiles are kept in (the home). Default: `$HARDCODE_CONFIG`, else `~/.config/hardcode` on Linux (`$XDG_CONFIG_HOME/hardcode`), `~/Library/Application Support/HardCode` on macOS, `%LOCALAPPDATA%\HardCode` on Windows. |
 | `--version` | The command's version: `hardcode 0.1.0`, or `hardcode 0.1.0 (dev, 2c419ae)` for a development build, with the commit it was built from. |
@@ -155,8 +155,12 @@ work too: `c`, `c++`, `cxx`, `c#`, `csharp`, `net`, `.net`, `js`,
 
 | Command | Does |
 |---|---|
-| `allowlist` | Every entry of one profile's allowlist, as the app lists them: its own from `allowlist.txt` first, then those HardCode provides, by block (every profile's, then its languages' and tools'); each on or off, with its access and note; an invalid line is marked. |
-| `allow <entry> [rw\|ssh]` | Add the entry (or uncomment and re-flag an existing line), and reload a running proxy. A provided entry that already allows as much isn't added; one that was switched off is switched back on. `github:OWNER/REPO` adds the two entries one GitHub repository needs, `github.com/OWNER/REPO.git` and `api.github.com/repos/OWNER/REPO`; `deny` accepts it too ([GitHub from the sandbox](github.md)). |
+| `allowlist` | Every entry of one profile's allowlist, as the app lists them: its own from `allowlist.txt` first, then those HardCode provides, by block (every profile's, then its languages' and tools'); each on or off, with its access and note; an invalid line is marked. The names on your network follow, in a section of their own. |
+| `allow <entry> [rw\|ssh]` | Add the entry (or uncomment and re-flag an existing line), and reload a running proxy. A provided entry that already allows as much isn't added; one that was switched off is switched back on. `github:OWNER/REPO` adds the two entries one GitHub repository needs, `github.com/OWNER/REPO.git` and `api.github.com/repos/OWNER/REPO`; `deny` accepts it too ([GitHub from the sandbox](github.md)). When the entry's name points inside your network, it asks whether to let the name reach that address; `--lan` says yes without asking ([a server on your own network](allowlist.md#a-server-on-your-own-network)). |
+| `lan` | The names that may reach an address on your network, each with its state: `ok`, `moved` (the name points elsewhere now; the approved address stays) or `unresolved`. |
+| `lan add <name> [address]` | Let one name reach one address on your network: the address given, or the one the name has now. Adding a name again moves it. |
+| `lan remove <name>` | Stop letting the name reach its address. |
+| `lan check <name>` | What the name resolves to now, and whether that is on your network. |
 | `deny <entry> [ssh]` | Switch an entry off: one of the profile's own is commented out (wherever it is in the file), a provided one gets an `off <entry>` line. An error if it isn't on. `ssh` means the host's SSH entry; without it, its HTTPS one. |
 | `allowlist enable\|disable\|remove <entry> [ssh]` | Comment the entry's line back in, comment it out, or delete it. A provided entry is switched on or off (its `off` line removed or added) and can't be removed: it would come back with its block. |
 | `reload` | Give a running proxy the allowlist again, after you edited `allowlist.txt` by hand, with the entries this HardCode provides; says what changed. |
@@ -219,6 +223,7 @@ Queries print their own objects:
 | `languages` | `{"languages": [languages], "rebuildNeeded": bool}` |
 | `extensions` | `{"extensions": [extensions], "refused": [ids], "status": {"state", "total", "installed", "pending": [ids], "refused": [ids], "failed": [ids], "updated"}}` (`status` is what the running VS Code container's extension sync last wrote; `null` when it isn't running) |
 | `allowlist` | `{"allowlist": [entries]}`, the same list `show` has |
+| `lan` | `{"lan": [pins]}`: each one's `name`, `address`, what it `resolves` to now, and its `state` |
 | `blocked` | `{"blocked": [{"kind": "http"\|"dns", "method", "host", "url", "target", "client", "count"}]}` |
 | `logs` | `{"services": [names], "logs": "…"}`: without colours, and without the service-name prefix when one service is named |
 

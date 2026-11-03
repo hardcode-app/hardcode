@@ -51,6 +51,7 @@ const state = {
   running: null, // the name of the command whose output is streaming to the console
   runningId: null, // its stream id, for the Stop button
   prefill: null, // {entry, flag} handed from Blocked traffic to the allowlist form
+  lanStates: null, // the names on your network as lan:list last looked them up, by name; null until it answers
   adding: null, // {entry, flag}: the allowlist entry being added, shown until the CLI answers
   vscodeUrl: '', // VS Code's URL with its token, once the running VS Code container has told it
   vscodeError: '', // why it couldn't, when it couldn't
@@ -629,6 +630,7 @@ function forgetProfile() {
   forgetVscodeUrl();
   state.status = { services: [], docker: state.status.docker, error: '', extensions: null };
   state.blocked = [];
+  state.lanStates = null;
   state.extensionStatus = null;
   state.extensionStatusAsked = false;
   state.extensionStatusError = '';
@@ -904,6 +906,10 @@ function showView(view) {
 function fetchForView() {
   if (state.view === 'blocked') {
     actions['refresh-blocked']();
+  }
+
+  if (state.view === 'allowlist') {
+    actions['refresh-lan']();
   }
 
   if (state.view === 'extensions') {
@@ -1592,6 +1598,62 @@ function allowlistRows(entries) {
   return html;
 }
 
+/**
+ * A name on your network's state, in words: invalid (the proxy won't start
+ * with it), still checking, ok, or that it now resolves elsewhere.
+ */
+function lanStatus(pin, checked) {
+  if (pin.problem) {
+    return { text: `invalid: ${pin.problem}`, moved: '' };
+  }
+  if (!checked) {
+    return { text: 'checking…', moved: '' };
+  }
+  if (checked.state === 'moved') {
+    return { text: `now resolves to ${checked.resolves.join(', ')}`, moved: checked.resolves[0] };
+  }
+  if (checked.state === 'unresolved') {
+    return { text: "ok (doesn't resolve from here)", moved: '' };
+  }
+  return { text: 'ok', moved: '' };
+}
+
+/**
+ * The On your network card: the names this profile lets reach an address on
+ * your own network, which the proxy refuses otherwise, each with its state.
+ * One that now resolves elsewhere keeps its address, and offers to move.
+ */
+function lanSection() {
+  const pins = state.data.lan || [];
+  const states = state.lanStates || {};
+
+  const rows = pins
+    .map((pin) => {
+      const status = lanStatus(pin, states[pin.name]);
+      const move = status.moved
+        ? `<button class="btn small" data-lan-move="${esc(pin.name)}" data-address="${esc(status.moved)}">Move to ${esc(status.moved)}…</button> `
+        : '';
+      const attention = pin.problem || status.moved ? ' style="color:var(--danger)"' : '';
+
+      return `<tr>
+      <td class="entry mono">${esc(pin.name)}</td>
+      <td class="mono">${esc(pin.address)}</td>
+      <td class="small"${attention}>${esc(status.text)}</td>
+      <td class="actions">${move}<button class="btn ghost small icon" data-lan-remove="${esc(pin.name)}" title="Stop letting it reach your network">✕</button></td></tr>`;
+    })
+    .join('');
+
+  const empty = 'Nothing. When you add a name that points inside your own network, HardCode asks whether to let it reach that address.';
+
+  return `
+    <div class="card" id="lan-card" style="margin-bottom:14px">
+      <h2>On your network</h2>
+      <p class="muted small" style="margin-top:0">The proxy refuses names that point inside your own network. A name listed here may reach the address shown, and nothing else on your network.</p>
+      <table><thead><tr><th>Name</th><th>Address</th><th>State</th><th></th></tr></thead>
+      <tbody>${rows || `<tr><td colspan="4" class="empty">${esc(empty)}</td></tr>`}</tbody></table>
+    </div>`;
+}
+
 /** The Allowlist view: the search, the filters, the form, and every entry by section. */
 function allowlist() {
   const data = state.data;
@@ -1630,6 +1692,7 @@ function allowlist() {
       <div class="form-error" id="al-error"></div>
       <p class="muted small" style="margin:0">Read-only still lets git clone, fetch and pull. A path such as <code>github.com/myuser</code> allows only that namespace. The entries HardCode provides (every profile's, and those of the languages and tools that are on) can be switched off but not deleted: one switched off stays off through updates, and one an update adds arrives switched on. Every change is written to <code>profiles/${esc(data.profile)}/allowlist.txt</code> and applied to the running proxy at once; with the sandbox stopped it applies at the next start. <b>Reload</b> is for edits you made to the file by hand.</p>
     </div>
+    ${lanSection()}
     <div class="card" style="padding:0">
       <table><thead><tr><th></th><th>Entry</th><th>Type / access</th><th>Note</th><th></th></tr></thead><tbody>${rows || '<tr><td colspan="5" class="empty">No entries match.</td></tr>'}</tbody></table>
     </div>`;
@@ -1637,27 +1700,42 @@ function allowlist() {
 
 // -- Blocked traffic, port forwards, mounts ----------------------------------------
 
-/** The Blocked traffic view: what the proxy and the DNS filter refused, and buttons to allow it. */
+// Why the proxy refused, when it said, as Blocked traffic shows it.
+const REFUSED_BECAUSE = { 'internal-address': 'resolves to an internal address' };
+
+/**
+ * A Blocked traffic row's buttons. A name refused for pointing inside your
+ * network gets "Allow on your network", since an entry wouldn't let it
+ * through; the rest "Allow host", and "Allow URL" when the URL says more.
+ */
+function blockedActions(target, index) {
+  if (target.reason === 'internal-address') {
+    return `<button class="btn small" data-allow-lan="${esc(index)}">Allow on your network</button>`;
+  }
+
+  const allowUrl =
+    target.url && target.url !== `https://${target.host}/`
+      ? `<button class="btn small" data-allow-url="${esc(index)}">Allow URL</button>`
+      : '';
+
+  // A space between the buttons, as between any two inline ones.
+  return `<button class="btn small" data-allow-host="${esc(index)}">Allow host</button>${allowUrl ? ` ${allowUrl}` : ''}`;
+}
+
+/** The Blocked traffic view: what the proxy and the DNS filter refused, why when it said, and buttons to allow it. */
 function blocked() {
   const rows = state.blocked
     .map((target, index) => {
       const what = target.kind === 'dns' ? `DNS ${target.method}` : target.method;
-
-      // "Allow URL" only when the URL says more than the host does.
-      const allowUrl =
-        target.url && target.url !== `https://${target.host}/`
-          ? `<button class="btn small" data-allow-url="${esc(index)}">Allow URL</button>`
-          : '';
+      const reason = REFUSED_BECAUSE[target.reason];
+      const why = reason ? `<div class="muted small">${esc(reason)}</div>` : '';
 
       return `<tr>
     <td><span class="badge ${target.kind === 'dns' ? 'dns' : ''}">${esc(what)}</span></td>
-    <td class="mono">${esc(target.url || target.target)}</td>
+    <td class="mono">${esc(target.url || target.target)}${why}</td>
     <td>${esc(target.count)}</td>
     <td class="muted small mono">${esc(target.client)}</td>
-    <td class="actions">
-      <button class="btn small" data-allow-host="${esc(index)}">Allow host</button>
-      ${allowUrl}
-    </td></tr>`;
+    <td class="actions">${blockedActions(target, index)}</td></tr>`;
     })
     .join('');
 
@@ -1758,9 +1836,55 @@ function each(selector, handler) {
 }
 
 /** Open the allowlist view with its form filled in. */
-function prefillAllowlist(entry) {
-  state.prefill = { entry, flag: '' };
+function prefillAllowlist(entry, flag = '') {
+  state.prefill = { entry, flag };
   showView('allowlist');
+}
+
+/**
+ * The entry a refused tunnel's "Allow host" fills in: its host, with ssh and
+ * the port for an SSH tunnel (none for 22, the default).
+ */
+function tunnelEntry(target) {
+  if (!target.port) {
+    return { entry: target.host, flag: '' };
+  }
+
+  const entry = target.port === 22 ? target.host : `${target.host}:${target.port}`;
+  return { entry, flag: 'ssh' };
+}
+
+/**
+ * Offer to let each name the last change found on your network reach its
+ * address there (the CLI found them: they resolve inside, and aren't on it
+ * yet), one dialog per name. Nothing happens without a yes.
+ */
+async function offerLan() {
+  const results = (state.data && state.data.lastResults) || [];
+  const offered = new Set();
+
+  for (const result of results) {
+    const found = result.data && result.data.lan;
+    if (!found || found.pinned || offered.has(found.name)) {
+      continue;
+    }
+
+    offered.add(found.name);
+    await lanOffer(found.name, found.address);
+  }
+}
+
+/** Ask whether *name* may reach *address* on your network, and add it if so. */
+async function lanOffer(name, address) {
+  const answer = await call('lan:offer', name, address, state.scope);
+  if (!answer) {
+    return;
+  }
+
+  state.data = answer;
+  render();
+  reportOutcome(ALLOWLIST_OUTCOME);
+  actions['refresh-lan']();
 }
 
 /** The controls every view may have: action buttons, the scope chips, links to other views. */
@@ -1814,6 +1938,20 @@ function bindAllowlist() {
     };
   });
 
+  each('[data-lan-remove]', (button) => {
+    button.onclick = async () => {
+      state.data = await change('lan:remove', button.dataset.lanRemove, state.scope);
+      render();
+      reportOutcome(ALLOWLIST_OUTCOME);
+      actions['refresh-lan']();
+    };
+  });
+
+  // A name that moved keeps its address until someone says otherwise.
+  each('[data-lan-move]', (button) => {
+    button.onclick = () => lanOffer(button.dataset.lanMove, button.dataset.address);
+  });
+
   const entry = $('#al-entry');
   if (entry) {
     entry.onkeydown = (event) => {
@@ -1827,7 +1965,27 @@ function bindAllowlist() {
 /** The Blocked traffic view's "Allow" buttons and its period. */
 function bindBlocked() {
   each('[data-allow-host]', (button) => {
-    button.onclick = () => prefillAllowlist(state.blocked[+button.dataset.allowHost].host);
+    button.onclick = () => {
+      const { entry, flag } = tunnelEntry(state.blocked[+button.dataset.allowHost]);
+      prefillAllowlist(entry, flag);
+    };
+  });
+
+  // The name is looked up again here, so the question names the address it
+  // would reach.
+  each('[data-allow-lan]', (button) => {
+    button.onclick = async () => {
+      const name = state.blocked[+button.dataset.allowLan].host;
+      const found = await call('lan:check', name);
+
+      if (found.pinned) {
+        toast(`${name} is already on your network, at ${found.pinned}`);
+      } else if (found.address) {
+        await lanOffer(name, found.address);
+      } else {
+        toast(`${name} doesn't resolve to an address on your network from here`, 'error');
+      }
+    };
   });
 
   each('[data-allow-url]', (button) => {
@@ -2024,6 +2182,22 @@ const actions = {
     state.adding = null;
     render();
     reportOutcome(ALLOWLIST_OUTCOME);
+    await offerLan();
+  },
+
+  async 'refresh-lan'() {
+    const epoch = state.epoch;
+    const checked = await call('lan:list');
+
+    // Asked for the profile shown before a switch.
+    if (epoch !== state.epoch) {
+      return;
+    }
+
+    state.lanStates = Object.fromEntries(checked.map((item) => [item.name, item]));
+    if (state.view === 'allowlist') {
+      render();
+    }
   },
 
   async 'reload-proxy'() {
@@ -2389,6 +2563,10 @@ function checkView(view, errors) {
     }
   }
 
+  if (view === 'allowlist' && !$('#lan-card')) {
+    errors.push('the Allowlist view has no On your network card');
+  }
+
   if (view === 'extensions') {
     const groups = $('#view').querySelectorAll('.ext-group').length;
     if (!groups || !$('#ext-id')) {
@@ -2453,6 +2631,28 @@ async function checkLanguageChannels(errors) {
     }
   } catch (error) {
     errors.push(`extensions:add ${core.id}: ${errorText(error)}`);
+  }
+}
+
+/**
+ * The names on your network, through the bridge and the CLI for real: the
+ * smoke run's profile has none, so lan:list answers an empty list, and the
+ * Allowlist view says there is nothing there.
+ */
+async function checkLan(errors) {
+  try {
+    const checked = await api.invoke('lan:list');
+    if (!Array.isArray(checked) || checked.length) {
+      errors.push(`lan:list gave ${JSON.stringify(checked)}, with nothing on your network`);
+    }
+  } catch (error) {
+    errors.push(`lan:list: ${errorText(error)}`);
+  }
+
+  showView('allowlist');
+  await sleep(200);
+  if (!$('#lan-card .empty')) {
+    errors.push('the On your network card does not say that nothing is there');
   }
 }
 
@@ -2654,6 +2854,7 @@ async function smoke() {
 
   await checkExtensionStatus(errors);
   await checkLanguageChannels(errors);
+  await checkLan(errors);
   await checkAllowlistAdd(errors);
   await checkNewProfile(errors);
   checkVersion(errors);

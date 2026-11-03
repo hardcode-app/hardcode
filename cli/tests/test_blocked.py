@@ -30,12 +30,12 @@ class BlockedTests(unittest.TestCase):
 
         # DNS refusals aggregate per name: the A and AAAA of one lookup are one row.
         self.assertEqual(
-            [(item.kind, item.method, item.host, item.url, item.count) for item in items],
+            [(item.kind, item.method, item.host, item.port, item.url, item.count) for item in items],
             [
-                ("http", "GET", "github.com", "https://github.com/x/y", 2),
-                ("dns", "A", "exfil.example.com", "", 2),
-                ("http", "CONNECT", "gitlab.com:22", "", 1),
-                ("http", "CONNECT", "example.com", "", 1),
+                ("http", "GET", "github.com", 0, "https://github.com/x/y", 2),
+                ("dns", "A", "exfil.example.com", 0, "", 2),
+                ("http", "CONNECT", "gitlab.com", 22, "", 1),
+                ("http", "CONNECT", "example.com", 0, "", 1),
             ],
         )
         self.assertEqual(items[0].client, "172.31.253.4")
@@ -58,6 +58,26 @@ class BlockedTests(unittest.TestCase):
 
         self.assertEqual(set(items), {"other.test:443", "https://example.com/x"})
         self.assertEqual(items["other.test:443"].method, "CONNECT")
+
+    def test_the_reason_the_proxy_gives_is_kept(self):
+        # squid.conf's format ends with why ("-" for no reason given), and a
+        # target refused for a reason keeps it among later lines without one.
+        log = """\
+1 0 172.31.253.10 TCP_DENIED/200 0 CONNECT gitlab.example.com:22222 - HIER_NONE/- - internal-address
+1 0 172.31.253.10 TCP_DENIED/000 0 CONNECT gitlab.example.com:22222 - HIER_NONE/- - -
+1 0 172.31.253.10 TCP_DENIED/403 3347 GET http://registry.example.com/v2/ - HIER_NONE/- text/html internal-address
+1 0 172.31.253.10 TCP_DENIED/403 3347 GET http://other.example.com/ - HIER_NONE/- text/html -
+"""
+
+        items = {item.target: item for item in blocked.parse(log, "")}
+
+        ssh = items["gitlab.example.com:22222"]
+        self.assertEqual(
+            (ssh.host, ssh.port, ssh.reason, ssh.count), ("gitlab.example.com", 22222, "internal-address", 2)
+        )
+        self.assertEqual(items["http://registry.example.com/v2/"].reason, "internal-address")
+        self.assertEqual(items["http://other.example.com/"].reason, "")
+        self.assertEqual(blocked.REASONS["internal-address"], "resolves to an internal address")
 
 
 if __name__ == "__main__":

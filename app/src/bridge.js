@@ -129,6 +129,7 @@
       env: state.env,
       vscodePort: state.vscodePort,
       allowlist: state.allowlist,
+      lan: state.lan,
       forwards: state.forwards,
       mounts: state.mounts,
       langs: state.langs,
@@ -267,6 +268,39 @@
     async 'allowlist:apply'(scope) {
       const response = await cli(['reload'], scoped(scope));
       return response.results.filter((result) => result.applied).map((result) => result.profile);
+    },
+
+    // -- names on your network: each lets one name reach one address there,
+    //    which the proxy refuses otherwise. Never added without asking.
+
+    // Each name, looked up again: {name, address, problem, resolves, state},
+    // state "ok", "moved" (it resolves only elsewhere now) or "unresolved".
+    async 'lan:list'() {
+      return (await cli(['lan'])).lan;
+    },
+
+    // What a name resolves to from here: {name, resolves, address, pinned},
+    // address being the one on your network it could be let reach.
+    async 'lan:check'(name) {
+      return cli(['lan', 'check', '--', name]);
+    },
+
+    // Ask whether *name* may reach *address*, and add it if so: the new
+    // state, or null when the answer is no.
+    async 'lan:offer'(name, address, scope) {
+      const confirmed = await dialog.ask(
+        `${name} resolves to ${address}, on your network. Let it reach that address? Nothing else on your network opens.`,
+        { title: `Let ${name} reach ${address}?`, kind: 'warning', okLabel: 'Let it reach that address', cancelLabel: 'Not now' },
+      );
+      if (!confirmed) {
+        return null;
+      }
+
+      return withResults(await cli(['lan', 'add', '--', name, address], scoped(scope)));
+    },
+
+    async 'lan:remove'(name, scope) {
+      return withResults(await cli(['lan', 'remove', '--', name], scoped(scope)));
     },
 
     // -- forwards and mounts

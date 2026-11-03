@@ -59,6 +59,17 @@ and CoreDNS the DNS server that answers name lookups.
   ranges). So a name someone allowed from *Blocked traffic* can't reach
   your computer, your local network or a metadata service, even if it
   resolves there.
+- **A name on your network reaches one address, and only that.** A
+  `lan <name> <address>` line is an exception for one exact name: squid
+  resolves that name from its own hosts file, never from DNS, and lets
+  it reach that address. Any other name that points at the address is
+  still refused, and a pin without an entry for its name allows nothing.
+  The address must be inside the internal ranges and can't be loopback,
+  link-local, multicast or `0.0.0.0/8`. HardCode asks before adding one,
+  checks at every start and reload whether the name still resolves
+  there, and never moves a pin by itself. Over `ssh`, a pin is a whole
+  tunnel to that host's port, uninspected, like any `ssh` entry.
+  `tests/proxy.py` checks all of this against the real squid.
 - **DNS can't carry data out.** A name that isn't allowed gets NXDOMAIN
   ("no such name") from CoreDNS and is logged; queries straight to
   outside resolvers have no route.

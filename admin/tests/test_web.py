@@ -1037,6 +1037,100 @@ class WebTests(unittest.TestCase):
         self.assertEqual([user["email"] for user in store.load()[0]], ["a@b.co", "c@d.co"], "the loser reloads")
 
 
+class LanWebTests(unittest.TestCase):
+    """
+    A profile's On your network card: names let reach an address on the
+    network, given with their address, as the admin's pod can't look them
+    up there.
+    """
+
+    def setUp(self):
+        self.k8s = FakeK8s()
+        self.users = Users(MemoryStore())
+        self.users.add(ROOT, ROOT_PASSWORD, must_enrol=False)
+        self.now = [1_700_000_000.0]
+        self.looked_up = {"gitlab.example.com": ["192.168.71.200"], "moved.example.com": ["10.0.0.9"]}
+
+        self.client = self.signed_in({"image": "img:1", "lan": {"enabled": True, "clusterRanges": ["10.244.0.0/16"]}})
+        self.assertEqual(self.client.post("/api/profiles", json={"name": "team-a"}).status_code, 201)
+
+    def signed_in(self, defaults):
+        """
+        A client of an admin with the chart's *defaults*, signed in.
+        """
+        app = create_app(
+            self.k8s,
+            self.users,
+            defaults,
+            cookie_secure="never",
+            template_allowlist=TEMPLATE,
+            clock=lambda: self.now[0],
+            resolve=lambda name: list(self.looked_up.get(name, [])),
+        )
+        app.testing = True
+        client = app.test_client()
+
+        self.now[0] += 30
+        client.post("/api/login", json={"email": ROOT, "password": ROOT_PASSWORD})
+        code = totp.totp(self.users.find(ROOT)["totpSecret"], self.now[0])
+        self.assertEqual(client.post("/api/totp", json={"code": code}).status_code, 200)
+
+        return client
+
+    def lan(self, **body):
+        return self.client.post("/api/profiles/team-a/lan", json=body)
+
+    def card(self):
+        return self.client.get("/api/profiles/team-a").json["lan"]
+
+    def test_add_list_move_and_remove(self):
+        added = self.lan(op="add", name="GitLab.example.com", address="192.168.71.200")
+        self.assertEqual(
+            added.json, {"changed": True, "message": "gitlab.example.com may reach 192.168.71.200 on your network"}
+        )
+
+        self.lan(op="add", name="moved.example.com", address="10.0.0.8")
+        card = self.card()
+        self.assertTrue(card["enabled"])
+        self.assertEqual(
+            [(pin["name"], pin["address"], pin["state"], pin["ignored"]) for pin in card["pins"]],
+            [("gitlab.example.com", "192.168.71.200", "ok", ""), ("moved.example.com", "10.0.0.8", "moved", "")],
+        )
+
+        moved = self.lan(op="add", name="moved.example.com", address="10.0.0.9")
+        self.assertEqual(moved.json["message"], "moved moved.example.com on your network: 10.0.0.8 -> 10.0.0.9")
+
+        removed = self.lan(op="remove", name="gitlab.example.com")
+        self.assertEqual(removed.json["message"], "gitlab.example.com no longer reaches your network")
+        self.assertEqual([pin["name"] for pin in self.card()["pins"]], ["moved.example.com"])
+
+        spec = self.k8s.get(f"{PROFILE_PATH}/team-a")["spec"]
+        self.assertIn("lan moved.example.com 10.0.0.9", spec["allowlist"])
+
+    def test_refused_like_the_proxy_and_the_operator_would(self):
+        for body, why in (
+            ({"op": "add", "name": "metadata.example.com", "address": "169.254.169.254"}, "can't be pinned"),
+            ({"op": "add", "name": "public.example.com", "address": "8.8.8.8"}, "isn't on your network"),
+            ({"op": "add", "name": ".example.com", "address": "10.0.0.1"}, "only an exact name"),
+            ({"op": "add", "name": "pods.example.com", "address": "10.244.0.7"}, "pod or service ranges"),
+            ({"op": "pin", "name": "x.example.com", "address": "10.0.0.1"}, "op must be add or remove"),
+            ({"op": "add", "address": "10.0.0.1"}, "name is required"),
+        ):
+            response = self.lan(**body)
+            self.assertEqual(response.status_code, 400, body)
+            self.assertIn(why, response.json["error"], body)
+
+        self.assertEqual(self.card()["pins"], [])
+
+    def test_the_card_says_when_the_cluster_ignores_pins(self):
+        self.lan(op="add", name="gitlab.example.com", address="192.168.71.200")
+
+        card = self.signed_in({"image": "img:1"}).get("/api/profiles/team-a").json["lan"]
+
+        self.assertFalse(card["enabled"])
+        self.assertEqual(card["pins"][0]["ignored"], manifests.LAN_OFF)
+
+
 class ExtensionStatusTests(unittest.TestCase):
     """
     How far a VS Code container has got with its extensions, read from the

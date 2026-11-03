@@ -10,16 +10,18 @@ from contextlib import redirect_stdout
 from unittest import mock
 
 import hardcode_cli
-from hardcode_cli import cli, envfile, langs, profiles
+from hardcode_cli import allowlist, cli, envfile, langs, profiles
 
 from .helpers import FakeRunner, HomeTestCase, updated_catalogue
+from .resolver import FakeResolver
 
 NOT_RUNNING = "(profile 'default' isn't running; applies when it starts)"
 
 
-class CliTests(HomeTestCase):
+class CliTestCase(HomeTestCase):
     """
-    The command line end to end, with docker compose faked.
+    A home with a default profile, and the command line run in it with
+    docker compose and name lookups faked.
     """
 
     def setUp(self):
@@ -28,6 +30,11 @@ class CliTests(HomeTestCase):
         # A default profile with every language and tool on, as most tests
         # here want one; the first-run tests use a home of their own.
         profiles.create(self.root, "default", languages=list(langs.LANGS))
+
+        # Name lookups: a GitLab on your network, and nothing else resolves;
+        # and the questions the command asked.
+        self.resolver = FakeResolver({"gitlab.example.com": ["192.168.71.200"]})
+        self.asked = []
 
     def run_cli(self, *argv, running=False, runner=None, config=None, answers=None):
         """
@@ -46,13 +53,20 @@ class CliTests(HomeTestCase):
             out=out.append,
             err=err.append,
             sleep=lambda _: None,
-            ask=lambda question: replies.pop(0),
+            ask=lambda question: self.asked.append(question) or replies.pop(0),
             terminal=answers is not None,
+            resolve=self.resolver,
         )
         return code, "\n".join(out), "\n".join(err)
 
     def allowlist_of(self, profile):
         return profiles.get(self.root, profile).allowlist_file.read_text(encoding="utf-8")
+
+
+class CliTests(CliTestCase):
+    """
+    The command line end to end, with docker compose faked.
+    """
 
     # -- general ---------------------------------------------------------------
 
@@ -700,6 +714,106 @@ class CliTests(HomeTestCase):
         runner.fail_on.add("ps -a")
         _, out, _ = self.run_cli("--json", "ps", runner=runner)
         self.assertIn("simulated failure", json.loads(out)["error"])
+
+
+class LanCliTests(CliTestCase):
+    """
+    Names on your network, from the command line: asked about on a terminal,
+    said without one, and listed, added, moved and removed with lan.
+    """
+
+    QUESTION = "gitlab.example.com resolves to 192.168.71.200, on your network. Let it reach that address? [y/N] "
+
+    def pins_of(self, profile="default"):
+        return [(pin.name, pin.address) for pin in allowlist.pins(self.allowlist_of(profile))]
+
+    def test_allow_asks_on_a_terminal(self):
+        code, out, _ = self.run_cli("allow", "gitlab.example.com:22222", "ssh", answers=["y"])
+
+        self.assertEqual((code, self.asked), (0, [self.QUESTION]))
+        self.assertIn("gitlab.example.com may reach 192.168.71.200 on your network", out)
+        self.assertEqual(self.pins_of(), [("gitlab.example.com", "192.168.71.200")])
+
+    def test_a_no_adds_the_entry_and_says_how_to_pin(self):
+        code, out, _ = self.run_cli("allow", "gitlab.example.com", answers=["n"])
+
+        self.assertEqual(code, 0)
+        self.assertIn("allowed gitlab.example.com", out)
+        self.assertIn("hardcode lan add gitlab.example.com 192.168.71.200", out)
+        self.assertEqual(self.pins_of(), [])
+
+    def test_lan_says_yes_without_asking(self):
+        code, out, _ = self.run_cli("allow", "gitlab.example.com", "--lan", answers=[])
+
+        self.assertEqual((code, self.asked), (0, []))
+        self.assertEqual(self.pins_of(), [("gitlab.example.com", "192.168.71.200")])
+
+    def test_without_a_terminal_json_says_what_the_app_should_ask(self):
+        code, out, _ = self.run_cli("--json", "allow", "gitlab.example.com/group")
+
+        result = json.loads(out)["results"][0]
+        self.assertEqual(code, 0)
+        self.assertEqual(
+            result["data"]["lan"], {"name": "gitlab.example.com", "address": "192.168.71.200", "pinned": False}
+        )
+        self.assertEqual(self.pins_of(), [])
+
+    def test_lan_add_list_check_and_remove(self):
+        self.run_cli("allow", "gitlab.example.com:22222", "ssh")
+
+        code, out, _ = self.run_cli("lan", "add", "gitlab.example.com:22222")
+        self.assertEqual(code, 0)
+        self.assertIn("gitlab.example.com may reach 192.168.71.200 on your network", out)
+
+        code, out, _ = self.run_cli("--json", "lan")
+        listed = json.loads(out)["lan"]
+        self.assertEqual(
+            [(item["name"], item["address"], item["state"]) for item in listed],
+            [("gitlab.example.com", "192.168.71.200", "ok")],
+        )
+
+        code, out, _ = self.run_cli("lan")
+        self.assertIn("gitlab.example.com", out)
+        self.assertIn("192.168.71.200", out)
+
+        code, out, _ = self.run_cli("--json", "lan", "check", "gitlab.example.com")
+        self.assertEqual(json.loads(out)["pinned"], "192.168.71.200")
+
+        code, out, _ = self.run_cli("--json", "allowlist")
+        self.assertEqual([pin["name"] for pin in json.loads(out)["lan"]], ["gitlab.example.com"])
+        code, out, _ = self.run_cli("allowlist")
+        self.assertIn("On your network", out)
+
+        code, out, _ = self.run_cli("lan", "remove", "gitlab.example.com")
+        self.assertEqual(code, 0)
+        self.assertIn("gitlab.example.com no longer reaches your network", out)
+        self.assertEqual(self.pins_of(), [])
+
+    def test_lan_add_takes_an_address_and_refuses_bad_ones(self):
+        code, _, _ = self.run_cli("lan", "add", "registry.example.com", "fd00::10")
+        self.assertEqual(code, 0)
+        self.assertEqual(self.pins_of(), [("registry.example.com", "fd00::10")])
+
+        code, _, err = self.run_cli("lan", "add", "metadata.example.com", "169.254.169.254")
+        self.assertEqual(code, 1)
+        self.assertIn("can't be pinned", err)
+
+        code, _, err = self.run_cli("lan", "add", "nowhere.example.com")
+        self.assertEqual(code, 1)
+        self.assertIn("doesn't resolve to an address on your network from here", err)
+
+        code, _, err = self.run_cli("lan", "remove", "registry.example.com", "fd00::10")
+        self.assertEqual(code, 1)
+        self.assertIn("only lan add takes an address", err)
+
+    def test_a_start_warns_about_a_name_that_moved_and_keeps_its_pin(self):
+        self.run_cli("lan", "add", "gitlab.example.com", "192.168.71.199")
+
+        code, _, err = self.run_cli("up")
+
+        self.assertEqual(code, 0)
+        self.assertIn("on your network: gitlab.example.com now resolves to 192.168.71.200, not 192.168.71.199", err)
+        self.assertEqual(self.pins_of(), [("gitlab.example.com", "192.168.71.199")])
 
 
 if __name__ == "__main__":

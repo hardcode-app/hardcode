@@ -9,10 +9,13 @@ are made (``render``), so an entry a newer HardCode adds to a block reaches
 every profile switched on, and one it drops leaves.
 
 The profile's ``allowlist.txt`` holds what was decided for it: its own
-entries (under Custom; one commented out is switched off), and an ``off
+entries (under Custom; one commented out is switched off), an ``off
 <entry>`` line for each provided entry it switches off, which stays off
-through updates and language switches. ``effective`` lists both together,
-as the CLI, the app and the admin show them.
+through updates and language switches, and a ``lan <name> <address>`` line
+for each name it lets reach an address on your network (under On your
+network; ``hardcode_cli.lan`` has the rules for the address). ``effective``
+lists the entries, as the CLI, the app and the admin show them, and ``pins``
+the names on your network.
 
 An entry's rules are the same as in ``images/squid/allowlist-render.sh``,
 which turns the rendered file into Squid and CoreDNS rules;
@@ -27,16 +30,24 @@ import re
 from dataclasses import asdict, dataclass, replace
 from typing import Iterable, Optional
 
-from . import langs
+from . import lan, langs
 
 CUSTOM_HEADER = "# --- Custom ----------------------------------------------------------------"
 CUSTOM_NOTE = "# Entries added by `hardcode allow` or the HardCode app land here."
 OFF_HEADER = "# --- Switched off ----------------------------------------------------------"
 OFF_NOTE = '# Entries HardCode provides that this profile doesn\'t allow, one "off <entry>" each.'
+LAN_HEADER = "# --- On your network -------------------------------------------------------"
+LAN_NOTE = '# Names that may reach an address on your network, one "lan <name> <address>" each.'
 FLAGS = ("", "rw", "ssh")
+
+# The note under each section header, written when the section is added.
+NOTES = {CUSTOM_HEADER: CUSTOM_NOTE, OFF_HEADER: OFF_NOTE, LAN_HEADER: LAN_NOTE}
 
 # The word that starts a line switching a provided entry off.
 OFF = "off"
+
+# The word that starts a line pinning a name to an address on your network.
+LAN = "lan"
 
 # One DNS label: letters, digits and inner hyphens. A host is two or more.
 _LABEL = r"[a-z0-9]([a-z0-9-]*[a-z0-9])?"
@@ -73,6 +84,8 @@ class Entry:
     above it (both filled in by ``parse``); ``invalid`` marks an active line
     the proxy would refuse to start with, and ``off_line`` an ``off <entry>``
     line, which switches a provided entry off rather than allowing anything.
+    ``lan_line`` marks a ``lan <name> <address>`` line, a pin: ``entry`` is
+    the name and ``address`` the address, and it allows nothing by itself.
 
     In a full list (``effective``), ``source`` says where the entry comes
     from (a block's key, or ``custom``), ``provided`` whether HardCode
@@ -91,6 +104,8 @@ class Entry:
     off_line: bool = False
     source: str = ""
     provided: bool = False
+    lan_line: bool = False
+    address: str = ""
 
     @property
     def kind(self) -> str:
@@ -194,6 +209,45 @@ def _numeric_tld(host: str) -> bool:
     return host.rsplit(".", 1)[-1].isdigit()
 
 
+def pin_problem(name: str, address: str, ranges: Optional[Iterable[str]] = None) -> Optional[str]:
+    """
+    Why *name* can't be pinned to *address* (a ``lan`` line) in a profile
+    with the internal *ranges* (the default ones when ``None``); ``None``
+    when it can.
+
+    A pin is an exact name: no wildcard, path or port, and never an address.
+    """
+    name = name.strip().lower()
+
+    if not name:
+        return "name a host to let reach your network"
+    if name.startswith(".") or "/" in name or ":" in name:
+        return f"'{name}': only an exact name can reach your network, without a wildcard, path or port"
+    if not _HOST.match(name) or _numeric_tld(name):
+        return f"'{name}' is not a valid hostname"
+    if not address.strip():
+        return f"give its address too: {LAN} {name} <address>"
+
+    return lan.address_problem(address, ranges)
+
+
+def pin_name(entry: str, flag: str = "") -> Optional[str]:
+    """
+    The name an allowlist entry would be pinned by: its host, without a path
+    or a port. ``None`` for a ``.wildcard`` (a pin is one exact name), for
+    ``github:OWNER/REPO``, and for an entry that isn't valid.
+    """
+    entry = entry.strip().lower()
+    if entry.startswith("github:") or entry.startswith("."):
+        return None
+
+    host = entry.partition(":")[0] if flag == "ssh" else canonical(entry).partition("/")[0]
+    if not _HOST.match(host) or _numeric_tld(host):
+        return None
+
+    return host
+
+
 def kind_of(entry: str, flag: str = "") -> str:
     """
     Classify an entry for display: ``ssh``, ``subdomains``, ``path`` or ``host``.
@@ -214,7 +268,9 @@ def parse_line(line: str) -> Optional[Entry]:
 
     A commented-out line counts as a disabled entry only if what follows the
     ``#`` is a valid entry; anything else is just a comment. ``off <entry>
-    [ssh]`` is an ``off_line``.
+    [ssh]`` is an ``off_line``, and ``lan <name> <address>`` a ``lan_line``,
+    checked against the default internal ranges (``pins`` checks them
+    against a profile's own).
     """
     body = line.lstrip()
 
@@ -240,6 +296,15 @@ def parse_line(line: str) -> Optional[Entry]:
         invalid = len(parts) > 3 or flag not in ("", "ssh") or validate(entry, flag) is not None
 
         return Entry(entry=entry, flag=flag, comment=comment, invalid=invalid, off_line=True)
+
+    # "lan <name> <address>": a name let reach an address on your network.
+    # Commented out, it is just a comment too.
+    if parts[0] == LAN and enabled and len(parts) > 1:
+        name = parts[1].lower()
+        address = parts[2].lower() if len(parts) > 2 else ""
+        invalid = len(parts) != 3 or pin_problem(name, address) is not None
+
+        return Entry(entry=name, address=address, comment=comment, invalid=invalid, lan_line=True)
 
     entry = parts[0].lower()
     flag = parts[1] if len(parts) > 1 else ""
@@ -306,10 +371,10 @@ def _matches(item: Entry, entry: str, ssh: Optional[bool]) -> bool:
 def find(text: str, entry: str, ssh: Optional[bool] = None) -> list[Entry]:
     """
     The profile's own lines, enabled or not, that hold *entry* (its ``off``
-    lines aren't among them); *ssh* picks the SSH or the HTTPS kind, and
-    ``None`` finds both.
+    and ``lan`` lines aren't among them); *ssh* picks the SSH or the HTTPS
+    kind, and ``None`` finds both.
     """
-    return [item for item in parse(text) if not item.off_line and _matches(item, entry, ssh)]
+    return [item for item in parse(text) if not (item.off_line or item.lan_line) and _matches(item, entry, ssh)]
 
 
 def off_lines(text: str, entry: str, ssh: bool = False) -> list[Entry]:
@@ -342,8 +407,7 @@ def _section_end(lines: list[str], header: str) -> int:
     if header not in lines:
         if lines and lines[-1] != "":
             lines.append("")
-        note = CUSTOM_NOTE if header == CUSTOM_HEADER else OFF_NOTE
-        lines.extend([header, note])
+        lines.extend([header, NOTES[header]])
         return len(lines)
 
     start = lines.index(header)
@@ -499,7 +563,7 @@ def effective(text: str, enabled: Iterable[str]) -> list[Entry]:
     The profile's own come first, so that the app, the admin and ``hardcode
     allowlist`` show one just added at the top rather than below every block.
     An ``off`` line the proxy couldn't make sense of is listed with them, as
-    invalid.
+    invalid. The ``lan`` lines aren't entries: ``pins`` lists them.
     """
     lines = parse(text)
     switched_off = {_key(item) for item in lines if item.off_line and not item.invalid}
@@ -507,7 +571,7 @@ def effective(text: str, enabled: Iterable[str]) -> list[Entry]:
     entries = []
 
     for item in lines:
-        if item.off_line and not item.invalid:
+        if (item.off_line and not item.invalid) or item.lan_line:
             continue
         entries.append(replace(item, source=CUSTOM))
 
@@ -546,7 +610,7 @@ def render(text: str, enabled: Iterable[str]) -> str:
     """
     The file the proxy is given: the provided entries block by block, those
     switched off commented out, then the profile's own lines from *text*,
-    under Custom.
+    under Custom, and its ``lan`` lines under On your network.
 
     An entry with the same access already written above isn't written
     again. A line of the profile's the proxy can't make sense of is passed
@@ -579,7 +643,7 @@ def render(text: str, enabled: Iterable[str]) -> str:
     source = _lines(text)
 
     for item in parse(text):
-        if item.off_line and not item.invalid:
+        if (item.off_line and not item.invalid) or item.lan_line:
             continue
 
         active = item.enabled and not item.invalid
@@ -590,19 +654,29 @@ def render(text: str, enabled: Iterable[str]) -> str:
 
         lines.append(source[item.line])
 
+    pinned = [source[item.line] for item in parse(text) if item.lan_line]
+    if pinned:
+        lines += ["", heading("On your network"), *pinned]
+
     return _join(lines)
 
 
 def _allowed(rendered: str) -> list[tuple[str, str]]:
     """
-    Every entry a rendered file allows, with its section: ``(section, entry
-    as written)``, in order.
+    Every entry a rendered file allows, and every name it lets reach your
+    network, with its section: ``(section, entry or pin as written)``, in
+    order.
     """
-    return [
-        (item.section, format_entry(item.entry, item.flag))
-        for item in parse(rendered)
-        if item.enabled and not item.invalid and not item.off_line
-    ]
+    allowed = []
+
+    for item in parse(rendered):
+        if not item.enabled or item.invalid or item.off_line:
+            continue
+
+        shown = f"{LAN} {item.entry} {item.address}" if item.lan_line else format_entry(item.entry, item.flag)
+        allowed.append((item.section, shown))
+
+    return allowed
 
 
 def changes(before: str, after: str) -> list[str]:
@@ -798,3 +872,147 @@ def delete(text: str, entry: str, ssh: bool, enabled: Iterable[str]) -> tuple[st
 
     still = f"; it still comes with {offered[0].section}" if offered else ""
     return after, f"removed {shown}{still}"
+
+
+# -- names on your network -----------------------------------------------------
+
+
+@dataclass(frozen=True)
+class Pin:
+    """
+    A name the profile lets reach an address on your network: a ``lan
+    <name> <address>`` line of its allowlist, at index ``line``.
+
+    ``problem`` says why the proxy would refuse to start with it (``""``
+    when it wouldn't). A pin allows nothing by itself: the name's allowlist
+    entries still say what it may do.
+    """
+
+    name: str
+    address: str
+    line: int
+    comment: str = ""
+    problem: str = ""
+
+    def as_dict(self) -> dict:
+        return asdict(self)
+
+
+def pins(text: str, ranges: Optional[Iterable[str]] = None) -> list[Pin]:
+    """
+    Every ``lan`` line of *text*, checked against the internal *ranges* of
+    the profile (the default ones when ``None``). A name pinned a second
+    time is a problem, as it is for the proxy.
+    """
+    ranges = None if ranges is None else list(ranges)
+    found: list[Pin] = []
+    seen: set[str] = set()
+
+    for item in parse(text):
+        if not item.lan_line:
+            continue
+
+        problem = pin_problem(item.entry, item.address, ranges) or ""
+        if item.invalid and not problem:
+            problem = f"write it as: {LAN} <name> <address>"
+        if not problem and item.entry in seen:
+            problem = f"{item.entry} is already on your network, on another line"
+
+        seen.add(item.entry)
+        found.append(Pin(item.entry, item.address, item.line, item.comment, problem))
+
+    return found
+
+
+def add_pin(text: str, name: str, address: str, ranges: Optional[Iterable[str]] = None) -> tuple[str, str]:
+    """
+    Let *name* reach *address* on your network, in a profile with the
+    internal *ranges*: the new text, and what to say about it.
+
+    A name already pinned elsewhere is moved, in place, since a name is
+    pinned to one address; the section is added at the end of the file
+    when it is missing.
+    """
+    name = name.strip().lower()
+
+    problem = pin_problem(name, address, ranges)
+    if problem:
+        raise AllowlistError(problem)
+
+    address = lan.canonical_address(address)
+    line = f"{LAN} {name} {address}"
+    lines = _lines(text)
+
+    existing = [pin for pin in pins(text, ranges) if pin.name == name]
+    if existing and existing[0].address == address and len(existing) == 1:
+        return text, f"{name} already reaches {address} on your network"
+
+    if existing:
+        # The first line takes the new address; any other goes.
+        lines[existing[0].line] = line
+        for pin in reversed(existing[1:]):
+            del lines[pin.line]
+        return _join(lines), f"moved {name} on your network: {existing[0].address} -> {address}"
+
+    at = _section_end(lines, LAN_HEADER)
+    lines.insert(at, line)
+
+    return _join(lines), f"{name} may reach {address} on your network"
+
+
+def remove_pin(text: str, name: str) -> tuple[str, str]:
+    """
+    Stop letting *name* reach your network: its ``lan`` lines go. The new
+    text, and what to say about it.
+    """
+    name = name.strip().lower()
+    found = [item for item in parse(text) if item.lan_line and item.entry == name]
+    if not found:
+        return text, f"{name} is not on your network"
+
+    # From the bottom up, so the line numbers still to come stay valid.
+    for item in sorted(found, key=lambda item: item.line, reverse=True):
+        text = remove(text, item.line)
+
+    return text, f"{name} no longer reaches your network"
+
+
+def ignore_pins(text: str, reasons: dict[str, str]) -> str:
+    """
+    *text* with the ``lan`` lines of the names in *reasons* commented out,
+    each saying why, so that the proxy doesn't get them (on a cluster that
+    doesn't take pins, or for a pin it refuses).
+    """
+    lines = _lines(text)
+
+    for item in parse(text):
+        if item.lan_line and item.entry in reasons:
+            lines[item.line] = f"#{lines[item.line]}  # ignored: {reasons[item.entry]}"
+
+    return _join(lines)
+
+
+def entry_ports(entries: Iterable[Entry], name: str) -> list[int]:
+    """
+    The ports the enabled, valid *entries* let *name* use, in order: an SSH
+    entry's own port, and 80 and 443 for a host or path entry for it or a
+    ``.wildcard`` above it. None when no entry lets it through, in which
+    case a pin of it allows nothing.
+    """
+    ports: set[int] = set()
+
+    for item in entries:
+        if not item.enabled or item.invalid or item.off_line or item.lan_line:
+            continue
+
+        if item.flag == "ssh":
+            host, _, port = item.entry.partition(":")
+            if host == name:
+                ports.add(int(port or 22))
+            continue
+
+        host = item.entry.partition("/")[0]
+        if host == name or (host.startswith(".") and (name == host[1:] or name.endswith(host))):
+            ports.update((80, 443))
+
+    return sorted(ports)

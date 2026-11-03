@@ -148,6 +148,11 @@ your own, a delete button; the form at the top adds one
 - Two admins editing the same profile at once can't lose each other's
   edits: every single-entry write names the version it read, and one that
   lost the race is applied again on top of the newer text.
+- **On your network** lists the names that may reach an address on the
+  network, with a form for a name and its address. A row marked *now
+  resolves to …* has **Move…**, and **✕** removes one. The chart decides
+  whether these are used at all; while it doesn't, the card says so
+  ([Kubernetes](kubernetes.md)).
 
 **Edit as text…** opens `spec.allowlist` (the profile's own entries and
 its `off` lines; the provided entries aren't in it) for bigger edits. It
@@ -169,6 +174,8 @@ to 24 hours, read from their logs and counted by target. **Allow host**
 and **Allow URL** fill in the Allowlist tab's form with the name: it came
 from the sandbox's own traffic, so it gets a look before it is allowed
 ([what to ask](staying-safe.md#read-blocked-traffic-before-you-allow-anything)).
+A row that says *resolves to an internal address* points inside the
+network; **Allow on your network** fills in the On your network form.
 
 #### Access
 

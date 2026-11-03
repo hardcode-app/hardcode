@@ -29,6 +29,7 @@ SQUID_LOG = """\
 1759900004.000    0 172.31.253.10 TCP_DENIED/403 0 CONNECT registry.npmjs.org:443 - HIER_NONE/- -
 1759900005.000    0 172.31.253.10 TCP_DENIED/403 0 CONNECT registry.npmjs.org:443 - HIER_NONE/- -
 1759900006.000    0 172.31.253.12 TCP_DENIED/403 3942 PUT https://github.com/ourcompany/app.git/git-receive-pack - HIER_NONE/- text/html
+1759900007.000    0 172.31.253.10 TCP_DENIED/403 3942 GET https://nas.ourcompany.example/ - HIER_NONE/- text/html internal-address
 """
 
 DNS_LOG = """\
@@ -41,6 +42,8 @@ DEFAULTS = {
     "image": "ghcr.io/ourcompany/hardcode-vscode:1.4.0",
     "ingressClassName": "nginx",
     "ingressTLSSecret": "wildcard-code-tls",
+    # The cluster takes names on your network, as the chart can say.
+    "lan": {"enabled": True, "clusterRanges": []},
 }
 
 TOKEN = "k3Zb7Qp1xJ9vL2mN8rT4wY6aC0eF5gH"
@@ -133,6 +136,10 @@ def main(stage: Path) -> None:
     text = allowlist.add(template, "github.com/ourcompany", "rw")
     text = allowlist.add(text, "ssh.github.com:443", "ssh")
     text = allowlist.add(text, "docs.ourcompany.example")
+
+    # A GitLab on the company's own network, with its address approved.
+    text = allowlist.add(text, "gitlab.ourcompany.example:22222", "ssh")
+    text, _ = allowlist.add_pin(text, "gitlab.ourcompany.example", "192.168.71.200")
     text = allowlist.switch_off(text, ".pkg.dev")
     text = allowlist.switch_off(text, "repo.yarnpkg.com")
 
@@ -157,6 +164,7 @@ def main(stage: Path) -> None:
         "image": {"built": True, "languages": chosen},
         "rebuildNeeded": False,
         "blocked": blocked_items,
+        "lan": [pin.as_dict() for pin in allowlist.pins(text)],
     }
     (stage / "app").mkdir(parents=True, exist_ok=True)
     (stage / "app" / "fixture-data.json").write_text(json.dumps(app_data), encoding="utf-8")
@@ -216,6 +224,10 @@ def main(stage: Path) -> None:
         "spec": {**team_a["spec"], "effective": effective},
         "status": team_a["status"],
         "allowlist": allowlist.as_dicts(allowlist.effective(effective["allowlist"], effective["languages"])),
+        "lan": {
+            "enabled": effective["lan"]["enabled"],
+            "pins": [{**pin, "resolves": [pin["address"]], "state": "ok"} for pin in effective["lan"]["pins"]],
+        },
         "access": {
             "token": TOKEN,
             "url": f"https://team-a.code.example.com/?tkn={TOKEN}",

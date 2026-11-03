@@ -11,16 +11,23 @@ where the request really ended up.
                            certificate from the suite's test CA
     proxy_origin.py bad    TLS on 443 with a self-signed certificate
                            that nobody vouches for
+    proxy_origin.py NAME   the first, saying which origin it is: every
+                           reply ends "from NAME", and port 22 greets
+                           like an SSH server, "SSH-2.0-NAME"
 
 The certificates are made by the suite and mounted at /tls.
 """
 
 import posixpath
+import socket
 import ssl
 import sys
 import threading
 import urllib.parse
 from http.server import BaseHTTPRequestHandler, HTTPServer
+
+# Which origin this is, when the suite runs more than one: said in every reply.
+NAME = ""
 
 
 class EchoPath(BaseHTTPRequestHandler):
@@ -33,7 +40,7 @@ class EchoPath(BaseHTTPRequestHandler):
         decoded = urllib.parse.unquote(path_only).replace("\\", "/")
         resolved = posixpath.normpath(decoded)
 
-        body = f"{self.command} {resolved}".encode()
+        body = f"{self.command} {resolved}{f' from {NAME}' if NAME else ''}".encode()
         self.send_response(200)
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
@@ -63,10 +70,29 @@ def serve(port: int, certificate: str = "", key: str = "") -> None:
     server.serve_forever()
 
 
+def greet(port: int) -> None:
+    """
+    Greet every connection on *port* the way an SSH server does, with its
+    version line, which names this origin; then close it.
+    """
+    server = socket.create_server(("0.0.0.0", port))
+
+    while True:
+        connection, _ = server.accept()
+        with connection:
+            connection.sendall(f"SSH-2.0-{NAME}\r\n".encode())
+
+
 def main() -> None:
+    global NAME
+
     if sys.argv[1:] == ["bad"]:
         serve(443, "/tls/bad.pem", "/tls/bad.key")
         return
+
+    if sys.argv[1:]:
+        NAME = sys.argv[1]
+        threading.Thread(target=greet, args=(22,), daemon=True).start()
 
     tls = threading.Thread(target=serve, args=(443, "/tls/origin.pem", "/tls/origin.key"), daemon=True)
     tls.start()

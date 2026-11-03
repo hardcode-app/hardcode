@@ -105,7 +105,10 @@ says what to do about them.
   public repository there, and, with your credentials, write to any
   repository you can.
 - **`rw` only where you must upload**: the one repository you push to
-  (`github.com/your-org/app rw`), an API that you call with `POST`.
+  (`github:your-org/app rw`), an API that you call with `POST`.
+- **Add only your own servers to On your network**, and only the ones
+  the sandbox needs. Each one lets the sandbox reach a machine on your
+  network.
 - **Be careful with `.example.com` entries** (a host and all its
   subdomains) on services where anyone can have a subdomain, such as
   hosting and "pages" services: one such entry opens every one of their

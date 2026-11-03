@@ -38,3 +38,36 @@ bad	example-.com
 bad	exa_mple.com
 bad	example..com
 bad	example.com:443
+# Names let reach an address on your network: lan <name> <address>, checked
+# against the default internal ranges.
+ok	lan gitlab.example.com 192.168.71.200
+ok	lan git.example.com 10.1.2.3
+ok	lan registry.example.com fd00::10
+ok	lan mirror.example.com fd00:0:0:0:0:0:0:10
+ok	lan GitLab.Example.com 172.16.0.1   # a comment
+bad	lan .example.com 192.168.71.200
+bad	lan example.com/path 192.168.71.200
+bad	lan example.com:22 192.168.71.200
+bad	lan 192.168.71.200 192.168.71.200
+bad	lan example.com 8.8.8.8
+bad	lan example.com 2001:db8::1
+bad	lan example.com 127.0.0.1
+bad	lan example.com ::1
+bad	lan example.com 169.254.169.254
+bad	lan example.com fe80::1
+bad	lan example.com 0.0.0.0
+bad	lan example.com 0.1.2.3
+bad	lan example.com ::
+bad	lan example.com ::ffff:c0a8:101
+bad	lan example.com ::ffff:192.168.1.1
+bad	lan example.com 192.168.01.1
+bad	lan example.com 192.168.1.256
+bad	lan example.com 192.168.1.0/24
+bad	lan example.com fd00::10%eth0
+bad	lan example.com fd00:::10
+bad	lan example.com fd00::1::2
+bad	lan example.com 1:2:3:4:5:6:7:8:9
+bad	lan example.com not-an-address
+bad	lan example.com
+bad	lan example.com 192.168.71.200 extra
+bad	lan

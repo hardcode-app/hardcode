@@ -17,7 +17,7 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Callable, Optional
 
-from . import allowlist, blocked, bounded, envfile, langs, override, profiles, stack
+from . import allowlist, blocked, bounded, envfile, lan, langs, override, profiles, stack
 from .compose import Compose, ComposeError, Runner
 
 # Where the VS Code container's extension sync says how far it has got,
@@ -107,6 +107,29 @@ def _print_warning(message: str) -> None:
     print(message, file=sys.stderr)
 
 
+def _flag_of(entry: str) -> str:
+    """
+    ``ssh`` for a typed ``host:port``, which only an SSH entry has; ``""``
+    for the rest.
+    """
+    return "ssh" if ":" in entry and "/" not in entry else ""
+
+
+def _pinned_name(entry: str) -> str:
+    """
+    The name a pin for the typed *entry* is for: its host, without a path or
+    a port. Refused for a wildcard, an address or anything else that isn't
+    one exact name.
+    """
+    name = allowlist.pin_name(entry, _flag_of(entry))
+    if not name:
+        raise allowlist.AllowlistError(
+            f"only an exact name can reach your network, and {entry} isn't one (no wildcard or address)"
+        )
+
+    return name
+
+
 class Ops:
     """
     The operations on one profile of a checkout.
@@ -120,10 +143,12 @@ class Ops:
         docker: Optional[str] = None,
         sleep: Callable[[float], None] = time.sleep,
         warn: Callable[[str], None] = _print_warning,
+        resolve: lan.Resolver = lan.resolve,
     ):
         self.root = root
         self.profile = profile
         self.warn = warn
+        self.resolve = resolve
         self.compose = Compose(profile, runner=runner, docker=docker, sleep=sleep)
 
     # -- helpers --------------------------------------------------------------
@@ -296,15 +321,53 @@ class Ops:
 
         return True, message, self.reload_allowlist()
 
-    def allow(self, entry: str, flag: str = "") -> Result:
+    def allow(
+        self,
+        entry: str,
+        flag: str = "",
+        lan_ok: bool = False,
+        confirm: Optional[Callable[[str, str], bool]] = None,
+    ) -> Result:
         """
         Allow an entry, or change the flag of one of the profile's own; a
         provided entry switched off is switched back on.
+
+        When the entry's name (its host, for a path or an SSH entry) resolves
+        to an address on your network and isn't on it yet, the proxy would
+        refuse it there: it is let reach that address only with *lan_ok*, or
+        when *confirm* (asked with the name and the address) says yes, and
+        in the same change. Otherwise the message says how, and the result's
+        ``data["lan"]`` names the name and the address, for the app to ask.
         """
-        changed, message, applied = self._edit_allowlist(
-            lambda text: allowlist.allow(text, entry, flag, self._languages()),
-        )
-        return Result(self.profile.name, message, changed=changed, applied=applied)
+        # Only a valid entry's name is looked up: a refused one never leaves.
+        valid = allowlist.validate(allowlist.canonical(entry, flag), flag) is None
+        name = allowlist.pin_name(entry, flag) if valid else None
+
+        offer = self._lan_offer(name)
+        pin = offer is not None and (lan_ok or (confirm is not None and confirm(*offer)))
+
+        def edit(text: str) -> tuple[str, str]:
+            after, message = allowlist.allow(text, entry, flag, self._languages())
+            if pin:
+                after, pinned = allowlist.add_pin(after, offer[0], offer[1], self._internal_ranges())
+                message = f"{message}; {pinned}"
+            return after, message
+
+        changed, message, applied = self._edit_allowlist(edit)
+        data: dict = {}
+
+        if offer:
+            name, address = offer
+            data["lan"] = {"name": name, "address": address, "pinned": pin}
+            if not pin:
+                message = (
+                    f"{message}; {name} resolves to {address}, on your network, where the proxy refuses it: "
+                    f"hardcode lan add {name} {address} lets it reach that address"
+                )
+        elif lan_ok:
+            message = f"{message}; {self._why_no_offer(name, entry)}"
+
+        return Result(self.profile.name, message, changed=changed, applied=applied, data=data)
 
     def deny(self, entry: str, ssh: bool = False) -> Result:
         """
@@ -342,6 +405,138 @@ class Ops:
         )
         return Result(self.profile.name, message, changed=changed, applied=applied)
 
+    # -- names on your network ---------------------------------------------------
+
+    def _internal_ranges(self) -> list[str]:
+        """
+        The profile's internal ranges: ``EGRESS_INTERNAL_RANGES``, else the
+        proxy's default ones.
+        """
+        return lan.internal_ranges(envfile.read(self.profile.env_file).get("EGRESS_INTERNAL_RANGES", ""))
+
+    def pins(self) -> list[allowlist.Pin]:
+        """
+        The names the profile lets reach your network, as its allowlist has them.
+        """
+        text = self.profile.allowlist_file.read_text(encoding="utf-8")
+        return allowlist.pins(text, self._internal_ranges())
+
+    def _lan_offer(self, name: Optional[str]) -> Optional[tuple[str, str]]:
+        """
+        *name* and the address on your network it resolves to, when it
+        resolves to one and isn't on your network yet; ``None`` otherwise.
+        """
+        if not name or any(pin.name == name for pin in self.pins()):
+            return None
+
+        address = lan.pinnable(self.resolve(name), self._internal_ranges())
+        return (name, address) if address else None
+
+    def _why_no_offer(self, name: Optional[str], entry: str) -> str:
+        """
+        Why ``allow --lan`` let nothing reach your network.
+        """
+        if not name:
+            return f"nothing to let reach your network: only an exact name can, and {entry} isn't one"
+        if any(pin.name == name for pin in self.pins()):
+            return f"{name} is already on your network"
+
+        return f"nothing to let reach your network: {name} doesn't resolve to an address on it from here"
+
+    def lan_states(self) -> list[dict]:
+        """
+        The names on your network, each looked up again: its pin
+        (``Pin.as_dict``), what it resolves to now (``resolves``), and its
+        ``state``: ``ok`` while that includes its address, ``moved`` when it
+        resolves only elsewhere, ``unresolved`` when it doesn't resolve here.
+
+        A pin never follows its name: a name that moves looks the same as
+        one someone pointed somewhere else.
+        """
+        states = []
+
+        for pin in self.pins():
+            resolves = self.resolve(pin.name)
+
+            state = "ok" if pin.address in resolves else "moved"
+            if not resolves:
+                state = "unresolved"
+
+            states.append({**pin.as_dict(), "resolves": resolves, "state": state})
+
+        return states
+
+    def lan_warnings(self, states: Optional[list[dict]] = None) -> list[str]:
+        """
+        A line for each name on your network that now resolves elsewhere.
+        """
+        lines = []
+
+        for item in self.lan_states() if states is None else states:
+            if item["state"] != "moved":
+                continue
+
+            now = ", ".join(item["resolves"])
+            lines.append(
+                f"{item['name']} now resolves to {now}, not {item['address']}: it still reaches only "
+                f"{item['address']}; if the move is right, hardcode lan add {item['name']} {item['resolves'][0]}"
+            )
+
+        return lines
+
+    def add_pin(self, entry: str, address: str = "") -> Result:
+        """
+        Let *entry*'s name (its host, without a path or a port) reach
+        *address* on your network; without an address, the one on your
+        network it resolves to. A name on your network already is moved.
+        """
+        name = _pinned_name(entry)
+
+        if not address:
+            address = lan.pinnable(self.resolve(name), self._internal_ranges()) or ""
+        if not address:
+            raise allowlist.AllowlistError(
+                f"{name} doesn't resolve to an address on your network from here; "
+                f"name the address: hardcode lan add {name} ADDRESS"
+            )
+
+        changed, message, applied = self._edit_allowlist(
+            lambda text: allowlist.add_pin(text, name, address, self._internal_ranges()),
+        )
+
+        if changed and not allowlist.entry_ports(self.allowlist_entries(), name):
+            message = f"{message}; it allows nothing until {name} has an allowlist entry"
+
+        return Result(self.profile.name, message, changed=changed, applied=applied)
+
+    def remove_pin(self, entry: str) -> Result:
+        """
+        Stop letting *entry*'s name reach your network.
+        """
+        name = allowlist.pin_name(entry, _flag_of(entry)) or entry.strip().lower()
+
+        changed, message, applied = self._edit_allowlist(lambda text: allowlist.remove_pin(text, name))
+        return Result(self.profile.name, message, changed=changed, applied=applied)
+
+    def check_name(self, entry: str) -> dict:
+        """
+        What *entry*'s name resolves to from here, and whether it could reach
+        your network: ``name``, ``resolves``, ``address`` (the one on your
+        network it would be pinned to, or ``""``) and ``pinned`` (the address
+        it is pinned to already, or ``""``).
+        """
+        name = _pinned_name(entry)
+
+        resolves = self.resolve(name)
+        pinned = next((pin.address for pin in self.pins() if pin.name == name), "")
+
+        return {
+            "name": name,
+            "resolves": resolves,
+            "address": lan.pinnable(resolves, self._internal_ranges()) or "",
+            "pinned": pinned,
+        }
+
     def update_proxy_allowlist(self) -> list[str]:
         """
         Write the allowlist the proxy is given, from ``allowlist.txt`` and the
@@ -368,7 +563,15 @@ class Ops:
         if changes:
             message = f"allowlist: {'; '.join(changes)}; {message}"
 
-        return Result(self.profile.name, message, changed=bool(changes), applied=applied, data={"changes": changes})
+        # The names on your network are looked up again, and one that has
+        # moved is only reported: its pin stays as it is.
+        states = self.lan_states()
+        warnings = self.lan_warnings(states)
+        if warnings:
+            message = f"{message}; {'; '.join(warnings)}"
+
+        data = {"changes": changes, "lan": states}
+        return Result(self.profile.name, message, changed=bool(changes), applied=applied, data=data)
 
     # -- the VS Code port ------------------------------------------------------
 
@@ -803,6 +1006,7 @@ class Ops:
             "env": env,
             "vscodePort": envfile.get(self.profile.env_file, "VSCODE_PORT"),
             "allowlist": allowlist.as_dicts(self.allowlist_entries()),
+            "lan": [pin.as_dict() for pin in self.pins()],
             "forwards": [asdict(forward) for forward in override.get_forwards(document)],
             "mounts": [asdict(mount) for mount in override.get_mounts(document)],
             "langs": languages,

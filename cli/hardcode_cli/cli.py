@@ -18,7 +18,7 @@ from dataclasses import asdict
 from pathlib import Path
 from typing import Callable, Optional
 
-from . import allowlist, bounded, envfile, home, langs, override, profiles, stack, version_text, yamlio
+from . import allowlist, bounded, envfile, home, lan, langs, override, profiles, stack, version_text, yamlio
 from .compose import Compose, ComposeError, Runner, docker_executable, docker_subnets
 from .ops import Ops, Result
 
@@ -35,9 +35,11 @@ hardcode [-p NAME | --all] [--json] [--config DIR] <command> [args]
   extensions              the VS Code extensions, and where each comes from
   extension add|remove <publisher.name>  (--all)
   token rotate  (--all)   a new VS Code token: every copy of the old one stops working
-  allowlist               every entry: those HardCode provides, by block, and the profile's own
+  allowlist               every entry: the profile's own, then those HardCode provides
   allow <entry> [rw|ssh]  allow a site (--all: every profile)        deny <entry> [ssh]
   allowlist enable|disable|remove <entry> [ssh]  (--all)             reload   push the allowlist to the proxy
+  lan                     names that may reach your own network      lan add|remove|check <name> [address]  (--all)
+                          (allow <entry> --lan: let its name reach it, without asking)
   forward <port> [vscode|docker] [target]                              unforward <port>
   mount <local> <remote> [--ro]  (--all)                             unmount <remote>  (--all)
   docker on|off  (--all)    the Docker daemon beside the VS Code container (off: nothing privileged, no docker)
@@ -49,6 +51,7 @@ ALL_CAPABLE = {
     "allow",
     "deny",
     "allowlist",
+    "lan",
     "reload",
     "mount",
     "unmount",
@@ -99,6 +102,7 @@ class App:
         sleep: Callable[[float], None] = time.sleep,
         err: Callable[[str], None] = _print_error,
         ask: Optional[Callable[[str], str]] = None,
+        resolve: lan.Resolver = lan.resolve,
     ):
         self.root = root
         self.home_id = home.home_id(root)
@@ -109,6 +113,7 @@ class App:
         self.err = err
         self.sleep = sleep
         self.ask = ask
+        self.resolve = resolve
         self.results: list[Result] = []
 
     def profile(self, name: str) -> profiles.Profile:
@@ -122,6 +127,7 @@ class App:
             docker=self.docker,
             sleep=self.sleep,
             warn=self.err,
+            resolve=self.resolve,
         )
 
     def compose(self, name: str) -> Compose:
@@ -262,6 +268,11 @@ def _start(app: App, name: str, compose_args: list[str]) -> int:
     changes = ops.update_proxy_allowlist()
     for change in changes:
         app.err(f"allowlist: {change}")
+
+    # The names on your network are looked up again; one that has moved is
+    # only reported, and keeps reaching the address it was pinned to.
+    for warning in ops.lan_warnings():
+        app.err(f"on your network: {warning}")
 
     returncode = ops.compose.run(*compose_args).returncode
     if returncode != 0:
@@ -468,8 +479,21 @@ def _for_each(app: App, args: argparse.Namespace, operation: Callable[[Ops], Res
 
 
 def cmd_allow(app: App, args: argparse.Namespace) -> int:
+    """
+    Allow an entry. When its name resolves to an address on your network,
+    the proxy would refuse it there: ``--lan`` lets it reach that address,
+    and on a terminal the command asks; otherwise it says how.
+    """
     flag = args.flag or ""
-    return _for_each(app, args, lambda ops: ops.allow(args.entry, flag))
+
+    confirm = None
+    if app.ask is not None and not args.lan:
+
+        def confirm(name: str, address: str) -> bool:
+            question = f"{name} resolves to {address}, on your network. Let it reach that address? [y/N] "
+            return app.ask(question).strip().lower() in ("y", "yes")
+
+    return _for_each(app, args, lambda ops: ops.allow(args.entry, flag, lan_ok=args.lan, confirm=confirm))
 
 
 def cmd_deny(app: App, args: argparse.Namespace) -> int:
@@ -634,10 +658,13 @@ def _list_allowlist(app: App, args: argparse.Namespace) -> int:
     if args.all:
         raise CommandError("the list is one profile's: -p NAME picks which")
 
-    entries = app.ops(args.profile).allowlist_entries()
+    ops = app.ops(args.profile)
+    entries = ops.allowlist_entries()
+    pins = ops.pins()
 
     if app.json_output:
-        app.out(json.dumps({"allowlist": allowlist.as_dicts(entries)}, indent=2))
+        payload = {"allowlist": allowlist.as_dicts(entries), "lan": [pin.as_dict() for pin in pins]}
+        app.out(json.dumps(payload, indent=2))
         return 0
 
     title = None
@@ -649,6 +676,12 @@ def _list_allowlist(app: App, args: argparse.Namespace) -> int:
         state = "on " if item.enabled else "off"
         invalid = "   <- invalid: the proxy won't start with it" if item.invalid else ""
         app.out(f"  {state}  {allowlist.format_entry(item.entry, item.flag, item.comment)}{invalid}")
+
+    if pins:
+        app.out("\nOn your network (names that may reach an address there, in allowlist.txt)")
+    for pin in pins:
+        invalid = f"   <- invalid: {pin.problem}" if pin.problem else ""
+        app.out(f"  {pin.name:<40} {pin.address}{invalid}")
 
     return 0
 
@@ -664,6 +697,77 @@ def _section_title(item: allowlist.Entry) -> str:
         return f"{item.section} (comes with the {langs.BY_KEY[item.language].kind})"
 
     return f"{item.section or 'Custom'} (this profile's own, in allowlist.txt)"
+
+
+def cmd_lan(app: App, args: argparse.Namespace) -> int:
+    """
+    The names the profile lets reach your network, each looked up again;
+    with an action, add or remove one, or check what a name resolves to.
+    """
+    if args.action in ("add", "remove", "check") and not args.name:
+        raise CommandError(f"lan {args.action} needs a name: hardcode lan {args.action} <name>")
+    if args.address and args.action != "add":
+        raise CommandError("only lan add takes an address: hardcode lan add <name> [address]")
+
+    if args.action == "add":
+        return _for_each(app, args, lambda ops: ops.add_pin(args.name, args.address or ""))
+    if args.action == "remove":
+        return _for_each(app, args, lambda ops: ops.remove_pin(args.name))
+
+    if args.all:
+        raise CommandError("the list is one profile's: -p NAME picks which")
+
+    ops = app.ops(args.profile)
+
+    if args.action == "check":
+        found = ops.check_name(args.name)
+        if app.json_output:
+            app.out(json.dumps(found, indent=2))
+        else:
+            app.out(_checked(found))
+        return 0
+
+    states = ops.lan_states()
+    if app.json_output:
+        app.out(json.dumps({"lan": states}, indent=2))
+        return 0
+
+    if not states:
+        app.out("nothing is on your network: hardcode lan add <name> lets one name reach its address there")
+
+    for item in states:
+        app.out(f"  {item['name']:<40} {item['address']:<20} {_lan_state(item)}")
+
+    return 0
+
+
+def _lan_state(item: dict) -> str:
+    """
+    A name on your network's state, in words.
+    """
+    if item["problem"]:
+        return f"invalid: {item['problem']}"
+    if item["state"] == "moved":
+        return f"now resolves to {', '.join(item['resolves'])}"
+    if item["state"] == "unresolved":
+        return "ok (doesn't resolve from here)"
+
+    return "ok"
+
+
+def _checked(found: dict) -> str:
+    """
+    What ``lan check`` found about a name, in words.
+    """
+    name = found["name"]
+    if found["pinned"]:
+        return f"{name} is on your network, at {found['pinned']}"
+    if found["address"]:
+        return f"{name} resolves to {found['address']}, on your network: hardcode lan add {name} lets it reach it"
+    if found["resolves"]:
+        return f"{name} resolves to {', '.join(found['resolves'])}, not on your network"
+
+    return f"{name} doesn't resolve from here"
 
 
 def cmd_port(app: App, args: argparse.Namespace) -> int:
@@ -765,7 +869,8 @@ def _shared_options(parser: argparse.ArgumentParser, suppress: bool) -> None:
         "--all",
         action="store_true",
         default=all_default,
-        help="act on every profile (allow, deny, allowlist, reload, mount, unmount, enable, disable, rebuild, docker)",
+        help="act on every profile (allow, deny, allowlist, lan, reload, mount, unmount, enable, disable, rebuild, "
+        "docker)",
     )
     parser.add_argument("--json", action="store_true", default=json_default, help="machine-readable output")
     parser.add_argument(
@@ -845,6 +950,11 @@ def _add_allowlist_commands(sub) -> None:
         help="example.com, .example.com, example.com/path, host[:port] with ssh, or github:OWNER/REPO",
     )
     allow.add_argument("flag", nargs="?", choices=["rw", "ssh"], help="rw: uploads too; ssh: an SSH tunnel")
+    allow.add_argument(
+        "--lan",
+        action="store_true",
+        help="if its name resolves to an address on your network, let it reach that address without asking",
+    )
     allow.set_defaults(func=cmd_allow)
 
     deny = sub.add_parser("deny", help="comment an entry out")
@@ -860,6 +970,15 @@ def _add_allowlist_commands(sub) -> None:
     allowlist_command.add_argument("entry", nargs="?")
     allowlist_command.add_argument("flag", nargs="?", choices=["ssh"], help=ssh_help)
     allowlist_command.set_defaults(func=cmd_allowlist)
+
+    lan_command = sub.add_parser(
+        "lan",
+        help="the names that may reach your own network; or add, remove or check one",
+    )
+    lan_command.add_argument("action", nargs="?", choices=["add", "remove", "check"])
+    lan_command.add_argument("name", nargs="?", help="an exact name: gitlab.example.com (a path or port is dropped)")
+    lan_command.add_argument("address", nargs="?", help="with add: its address (default: what it resolves to here)")
+    lan_command.set_defaults(func=cmd_lan)
 
     sub.add_parser("reload", help="re-render the allowlist into the running proxy").set_defaults(func=cmd_reload)
 
@@ -979,13 +1098,15 @@ def main(
     ask: Optional[Callable[[str], str]] = None,
     terminal: Optional[bool] = None,
     env: Optional[dict[str, str]] = None,
+    resolve: lan.Resolver = lan.resolve,
 ) -> int:
     """
     Run the command line in *argv* and return the exit code.
 
     The command asks a question (with *ask*, ``input`` by default) only on a
     *terminal* (by default, when its input is one), and never with
-    ``--json``. *env* stands in for the environment (the home, sudo) in tests.
+    ``--json``. *env* stands in for the environment (the home, sudo) in
+    tests, and *resolve* for this machine's name lookups.
     """
     parser = build_parser()
     args = parser.parse_args(argv)
@@ -1017,6 +1138,7 @@ def main(
             sleep=sleep,
             err=err,
             ask=(ask or _ask) if terminal and not args.json else None,
+            resolve=resolve,
         )
         return args.func(app, args)
     except (CommandError, *USER_ERRORS) as error:

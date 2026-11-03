@@ -537,6 +537,150 @@ class GithubRepositoryTests(unittest.TestCase):
             allowlist.allow("", "github:me/app", "ssh", [])
 
 
+class PinTests(unittest.TestCase):
+    """
+    The ``lan <name> <address>`` lines: names that may reach an address on your
+    network.
+    """
+
+    TEXT = """\
+# --- Custom ----
+gitlab.example.com:22222    ssh
+# --- On your network ----
+lan gitlab.example.com 192.168.71.200   # the GitLab
+lan registry.example.com fd00::10
+"""
+
+    def test_a_pin_is_a_line_kind_of_its_own(self):
+        parsed = allowlist.parse_line("lan GitLab.Example.com 192.168.71.200  # ours")
+
+        self.assertEqual(
+            (parsed.entry, parsed.address, parsed.comment, parsed.lan_line, parsed.invalid),
+            ("gitlab.example.com", "192.168.71.200", "ours", True, False),
+        )
+
+        # Commented out, it is a comment, as an off line is.
+        self.assertIsNone(allowlist.parse_line("#lan gitlab.example.com 192.168.71.200"))
+
+    def test_a_pin_is_not_an_entry(self):
+        # Neither listed with the entries, nor touched by an edit of the
+        # name's entries.
+        self.assertEqual(
+            [item.entry for item in allowlist.effective(self.TEXT, []) if not item.provided],
+            ["gitlab.example.com:22222"],
+        )
+        self.assertEqual(len(allowlist.find(self.TEXT, "gitlab.example.com")), 0)
+        self.assertEqual(allowlist.remove_entry(self.TEXT, "gitlab.example.com"), self.TEXT)
+
+    def test_pins_are_checked_against_the_profiles_ranges(self):
+        found = allowlist.pins(self.TEXT)
+        self.assertEqual(
+            [(pin.name, pin.address, pin.problem) for pin in found],
+            [
+                ("gitlab.example.com", "192.168.71.200", ""),
+                ("registry.example.com", "fd00::10", ""),
+            ],
+        )
+        self.assertEqual(found[0].comment, "the GitLab")
+
+        narrowed = allowlist.pins(self.TEXT, ["10.0.0.0/8", "fc00::/7"])
+        self.assertIn("isn't on your network", narrowed[0].problem)
+        self.assertEqual(narrowed[1].problem, "")
+
+    def test_a_name_pinned_twice_or_badly_is_a_problem(self):
+        text = (
+            "lan a.example.com 10.0.0.1\nlan a.example.com 10.0.0.2\nlan b.example.com\nlan .c.example.com 10.0.0.3\n"
+        )
+        problems = [pin.problem for pin in allowlist.pins(text)]
+
+        self.assertEqual(problems[0], "")
+        self.assertIn("already on your network", problems[1])
+        self.assertIn("give its address too", problems[2])
+        self.assertIn("only an exact name", problems[3])
+
+    def test_add_pin_makes_its_section_and_moves_a_name_in_place(self):
+        added, message = allowlist.add_pin("example.com\n", "gitlab.example.com", "192.168.71.200")
+        self.assertEqual(message, "gitlab.example.com may reach 192.168.71.200 on your network")
+        self.assertIn(f"\n{allowlist.LAN_HEADER}\n{allowlist.LAN_NOTE}\nlan gitlab.example.com 192.168.71.200\n", added)
+
+        same, message = allowlist.add_pin(added, "gitlab.example.com", "192.168.71.200")
+        self.assertEqual((same, message), (added, "gitlab.example.com already reaches 192.168.71.200 on your network"))
+
+        moved, message = allowlist.add_pin(added, "gitlab.example.com", "192.168.71.201")
+        self.assertEqual(message, "moved gitlab.example.com on your network: 192.168.71.200 -> 192.168.71.201")
+        self.assertEqual([pin.address for pin in allowlist.pins(moved)], ["192.168.71.201"])
+
+        self.assertIn(
+            "lan registry.example.com fd00::10\n", allowlist.add_pin("", "registry.example.com", "FD00:0::10")[0]
+        )
+
+    def test_add_pin_refuses_what_the_proxy_would(self):
+        for name, address, why in (
+            (".example.com", "192.168.1.1", "only an exact name"),
+            ("example.com", "8.8.8.8", "isn't on your network"),
+            ("example.com", "169.254.169.254", "can't be pinned"),
+            ("example.com", "not-an-address", "is not an IP address"),
+            ("192.168.1.1", "192.168.1.1", "not a valid hostname"),
+        ):
+            with self.assertRaisesRegex(AllowlistError, why):
+                allowlist.add_pin("", name, address)
+
+    def test_remove_pin(self):
+        removed, message = allowlist.remove_pin(self.TEXT, "gitlab.example.com")
+
+        self.assertEqual(message, "gitlab.example.com no longer reaches your network")
+        self.assertEqual([pin.name for pin in allowlist.pins(removed)], ["registry.example.com"])
+        self.assertIn("gitlab.example.com:22222", removed)
+        self.assertEqual(
+            allowlist.remove_pin(removed, "gitlab.example.com"), (removed, "gitlab.example.com is not on your network")
+        )
+
+    def test_the_proxy_gets_the_pins_under_their_own_heading(self):
+        rendered = allowlist.render(self.TEXT, [])
+        tail = rendered[rendered.index(allowlist.heading("On your network")) :]
+
+        self.assertIn("lan gitlab.example.com 192.168.71.200", tail)
+        self.assertIn("lan registry.example.com fd00::10", tail)
+        self.assertEqual(
+            allowlist.changes(allowlist.render("", []), rendered)[-1],
+            "On your network: + lan registry.example.com fd00::10",
+        )
+
+    def test_ignored_pins_are_commented_out_with_why(self):
+        ignored = allowlist.ignore_pins(self.TEXT, {"gitlab.example.com": "not on this cluster"})
+
+        self.assertIn(
+            "\n#lan gitlab.example.com 192.168.71.200   # the GitLab  # ignored: not on this cluster\n", ignored
+        )
+        self.assertEqual([pin.name for pin in allowlist.pins(ignored)], ["registry.example.com"])
+
+    def test_pin_name(self):
+        self.assertEqual(allowlist.pin_name("GitLab.example.com:22222", "ssh"), "gitlab.example.com")
+        self.assertEqual(allowlist.pin_name("gitlab.example.com/group/repo.git"), "gitlab.example.com")
+        self.assertEqual(allowlist.pin_name("gitlab.example.com."), "gitlab.example.com")
+        self.assertIsNone(allowlist.pin_name(".example.com"))
+        self.assertIsNone(allowlist.pin_name("github:owner/repo"))
+        self.assertIsNone(allowlist.pin_name("10.0.0.1"))
+
+    def test_entry_ports(self):
+        text = "gitlab.example.com:22222 ssh\n.example.com\nother.example.com/x\n#disabled.example.com\n"
+        entries = allowlist.effective(text, [])
+
+        self.assertEqual(allowlist.entry_ports(entries, "gitlab.example.com"), [80, 443, 22222])
+        self.assertEqual(allowlist.entry_ports(entries, "example.com"), [80, 443])
+        self.assertEqual(allowlist.entry_ports(entries, "disabled.example.org"), [])
+        self.assertEqual(
+            allowlist.entry_ports(allowlist.effective("git.example.org ssh\n", []), "git.example.org"), [22]
+        )
+
+    def test_the_template_has_the_section_and_pins_nothing(self):
+        text = TEMPLATE.read_text(encoding="utf-8")
+
+        self.assertIn(f"\n{allowlist.LAN_HEADER}\n{allowlist.LAN_NOTE}\n", text)
+        self.assertEqual(allowlist.pins(text), [])
+        self.assertEqual(len(allowlist.LAN_HEADER), len(allowlist.CUSTOM_HEADER))
+
+
 class CorpusTests(unittest.TestCase):
     """
     The shared acceptance corpus; tests/proxy.py runs the renderer over it.

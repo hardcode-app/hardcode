@@ -170,6 +170,12 @@ Each row has its type (host, subdomains, path, ssh), its access
   goes to Languages / Tools in its place.
 - **Search** and the filter buttons (*all*, *enabled*, *disabled*,
   *path*, *rw*, *ssh*, *provided*, *your own*) narrow the list.
+- **On your network** lists the names that may reach an address on
+  your network, such as a GitLab at home. When you add a name that
+  points inside your network, a dialog asks whether to let it reach
+  that address; yes adds it here. A row marked *now resolves to …* has
+  a **Move** button, and **✕** removes one
+  ([a server on your own network](allowlist.md#a-server-on-your-own-network)).
 
 ![Searching the allowlist](images/app-allowlist-search.png)
 
@@ -193,6 +199,9 @@ where to, how often, and from which address inside the sandbox.
 row's host, or its URL's folder. Nothing is allowed until you click
 **Add** there. A refused `POST` or `PUT` to an allowed host means the entry
 would need `rw`; a `CONNECT` means the host isn't on the allowlist at all.
+A row that says *resolves to an internal address* is a name that points
+inside your network: **Allow on your network** asks whether to let it
+reach that address.
 Before you allow anything, read
 [what to ask about a blocked row](staying-safe.md#read-blocked-traffic-before-you-allow-anything).
 

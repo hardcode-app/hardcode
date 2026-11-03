@@ -116,6 +116,7 @@
     state.extensions = data.extensions;
     state.image = data.image;
     state.rebuildNeeded = data.rebuildNeeded;
+    state.lan = data.lan;
     return state;
   }
 
@@ -176,6 +177,8 @@
     'vscode:url': () => 'http://localhost:11111/?tkn=k3Zb7Qp1xJ9vL2mN8rT4wY6aC0eF5gH',
     'vscode:rotate': () => [],
     'traffic:blocked': async () => (await fixture).blocked,
+    // The names on your network, each still resolving where it was approved.
+    'lan:list': async () => (await fixture).lan.map((pin) => ({ ...pin, resolves: [pin.address], state: 'ok' })),
     'stack:logs': () => squidLog,
     'extensions:status': extensionStatus,
     'profiles:languages': languagesOf,

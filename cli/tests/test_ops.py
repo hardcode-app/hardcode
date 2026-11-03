@@ -12,6 +12,7 @@ from hardcode_cli.compose import ComposeError
 from hardcode_cli.ops import STATUS_BYTES, Image, Ops
 
 from .helpers import FakeRunner, HomeTestCase, updated_catalogue
+from .resolver import FakeResolver
 
 
 def python_in_image(state: dict):
@@ -27,16 +28,25 @@ class OpsTests(HomeTestCase):
     they ask Compose to do.
     """
 
-    def ops(self, name="default", running=False, healthy=True):
+    def ops(self, name="default", running=False, healthy=True, answers=None):
         """
         Operations on profile *name* (created when missing), with a fresh fake
-        runner that reports the profile as running or not.
+        runner that reports the profile as running or not, and name lookups
+        that give *answers* (``{name: [address, ...]}``).
         """
         if not profiles.exists(self.root, name):
             profiles.create(self.root, name, languages=list(langs.LANGS))
 
         self.runner = FakeRunner(running=running, healthy=healthy)
-        return Ops(self.root, profiles.get(self.root, name), runner=self.runner, docker="docker", sleep=lambda _: None)
+        self.resolver = FakeResolver(answers)
+        return Ops(
+            self.root,
+            profiles.get(self.root, name),
+            runner=self.runner,
+            docker="docker",
+            sleep=lambda _: None,
+            resolve=self.resolver,
+        )
 
     def make_folder(self, name="src"):
         folder = self.root / name
@@ -752,6 +762,203 @@ class OpsTests(HomeTestCase):
 
         self.assertIn("image hardcode-vscode:img not removed", result.message)
         self.assertFalse(profiles.exists(self.root, "img"))
+
+
+class LanTests(HomeTestCase):
+    """
+    Names on your network: a name whose address is inside the profile's
+    internal ranges is refused there by the proxy, unless the profile lets
+    that one name reach that one address.
+    """
+
+    GITLAB = {"gitlab.example.com": ["203.0.113.9", "192.168.71.200"]}
+
+    def ops(self, answers=None, running=False):
+        """
+        Operations on the default profile, with name lookups giving *answers*.
+        """
+        if not profiles.exists(self.root, "default"):
+            profiles.create(self.root, "default", languages=[])
+
+        self.runner = FakeRunner(running=running)
+        self.resolver = FakeResolver(self.GITLAB if answers is None else answers)
+        return Ops(
+            self.root,
+            profiles.get(self.root, "default"),
+            runner=self.runner,
+            docker="docker",
+            sleep=lambda _: None,
+            resolve=self.resolver,
+        )
+
+    def pins(self, ops):
+        return [(pin.name, pin.address) for pin in ops.pins()]
+
+    def test_allow_says_when_the_name_resolves_inside_and_pins_nothing(self):
+        ops = self.ops()
+
+        result = ops.allow("gitlab.example.com:22222", "ssh")
+
+        self.assertEqual(
+            result.data["lan"], {"name": "gitlab.example.com", "address": "192.168.71.200", "pinned": False}
+        )
+        self.assertIn("gitlab.example.com resolves to 192.168.71.200, on your network", result.message)
+        self.assertIn("hardcode lan add gitlab.example.com 192.168.71.200", result.message)
+        self.assertEqual(self.pins(ops), [])
+
+    def test_a_yes_pins_it_in_the_same_change(self):
+        ops = self.ops(running=True)
+        asked = []
+
+        def confirm(name, address):
+            asked.append((name, address))
+            return True
+
+        result = ops.allow("gitlab.example.com/group", confirm=confirm)
+
+        self.assertEqual(asked, [("gitlab.example.com", "192.168.71.200")])
+        self.assertTrue(result.data["lan"]["pinned"])
+        self.assertIn("gitlab.example.com may reach 192.168.71.200 on your network", result.message)
+        self.assertEqual(self.pins(ops), [("gitlab.example.com", "192.168.71.200")])
+        self.assertEqual(len(self.runner.commands("up -d allowlist squid")), 1, "one reload for both")
+        self.assertIn(
+            "lan gitlab.example.com 192.168.71.200", ops.profile.proxy_allowlist_file.read_text(encoding="utf-8")
+        )
+
+    def test_a_no_pins_nothing_and_lan_ok_doesnt_ask(self):
+        ops = self.ops()
+
+        refused = ops.allow("gitlab.example.com", confirm=lambda name, address: False)
+        self.assertFalse(refused.data["lan"]["pinned"])
+        self.assertEqual(self.pins(ops), [])
+
+        def never(name, address):
+            raise AssertionError("asked")
+
+        allowed = ops.allow("gitlab.example.com", lan_ok=True, confirm=never)
+        self.assertTrue(allowed.data["lan"]["pinned"])
+        self.assertEqual(self.pins(ops), [("gitlab.example.com", "192.168.71.200")])
+
+    def test_no_offer_for_public_names_wildcards_or_names_on_it_already(self):
+        ops = self.ops({"pypi.org": ["151.101.0.223"], "example.com": ["192.168.1.1"], **self.GITLAB})
+
+        self.assertEqual(ops.allow("pypi.org").data, {})
+        self.assertEqual(ops.allow(".example.com").data, {})
+        self.assertNotIn("example.com", self.resolver.asked, "a wildcard's name isn't looked up")
+
+        ops.add_pin("gitlab.example.com")
+        self.assertEqual(ops.allow("gitlab.example.com").data, {})
+
+        nothing = ops.allow("pypi.org/simple", lan_ok=True)
+        self.assertIn("pypi.org doesn't resolve to an address on it from here", nothing.message)
+
+    def test_an_entry_the_allowlist_refuses_is_not_looked_up(self):
+        ops = self.ops()
+
+        with self.assertRaises(allowlist.AllowlistError):
+            ops.allow("gitlab.example.com/a/../b")
+
+        self.assertEqual(self.resolver.asked, [])
+
+    def test_add_pin_finds_the_address_or_takes_the_one_given(self):
+        ops = self.ops({**self.GITLAB, "public.example.com": ["203.0.113.10"]})
+
+        found = ops.add_pin("gitlab.example.com:22222")
+        self.assertIn("gitlab.example.com may reach 192.168.71.200 on your network", found.message)
+        self.assertIn("it allows nothing until gitlab.example.com has an allowlist entry", found.message)
+
+        given = ops.add_pin("registry.example.com", "fd00::10")
+        self.assertEqual(
+            given.message,
+            "registry.example.com may reach fd00::10 on your network; it allows nothing until registry.example.com has an allowlist entry",
+        )
+
+        with self.assertRaisesRegex(
+            allowlist.AllowlistError, "doesn't resolve to an address on your network from here"
+        ):
+            ops.add_pin("public.example.com")
+        with self.assertRaisesRegex(allowlist.AllowlistError, "only an exact name"):
+            ops.add_pin(".example.com", "10.0.0.1")
+
+        self.assertEqual(
+            self.pins(ops),
+            [("gitlab.example.com", "192.168.71.200"), ("registry.example.com", "fd00::10")],
+        )
+
+    def test_the_profiles_own_ranges_decide(self):
+        ops = self.ops()
+        envfile.set_value(ops.profile.env_file, "EGRESS_INTERNAL_RANGES", "10.0.0.0/8")
+
+        self.assertEqual(ops.allow("gitlab.example.com").data, {}, "192.168/16 isn't internal to this profile")
+        with self.assertRaisesRegex(allowlist.AllowlistError, "isn't on your network"):
+            ops.add_pin("gitlab.example.com", "192.168.71.200")
+
+    def test_remove_pin(self):
+        ops = self.ops()
+        ops.add_pin("gitlab.example.com")
+
+        removed = ops.remove_pin("gitlab.example.com:22222")
+
+        self.assertEqual(removed.message, "gitlab.example.com no longer reaches your network")
+        self.assertEqual(self.pins(ops), [])
+
+    def test_a_pin_never_follows_its_name(self):
+        ops = self.ops({**self.GITLAB, "moved.example.com": ["10.0.0.9"]})
+        ops.add_pin("gitlab.example.com")
+        ops.add_pin("moved.example.com", "10.0.0.8")
+        ops.add_pin("gone.example.com", "10.0.0.7")
+
+        states = {item["name"]: (item["state"], item["resolves"]) for item in ops.lan_states()}
+        self.assertEqual(
+            states,
+            {
+                "gitlab.example.com": ("ok", ["203.0.113.9", "192.168.71.200"]),
+                "moved.example.com": ("moved", ["10.0.0.9"]),
+                "gone.example.com": ("unresolved", []),
+            },
+        )
+
+        self.assertEqual(
+            ops.lan_warnings(),
+            [
+                "moved.example.com now resolves to 10.0.0.9, not 10.0.0.8: it still reaches only 10.0.0.8; "
+                "if the move is right, hardcode lan add moved.example.com 10.0.0.9"
+            ],
+        )
+        self.assertIn(("moved.example.com", "10.0.0.8"), self.pins(ops), "the pin stays where it was")
+
+    def test_reload_looks_the_names_up_again(self):
+        ops = self.ops({"moved.example.com": ["10.0.0.9"]}, running=True)
+        ops.add_pin("moved.example.com", "10.0.0.8")
+
+        result = ops.reload()
+
+        self.assertIn("moved.example.com now resolves to 10.0.0.9, not 10.0.0.8", result.message)
+        self.assertEqual(result.data["lan"][0]["state"], "moved")
+
+    def test_check_name(self):
+        ops = self.ops()
+
+        self.assertEqual(
+            ops.check_name("gitlab.example.com:22222"),
+            {
+                "name": "gitlab.example.com",
+                "resolves": ["203.0.113.9", "192.168.71.200"],
+                "address": "192.168.71.200",
+                "pinned": "",
+            },
+        )
+
+        ops.add_pin("gitlab.example.com")
+        self.assertEqual(ops.check_name("gitlab.example.com")["pinned"], "192.168.71.200")
+
+    def test_the_state_lists_the_pins_without_looking_them_up(self):
+        ops = self.ops()
+        ops.add_pin("gitlab.example.com")
+        self.resolver.asked.clear()
+
+        self.assertEqual([pin["name"] for pin in ops.state()["lan"]], ["gitlab.example.com"])
+        self.assertEqual(self.resolver.asked, [])
 
 
 if __name__ == "__main__":

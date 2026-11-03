@@ -39,7 +39,9 @@ const state = {
   bulkEntry: '',
   bulkFlag: '',
   bulkResult: '',
-  prefill: '',
+  prefill: '', // the allowlist form's entry, from Blocked traffic
+  prefillFlag: '', // and its access: ssh for a refused SSH tunnel
+  lanPrefill: { name: '', address: '' }, // the On your network form, from Blocked traffic or a moved name
   // The ten-second refresh's interval, while signed in.
   poller: null,
 };
@@ -530,27 +532,105 @@ function allowlistTab(profile) {
   return `
       <div class="card" style="margin-bottom:14px"><div class="form-row">
         <div class="field grow"><label>Entry</label><input type="text" class="mono" id="al-entry" placeholder="example.com · .example.com · github.com/team · host:22 (ssh)" value="${esc(state.prefill)}"></div>
-        <div class="field"><label>Access</label><select id="al-flag"><option value="">read-only (GET, clone/pull)</option><option value="rw">read-write (uploads, push)</option><option value="ssh">ssh tunnel</option></select></div>
+        <div class="field"><label>Access</label><select id="al-flag"><option value="">read-only (GET, clone/pull)</option><option value="rw">read-write (uploads, push)</option><option value="ssh" ${state.prefillFlag === 'ssh' ? 'selected' : ''}>ssh tunnel</option></select></div>
         <button class="btn primary" data-act="al-add">Add</button></div>
         <div class="form-error" id="al-error"></div>
         <p class="muted small" style="margin:0">The entries HardCode provides (every profile's, and those of the languages and tools that are on) can be switched off but not deleted: one switched off stays off through updates, and one an update adds arrives switched on. Changes are applied to the running proxy within seconds (squid and CoreDNS restart with the new rules). To change many profiles at once use <b>All allowlists</b>. <button class="btn ghost small" data-act="al-raw">Edit as text…</button></p></div>
+      ${lanCard(profile)}
       <div class="card" style="padding:0"><table><thead><tr><th></th><th>Entry</th><th>Type / access</th><th>Note</th><th></th></tr></thead><tbody>${rows}</tbody></table></div>`;
 }
 
-/** The blocked-traffic tab: what the proxy and DNS filter refused. */
+/**
+ * The On your network card of the allowlist tab: the names this profile
+ * lets reach an address on the network, each with its state, and a form to
+ * add one. The admin's pod usually can't see that network, so the address
+ * is typed, never looked up. When the chart doesn't take pins, it says so.
+ */
+function lanCard(profile) {
+  const view = profile.lan;
+
+  const rows = view.pins
+    .map((pin) => {
+      let status = 'ok';
+      if (pin.problem) {
+        status = `invalid: ${pin.problem}`;
+      } else if (pin.ignored) {
+        status = `ignored: ${pin.ignored}`;
+      } else if (pin.state === 'moved') {
+        status = `now resolves to ${pin.resolves.join(', ')}`;
+      } else if (pin.state === 'unresolved') {
+        status = "ok (doesn't resolve from the admin)";
+      }
+
+      // A name that moved keeps its address: the move is filled into the
+      // form, for someone to look at and save, never followed.
+      const move =
+        pin.state === 'moved' && !pin.problem
+          ? `<button class="btn small" data-lan-move="${esc(pin.name)}" data-address="${esc(pin.resolves[0])}">Move…</button> `
+          : '';
+
+      return (
+        `<tr><td class="entry mono">${esc(pin.name)}</td><td class="mono">${esc(pin.address)}</td>` +
+        `<td class="muted small">${esc(status)}</td>` +
+        `<td class="actions">${move}<button class="btn ghost small icon" data-lan-remove="${esc(pin.name)}" title="Remove">✕</button></td></tr>`
+      );
+    })
+    .join('');
+
+  const off = view.enabled
+    ? ''
+    : '<div class="callout">This cluster doesn\'t let names reach its network: the operator ignores these until the chart sets <code>profileDefaults.lan.enabled</code>.</div>';
+  const empty = '<tr><td colspan="4" class="empty">No name of this profile reaches your network.</td></tr>';
+
+  return `<div class="card" id="lan-card" style="margin-bottom:14px"><h2>On your network</h2>${off}
+      <p class="muted small">The proxy refuses names that point inside your own network. A name listed here may reach the address shown, and nothing else on your network.</p>
+      <div class="form-row">
+        <div class="field grow"><label>Name</label><input type="text" class="mono" id="lan-name" placeholder="gitlab.example.com" value="${esc(state.lanPrefill.name)}"></div>
+        <div class="field"><label>Address</label><input type="text" class="mono" id="lan-address" placeholder="192.168.71.200" value="${esc(state.lanPrefill.address)}"></div>
+        <button class="btn" data-act="lan-add">Let it reach that address</button></div>
+      <div class="form-error" id="lan-error"></div>
+      <table><thead><tr><th>Name</th><th>Address</th><th>State</th><th></th></tr></thead><tbody>${rows || empty}</tbody></table></div>`;
+}
+
+// Why the proxy refused, when it said, as Blocked traffic shows it.
+const REFUSED_BECAUSE = { 'internal-address': 'resolves to an internal address' };
+
+/**
+ * A Blocked traffic row's buttons. An SSH tunnel's "Allow host" fills in
+ * its host and port, with ssh; a name refused for pointing inside your
+ * network is offered On your network instead, since an entry wouldn't let
+ * it through.
+ */
+function blockedActions(target) {
+  if (target.reason === 'internal-address') {
+    return `<button class="btn small" data-allow-lan="${esc(target.host)}">Allow on your network</button>`;
+  }
+
+  // "Allow URL" offers the URL's directory, without its scheme.
+  const directory = target.url ? target.url.replace(/^https?:\/\//, '').replace(/\/[^/]*$/, '') : '';
+  const allowUrl = target.url ? `<button class="btn small" data-allow="${esc(directory)}">Allow URL</button>` : '';
+
+  let host = target.host;
+  let flag = '';
+  if (target.port) {
+    host = target.port === 22 ? target.host : `${target.host}:${target.port}`;
+    flag = 'ssh';
+  }
+
+  return `<button class="btn small" data-allow="${esc(host)}" data-flag="${esc(flag)}">Allow host</button>${allowUrl}`;
+}
+
+/** The blocked-traffic tab: what the proxy and DNS filter refused, and why when it said. */
 function blockedTab() {
   const rows = state.blocked
     .map((target) => {
       const what = target.kind === 'dns' ? 'DNS ' + esc(target.method) : esc(target.method);
-
-      // "Allow URL" offers the URL's directory, without its scheme.
-      const directory = target.url ? target.url.replace(/^https?:\/\//, '').replace(/\/[^/]*$/, '') : '';
-      const allowUrl = target.url ? `<button class="btn small" data-allow="${esc(directory)}">Allow URL</button>` : '';
+      const why = REFUSED_BECAUSE[target.reason] ? `<div class="muted small">${esc(REFUSED_BECAUSE[target.reason])}</div>` : '';
 
       return (
         `<tr><td><span class="badge ${target.kind === 'dns' ? 'dns' : ''}">${what}</span></td>` +
-        `<td class="mono">${esc(target.url || target.target)}</td><td>${target.count}</td>` +
-        `<td class="actions"><button class="btn small" data-allow="${esc(target.host)}">Allow host</button>${allowUrl}</td></tr>`
+        `<td class="mono">${esc(target.url || target.target)}${why}</td><td>${esc(target.count)}</td>` +
+        `<td class="actions">${blockedActions(target)}</td></tr>`
       );
     })
     .join('');
@@ -991,8 +1071,26 @@ const actions = {
     }
 
     state.prefill = '';
+    state.prefillFlag = '';
     await openProfile(state.profile.name);
     toast(`Added ${entry}`, 'ok');
+  },
+
+  async 'lan-add'() {
+    const name = $('#lan-name').value.trim();
+    const address = $('#lan-address').value.trim();
+
+    let answer;
+    try {
+      answer = await api('POST', profilePath('/lan'), { op: 'add', name, address });
+    } catch (error) {
+      $('#lan-error').textContent = error.message;
+      return;
+    }
+
+    state.lanPrefill = { name: '', address: '' };
+    await openProfile(state.profile.name);
+    toast(answer.message, 'ok');
   },
 
   async 'refresh-blocked'() {
@@ -1210,9 +1308,37 @@ function bind() {
   each('[data-allow]', (button) => {
     button.onclick = () => {
       state.prefill = button.dataset.allow;
+      state.prefillFlag = button.dataset.flag || '';
       state.tab = 'allowlist';
       render();
       $('#al-entry').focus();
+    };
+  });
+
+  // The same for On your network: the name, and the address for someone
+  // who knows it to type (or the one a moved name now has, to look at).
+  each('[data-allow-lan]', (button) => {
+    button.onclick = () => {
+      state.lanPrefill = { name: button.dataset.allowLan, address: '' };
+      state.tab = 'allowlist';
+      render();
+      $('#lan-address').focus();
+    };
+  });
+
+  each('[data-lan-move]', (button) => {
+    button.onclick = () => {
+      state.lanPrefill = { name: button.dataset.lanMove, address: button.dataset.address };
+      render();
+      $('#lan-address').focus();
+    };
+  });
+
+  each('[data-lan-remove]', (button) => {
+    button.onclick = async () => {
+      const answer = await call('POST', profilePath('/lan'), { op: 'remove', name: button.dataset.lanRemove });
+      await openProfile(state.profile.name);
+      toast(answer.message, 'ok');
     };
   });
 

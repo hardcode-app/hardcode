@@ -10,13 +10,22 @@ from collections import OrderedDict
 from dataclasses import asdict, dataclass
 from urllib.parse import urlsplit
 
-# A refused request in squid's access log:
+# A refused request in squid's access log (images/squid/squid.conf's
+# "hardcode" format: squid's own, and why it was refused at the end):
 #
-#   1759900000.123    0 172.31.253.10 TCP_DENIED/403 3942 GET https://example.com/x - HIER_NONE/- text/html
+#   1759900000.123    0 172.31.253.10 TCP_DENIED/403 3942 GET https://example.com/x - HIER_NONE/- text/html -
+#   1759900000.456    0 172.31.253.10 TCP_DENIED/200 0 CONNECT git.example.com:22 - HIER_NONE/- - internal-address
 #
 # The result code may carry a suffix (TCP_DENIED_ABORTED, TCP_DENIED_REPLY);
-# the groups are the client, the method and the URL or CONNECT target.
-DENIED = re.compile(r"^\S+\s+\d+\s+(\S+)\s+TCP_DENIED[A-Z_]*/\d+\s+\d+\s+(\S+)\s+(\S+)")
+# the groups are the client, the method, the URL or CONNECT target, and the
+# reason ("-" for none), which a line in squid's own format doesn't have.
+DENIED = re.compile(
+    r"^\S+\s+\d+\s+(\S+)\s+TCP_DENIED[A-Z_]*/\d+\s+\d+\s+(\S+)\s+(\S+)"
+    r"(?:\s+\S+\s+\S+\s+\S+\s+(\S+))?"
+)
+
+# The reasons squid gives, as Blocked traffic shows them.
+REASONS = {"internal-address": "resolves to an internal address"}
 
 # A name the DNS filter refused, as its log plugin writes it:
 #
@@ -36,7 +45,11 @@ class Blocked:
 
     ``kind`` is "http" or "dns"; ``method`` is the HTTP method, or the DNS
     record type; ``url`` is ``scheme://host/path`` for requests the proxy
-    could see into, and ``""`` otherwise.
+    could see into, and ``""`` otherwise. ``reason`` says why, when the proxy
+    said: ``internal-address`` for an allowlisted name that resolves to an
+    address on your network (``REASONS`` has the words), ``""`` otherwise.
+    ``port`` is a tunnel's port when it isn't 443 (an SSH tunnel's), and 0
+    otherwise.
     """
 
     kind: str
@@ -46,6 +59,8 @@ class Blocked:
     target: str
     client: str
     count: int = 1
+    reason: str = ""
+    port: int = 0
 
     def as_dict(self) -> dict:
         return asdict(self)
@@ -68,11 +83,18 @@ def parse(squid_log: str, dns_log: str) -> list[Blocked]:
         if not match:
             continue
 
-        client, method, target = match.groups()
+        client, method, target, reason = match.groups()
+        reason = "" if reason in (None, "-") else reason
+        port = 0
 
         if method == "CONNECT":
-            # A tunnel: the target is host:port, and nothing of the URL is known.
-            host = target[:-4] if target.endswith(":443") else target
+            # A tunnel: the target is host:port, and nothing of the URL is
+            # known. The host is the name alone; a port other than 443 is
+            # kept apart, being what an SSH entry needs.
+            host, _, number = target.rpartition(":")
+            if not host or not number.isdigit():
+                host, number = target, "443"
+            port = 0 if number == "443" else int(number)
             url = ""
         else:
             parts = urlsplit(target)
@@ -82,7 +104,13 @@ def parse(squid_log: str, dns_log: str) -> list[Blocked]:
             else:
                 host, url = target, ""
 
-        count(f"{method} {target}", Blocked("http", method, host, url, target, client))
+        key = f"{method} {target}"
+        count(key, Blocked("http", method, host, url, target, client, reason=reason, port=port))
+
+        # The latest reason stands: the same target may be refused for
+        # another one since (a name allowed meanwhile, now resolving inside).
+        if reason:
+            seen[key].reason = reason
 
     for line in dns_log.splitlines():
         match = BLOCKED.search(line)

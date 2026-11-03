@@ -2,7 +2,8 @@
 # Starts squid, once the files it needs are there: the proxy CA (from the
 # one-shot "pki" service) and the rendered policy (from the one-shot
 # "allowlist" service). Without either, it refuses to start rather than run
-# with no policy or an old one.
+# with no policy or an old one. It writes squid's hosts file first, with the
+# names the policy pins to an address on your network.
 set -euo pipefail
 
 for file in /proxy-ca/ca.pem /proxy-ca/ca.key; do
@@ -12,12 +13,27 @@ for file in /proxy-ca/ca.pem /proxy-ca/ca.key; do
   fi
 done
 
-for file in hosts.txt urls-ro.regex urls-rw.regex ssh.conf clients.txt internal.txt; do
+for file in hosts.txt urls-ro.regex urls-rw.regex ssh.conf pins.conf pins.hosts clients.txt internal.txt; do
   if [ ! -s "/etc/squid/generated/$file" ]; then
     echo "squid: /etc/squid/generated/$file missing; did the allowlist service run?" >&2
     exit 1
   fi
 done
+
+# Squid's hosts file: the names pinned to an address on your network, each
+# with its one address, then the container's own /etc/hosts without any line
+# naming a pinned name, so that nothing gives a pinned name another address.
+awk '
+  FNR == NR {
+    if ($1 !~ /^#/ && NF >= 2) pinned[$2] = 1
+    print
+    next
+  }
+  {
+    for (field = 2; field <= NF; field++) if ($field in pinned) next
+    print
+  }
+' /etc/squid/generated/pins.hosts /etc/hosts > /var/spool/squid/hosts
 
 # The cache of per-host certificates squid makes while inspecting TLS.
 certificates=/var/spool/squid/ssl_db

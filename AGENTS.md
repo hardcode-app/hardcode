@@ -52,7 +52,8 @@ A change is complete when all of these are true:
   need a reason in the commit message: they reach every existing profile at
   its next start.
 - Four places define what an entry means and must agree:
-  `images/squid/allowlist-render.sh`, `cli/hardcode_cli/allowlist.py`, the
+  `images/squid/allowlist-render.sh`, `cli/hardcode_cli/allowlist.py` (with
+  `cli/hardcode_cli/lan.py` for the addresses `lan` lines may name), the
   template's comments, `docs/allowlist.md`; a grammar change adds lines to
   `tests/allowlist-corpus.txt`, which both implementations are run over.
 - Languages are first class: the catalogue in `cli/hardcode_cli/langs.py`

@@ -29,6 +29,15 @@
 # of the provided entries: it stays off through updates and language
 # switches.
 #
+# On your network: the proxy refuses any name that points inside your own
+# network, so an allowed name can't reach your computer, your local network
+# or a cloud metadata service. To let one of your own servers through:
+#   lan gitlab.example.com 192.168.71.200
+# That name may then reach that address, and nothing else opens. The name
+# still needs its own entry above, and DNS can't move it elsewhere. One
+# exact name and one address on your network per line. `hardcode allow`
+# asks before adding one, and `hardcode lan` lists them.
+#
 # Apply changes:  `hardcode allow` / `hardcode deny`, `hardcode allowlist
 #                 enable|disable` or the HardCode app do it for you; after
 #                 editing this file by hand: hardcode reload
@@ -44,3 +53,6 @@
 
 # --- Switched off ----------------------------------------------------------
 # Entries HardCode provides that this profile doesn't allow, one "off <entry>" each.
+
+# --- On your network -------------------------------------------------------
+# Names that may reach an address on your network, one "lan <name> <address>" each.

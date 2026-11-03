@@ -88,6 +88,43 @@ Keep entries as narrow as you can: a path rather than a host, read-only
 rather than `rw`, HTTPS rather than `ssh`.
 [Staying safe](staying-safe.md#keep-the-allowlist-narrow) says why.
 
+### A server on your own network
+
+Some servers are on your own network: a GitLab, a package mirror or a
+registry at home or at work. Their names point to an address inside your
+network, and the proxy normally refuses those.
+
+When you add such a name, HardCode asks first:
+
+> gitlab.example.com resolves to 192.168.71.200, on your network. Let it
+> reach that address?
+
+**Yes** adds it to **On your network**, on the app's Allowlist page. From
+then on, that name can reach that address, and nothing else on your
+network opens. The command line asks the same question; `hardcode allow
+--lan` answers yes in advance.
+
+The name still needs its ordinary entry, such as
+`gitlab.example.com:22222 ssh`. **On your network** only lets it reach
+its address.
+
+You can also manage the list with the command:
+
+```sh
+hardcode lan                                         # the list
+hardcode lan add gitlab.example.com                  # with the address it has now
+hardcode lan add gitlab.example.com 192.168.71.200   # or with this one
+hardcode lan remove gitlab.example.com
+```
+
+If the name later points somewhere else, HardCode keeps the address you
+approved. The app marks the row *now resolves to …*, with **Move** to
+approve the new one, and the command prints a warning.
+
+Only exact names can be added (no `.wildcard`), and only addresses inside
+your network. On Kubernetes, an administrator switches this on first
+([Kubernetes](kubernetes.md)).
+
 ## Stop allowing something
 
 **In the app**, the switch at the start of a row turns an entry off and
@@ -129,6 +166,7 @@ What a row tells you:
 | `GET` or `HEAD` with a URL | No entry allows that URL: the host is allowed, but not that path (or, for a plain `http://` address, the host isn't on the list). |
 | `POST`, `PUT`, `PATCH` or `DELETE` to an allowed URL | The entry is read-only: uploading there needs `rw`. |
 | `DNS A`, `DNS AAAA` | A lookup of a name that isn't allowed: it was answered "no such name" without leaving your computer. |
+| *resolves to an internal address* | The name is allowed, but it points inside your network. **Allow on your network** asks whether to let it reach that address ([a server on your own network](#a-server-on-your-own-network)). |
 
 In the app, **Allow host** and **Allow URL** fill in the allowlist form
 with the row's host, or its URL's folder. Nothing is allowed until you
@@ -142,13 +180,15 @@ path entry (`host/path`) allows only that path.
 ## Edit the file by hand
 
 The profile's own entries are in its `allowlist.txt`
-([where it is](profiles.md#where-profiles-are)). It has two sections:
+([where it is](profiles.md#where-profiles-are)). It has three sections:
 
 - **Custom**: your entries, one per line. `hardcode allow` and the app add
   here. It starts with commented-out examples for git hosting.
 - **Switched off**: an `off <entry>` line (`off <host[:port]> ssh` for an
   SSH one) for each entry HardCode provides that this profile doesn't
   allow.
+- **On your network**: a `lan <name> <address>` line for each name that
+  may reach an address on your network.
 
 After editing it, give the proxy the new list: **Reload proxy** on the
 app's Allowlist page, or `hardcode reload`. An invalid line stops the
@@ -177,6 +217,7 @@ ssh.github.com:443  ssh     # … or to another port
 | `… rw` | the same URLs, with every method | the only other flag is `ssh`; read-only is the default, not a flag |
 | `host[:port] ssh` | an SSH tunnel to that host and port (22 by default) | no wildcard, no path; a colon must be followed by a port from 1 to 65535 |
 | `off <entry>`, `off <host[:port]> ssh` | nothing: switches off an entry HardCode provides | |
+| `lan <name> <address>` | lets that name reach that address on your network, and nothing else (it still needs its own entry) | an exact name; an address inside your network, never loopback, link-local or multicast; one address per name |
 
 Anything else is an error: the command and the app refuse it, and the
 proxy won't start with it rather than run with part of the list. Typed
@@ -212,11 +253,11 @@ such as `/.well-known/`, are fine, and so is an encoded slash on its own
 
 ### Addresses inside your network
 
-Once a request has passed the name and URL checks, the proxy looks the name
-up and refuses it if it points at loopback, link-local (where cloud
-metadata services are), private or shared address space (the profile's
-`EGRESS_INTERNAL_RANGES` setting). So an allowed name can't be used to
-reach your computer, your local network or a cloud metadata service.
+The proxy refuses an allowed name that points inside your network: your
+computer, your local network, or a cloud provider's metadata service.
+So an allowed name can't be used to reach anything that isn't on the
+internet. A name on **On your network** may reach the one address you
+approved for it ([a server on your own network](#a-server-on-your-own-network)).
 
 ### SSH
 

@@ -150,6 +150,13 @@ On a cluster, also:
   `profileDefaults.networkPolicy.squidEgressExcept` keeps the proxy away
   from private, link-local and loopback addresses; relax it only for an
   internal registry, and narrow `internalRanges` to match.
+- **Names on your network are off.** A profile's *On your network* names
+  are ignored until the chart sets `profileDefaults.lan.enabled: true`;
+  a profile can't switch it on. When it is on, each name in use gets one
+  egress rule for the proxy: its address alone, on its `ssh` port or on
+  80 and 443. List the cluster's own pod and service ranges in
+  `profileDefaults.lan.clusterRanges`, and names pointing into them are
+  refused: the operator can't read those ranges itself.
 
 The [security model](security.md#not-covered) lists every limit.
 
@@ -180,6 +187,7 @@ The [security model](security.md#not-covered) lists every limit.
 | `profileDefaults.networkPolicy.defaultDeny` | `true` | a policy the chart installs that denies everything to and from every pod the operator creates, before any profile exists; a profile's own policies then allow what its pods need (so a profile with `networkPolicy.enabled: false` is fully isolated while this is on) |
 | `profileDefaults.networkPolicy.squidEgressCIDR`, `.squidEgressExcept` | `0.0.0.0/0` except `10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`, `100.64.0.0/10`, `169.254.0.0/16`, `127.0.0.0/8` | where squid may connect. Private, shared, link-local (cloud metadata) and loopback ranges are excluded so the sandbox can't reach cluster, LAN or node services through the proxy; relax for an internal registry |
 | `profileDefaults.internalRanges`, `.clientRanges` | empty (squid's defaults) | address ranges an allowlisted name must never resolve to (squid refuses the request); who may use a profile's proxy. Space-separated; narrow the first for a registry on an internal address, widen the second for an unusual pod network |
+| `profileDefaults.lan.enabled`, `.lan.clusterRanges` | `false`, empty | whether profiles' *On your network* names are used at all; the cluster's own pod and service ranges, which they may not point into |
 | `profileDefaults.ingressClassName`, `.ingressAnnotations`, `.ingressTLSSecret` | empty | the Ingress a profile with `vscodeHost` gets |
 | `profiles[]` | `[]` | profiles to create with the chart: `name`, and optionally `allowlist` (default: the bundled `files/allowlist.txt`; `--set-file 'profiles[0].allowlist=template/allowlist.txt'` for the repository's), `languages` (empty: `profileDefaults.languages`), `extensions`, `image`, `vscodeHost`, `suspended`, `home`, `docker`, `resources`, `env`. The allowlist is the profile's own part, as it is: the operator adds the entries HardCode provides to the profile's languages, its own or the default |
 

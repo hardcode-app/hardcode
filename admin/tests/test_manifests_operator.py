@@ -434,6 +434,101 @@ class RenderTests(unittest.TestCase):
 
 
 @unittest.skipUnless(shutil.which("openssl"), "needs openssl")
+class LanTests(unittest.TestCase):
+    """
+    Names on the network (a profile's lan lines): off unless the chart says
+    so, and then one egress rule each, to that one address.
+    """
+
+    CTX = RenderTests.CTX
+    ALLOWLIST = """\
+gitlab.example.com:22222 ssh
+registry.example.com/v2
+lan gitlab.example.com 192.168.71.200
+lan registry.example.com fd00::10
+lan unused.example.com 192.168.71.201
+lan pods.example.com 10.244.1.5
+"""
+
+    def render(self, lan=None, allowlist=ALLOWLIST):
+        """
+        The objects a profile with *allowlist* renders to, on a chart with
+        *lan* as its profileDefaults.lan.
+        """
+        defaults = chart_defaults({"lan": lan} if lan is not None else {})
+        return manifests.render(profile("p", {"allowlist": allowlist}), defaults, self.CTX)
+
+    def squid_egress(self, objects):
+        return find(objects, "NetworkPolicy", "p-squid")["spec"]["egress"]
+
+    def proxy_allowlist(self, objects):
+        return find(objects, "ConfigMap", "p-allowlist")["data"]["allowlist.txt"]
+
+    def test_off_by_default_the_operator_ignores_every_pin(self):
+        objects = self.render()
+
+        self.assertEqual(len(self.squid_egress(objects)), 2, "the internet and the cluster's DNS, nothing more")
+        self.assertNotIn("lan ", self.proxy_allowlist(objects))
+        self.assertFalse(manifests.lan_settings(chart_defaults())["enabled"])
+
+    def test_a_profile_cant_switch_it_on(self):
+        spec = manifests.effective_spec(
+            profile("p", {"allowlist": self.ALLOWLIST, "lan": {"enabled": True}}), chart_defaults()
+        )
+
+        self.assertFalse(spec["lan"]["enabled"])
+
+    def test_on_each_pin_its_entries_use_gets_one_address_on_their_ports(self):
+        objects = self.render({"enabled": True, "clusterRanges": ["10.244.0.0/16", "10.96.0.0/12"]})
+        rules = self.squid_egress(objects)[2:]
+
+        self.assertEqual(
+            rules,
+            [
+                {
+                    "to": [{"ipBlock": {"cidr": "192.168.71.200/32"}}],
+                    "ports": [{"port": 22222, "protocol": "TCP"}],
+                },
+                {
+                    "to": [{"ipBlock": {"cidr": "fd00::10/128"}}],
+                    "ports": [{"port": 80, "protocol": "TCP"}, {"port": 443, "protocol": "TCP"}],
+                },
+            ],
+            "no rule for a pin no entry uses, nor for one in the cluster's ranges",
+        )
+
+        rendered = self.proxy_allowlist(objects)
+        self.assertIn("\nlan gitlab.example.com 192.168.71.200\n", rendered)
+        self.assertIn("\nlan unused.example.com 192.168.71.201\n", rendered)
+        self.assertNotIn("pods.example.com", rendered)
+
+    def test_the_pins_are_in_the_effective_spec_with_why_one_is_ignored(self):
+        spec = manifests.effective_spec(
+            profile("p", {"allowlist": self.ALLOWLIST}),
+            chart_defaults({"lan": {"enabled": True, "clusterRanges": ["10.244.0.0/16"]}}),
+        )
+
+        ignored = {pin["name"]: pin["ignored"] for pin in spec["lan"]["pins"]}
+        self.assertEqual(ignored["gitlab.example.com"], "")
+        self.assertEqual(ignored["pods.example.com"], manifests.LAN_CLUSTER)
+
+    def test_a_pin_outside_the_profiles_ranges_reaches_the_proxy_to_refuse(self):
+        objects = manifests.render(
+            profile(
+                "p",
+                {
+                    "allowlist": "gitlab.example.com ssh\nlan gitlab.example.com 192.168.71.200\n",
+                    "internalRanges": "10.0.0.0/8",
+                },
+            ),
+            chart_defaults({"lan": {"enabled": True}}),
+            self.CTX,
+        )
+
+        self.assertIn("\nlan gitlab.example.com 192.168.71.200\n", self.proxy_allowlist(objects))
+        self.assertEqual(len(self.squid_egress(objects)), 2, "but no way out for it")
+
+
 class OperatorTests(unittest.TestCase):
     def setUp(self):
         self.k8s = FakeK8s()

@@ -106,6 +106,13 @@ sandbox to sign in. For a GitHub repository, follow
 [GitHub from the sandbox](github.md): `hardcode allow github:OWNER/REPO rw`
 allows it, and `hardcode-github OWNER/REPO` sets up the sign-in.
 
+### A server on your own network is refused
+
+The proxy refuses names that point inside your network, even allowed
+ones. Add the name to **On your network**: when you allow it, HardCode
+asks, or use `hardcode lan add <name>`
+([a server on your own network](allowlist.md#a-server-on-your-own-network)).
+
 ### `certificate verify failed`, or `unable to get local issuer certificate`
 
 The program doesn't trust the proxy's certificate. HardCode sets this up in

@@ -6,6 +6,7 @@ Run by tests/proxy.py inside the test network:
     proxy_client.py GET http://origin.test/allowed/good
     proxy_client.py POST https://origin.test/upload/file
     proxy_client.py CONNECT sshonly.test:22
+    proxy_client.py SSH pinned.test:22
 
 It speaks HTTP by hand rather than through urllib, so the request line reaches
 the proxy exactly as written: no client-side clean-up of dot segments,
@@ -19,6 +20,9 @@ a single line:
     reset / timeout          a tunnel the proxy dropped without answering
     tunnel 403               a CONNECT the proxy refused with a status
     tls-error                the TLS handshake inside a tunnel failed
+    200 SSH-2.0-NAME         SSH: the tunnel opened, and that server greeted
+    200 reset                SSH: the tunnel opened, and was reset as the
+                             client greeted (nothing came from a server)
 """
 
 import socket
@@ -154,6 +158,32 @@ def tunnel(connection: socket.socket, destination: str) -> str:
     return status_code(answer) if answer else "reset"
 
 
+def ssh(connection: socket.socket, destination: str) -> str:
+    """
+    A tunnel the way ssh uses one: a CONNECT, then its version line at
+    once, as ssh sends it. The answer is the server's greeting; or how the
+    proxy refused, at the CONNECT or as the client greeted.
+    """
+    try:
+        answer = ask_for_tunnel(connection, destination)
+    except socket.timeout:
+        return "timeout"
+
+    if not answer:
+        return "reset"
+    if not answer.startswith(b"HTTP/1.1 200"):
+        return f"tunnel {status_code(answer)}"
+
+    try:
+        connection.sendall(b"SSH-2.0-proxy-test\r\n")
+        greeting = connection.recv(256)
+    except OSError:
+        greeting = b""
+
+    line = greeting.split(b"\r\n")[0].decode(errors="replace")
+    return f"200 {line}" if line else "200 reset"
+
+
 def main() -> None:
     method, target = sys.argv[1], sys.argv[2]
 
@@ -162,6 +192,8 @@ def main() -> None:
 
     if method == "CONNECT":
         print(tunnel(connection, target))
+    elif method == "SSH":
+        print(ssh(connection, target))
     elif target.startswith("https://"):
         print(inspected_request(connection, method, target))
     else:

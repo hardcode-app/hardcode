@@ -24,7 +24,7 @@ from urllib.parse import urlsplit
 
 from flask import Flask, g, jsonify, request, send_file
 
-from hardcode_cli import allowlist, blocked, langs
+from hardcode_cli import allowlist, blocked, lan, langs
 
 from . import manifests, totp
 from .auth import AuthError, Sessions, StoreConflict, Throttle, Users, canonical, check_password, hash_password
@@ -46,6 +46,7 @@ HOST_OK = re.compile(r"^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0
 
 OPS = ("add", "remove", "enable", "disable")
 EXTENSION_OPS = ("add", "remove")
+LAN_OPS = ("add", "remove")
 SINCE = {"10m": 600, "30m": 1800, "2h": 7200, "24h": 86400}
 WRITES = ("POST", "PUT", "PATCH", "DELETE")
 
@@ -300,6 +301,7 @@ class AdminApi:
         sessions: Sessions,
         clock: Optional[Callable[[], float]],
         trusted_proxies: list[str],
+        resolve: lan.Resolver = lan.resolve,
     ):
         self.k8s = k8s
         self.users = users
@@ -308,6 +310,7 @@ class AdminApi:
         self.template_allowlist = template_allowlist
         self.sessions = sessions
         self.clock = clock
+        self.resolve = resolve
         self.namespace = k8s.namespace
 
         # Failed sign-ins: per client address and account, per account from
@@ -356,6 +359,7 @@ class AdminApi:
             ("POST", "/api/profiles/<name>/extensions", self.edit_extensions),
             ("POST", "/api/profiles/<name>/token", self.rotate_token),
             ("POST", "/api/profiles/<name>/allowlist", self.edit_allowlist),
+            ("POST", "/api/profiles/<name>/lan", self.edit_lan),
             ("POST", "/api/allowlist/bulk", self.bulk_allowlist),
             ("GET", "/api/profiles/<name>/blocked", self.blocked_traffic),
             # Admins
@@ -699,6 +703,20 @@ class AdminApi:
     def patch_allowlist(self, name: str, data: dict) -> bool:
         """
         Apply one edit to a profile's allowlist; whether anything changed.
+        """
+        return self.patch_allowlist_text(
+            name,
+            lambda current, profile: self.apply_op(
+                current,
+                data,
+                manifests.effective_languages(profile.get("spec") or {}, self.defaults),
+            ),
+        )
+
+    def patch_allowlist_text(self, name: str, edit: Callable[[str, dict], str]) -> bool:
+        """
+        Apply *edit* (given the allowlist's text and the profile) to a
+        profile's allowlist; whether anything changed.
 
         Read, edit, and write conditionally on the version read. If another
         edit landed in between, read again and apply ours on top of it, so
@@ -707,9 +725,8 @@ class AdminApi:
         for attempt in range(PATCH_RETRIES):
             profile = self.get_profile(name)
             current = (profile.get("spec") or {}).get("allowlist") or ""
-            languages = manifests.effective_languages(profile.get("spec") or {}, self.defaults)
 
-            updated = self.apply_op(current, data, languages)
+            updated = edit(current, profile)
             if updated == current:
                 return False
 
@@ -1027,6 +1044,7 @@ class AdminApi:
                 "spec": {**(profile.get("spec") or {}), "effective": spec},
                 "status": profile.get("status") or {},
                 "allowlist": entries,
+                "lan": self.lan_view(profile),
                 "access": self.vscode_access(profile),
                 "version": profile["metadata"].get("generation"),
             }
@@ -1083,6 +1101,74 @@ class AdminApi:
     def edit_allowlist(self, name: str):
         self.require("full")
         return self.respond({"changed": self.patch_allowlist(name, self.body())})
+
+    def lan_view(self, profile: dict) -> dict:
+        """
+        A profile's names on the network, as its On your network card shows
+        them: whether this cluster takes pins at all (``enabled``), and each
+        pin (``manifests.effective_pins``) with what it resolves to from
+        here and its ``state``, as ``hardcode lan`` gives them.
+
+        The admin's pod resolves names with the cluster's DNS, which often
+        can't see the network the address is on: a name that doesn't
+        resolve here is ``unresolved``, not wrong.
+        """
+        spec = manifests.effective_spec(profile, self.defaults)
+        pins = []
+
+        for pin in spec["lan"]["pins"]:
+            resolves = self.resolve(pin["name"])
+
+            state = "ok" if pin["address"] in resolves else "moved"
+            if not resolves:
+                state = "unresolved"
+
+            pins.append({**pin, "resolves": resolves, "state": state})
+
+        return {"enabled": spec["lan"]["enabled"], "pins": pins}
+
+    def edit_lan(self, name: str):
+        """
+        Let one name reach an address on the network (``op`` add, with
+        ``name`` and ``address``), or stop it (``op`` remove), in a profile's
+        allowlist. The admin's pod can't see the network the address is on,
+        so the address is given, never looked up. A name pinned already is
+        moved; an address in the cluster's own ranges is refused.
+        """
+        self.require("full")
+        data = self.body()
+
+        op = data.get("op")
+        if op not in LAN_OPS:
+            raise HttpError(400, "op must be add or remove")
+
+        pin = str(data.get("name") or "").strip().lower()
+        address = str(data.get("address") or "").strip().lower()
+        if not pin:
+            raise HttpError(400, "name is required")
+
+        messages: list[str] = []
+
+        def edit(current: str, profile: dict) -> str:
+            if op == "remove":
+                updated, message = allowlist.remove_pin(current, pin)
+                messages.append(message)
+                return updated
+
+            spec = manifests.effective_spec(profile, self.defaults)
+            if lan.in_ranges(address, spec["lan"]["clusterRanges"]):
+                raise HttpError(400, f"{address} is {manifests.LAN_CLUSTER}")
+
+            try:
+                updated, message = allowlist.add_pin(current, pin, address, lan.internal_ranges(spec["internalRanges"]))
+            except allowlist.AllowlistError as error:
+                raise HttpError(400, str(error)) from error
+
+            messages.append(message)
+            return updated
+
+        changed = self.patch_allowlist_text(name, edit)
+        return self.respond({"changed": changed, "message": messages[-1] if messages else ""})
 
     def rotate_token(self, name: str):
         """
@@ -1253,6 +1339,7 @@ def create_app(
     sessions: Optional[Sessions] = None,
     clock: Optional[Callable[[], float]] = None,
     trusted_proxies: Optional[list[str]] = None,
+    resolve: lan.Resolver = lan.resolve,
 ) -> Flask:
     """
     The admin's Flask app.
@@ -1260,7 +1347,7 @@ def create_app(
     *cookie_secure* is ``auto`` (secure when the request came in over HTTPS),
     ``always`` or ``never``. *clock* stands in for the time in tests, and
     *trusted_proxies* lists the addresses or networks whose X-Forwarded-For
-    is believed.
+    is believed. *resolve* stands in for the pod's name lookups.
     """
     api = AdminApi(
         k8s,
@@ -1271,5 +1358,6 @@ def create_app(
         sessions=sessions or Sessions(),
         clock=clock,
         trusted_proxies=trusted_proxies or [],
+        resolve=resolve,
     )
     return api.app

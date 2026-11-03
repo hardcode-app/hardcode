@@ -13,6 +13,11 @@ against an origin server that normalises paths the way web servers do
 - an upstream certificate nobody vouches for is refused
 - tunnels to unlisted hosts, internal addresses or non-TLS ports are reset,
   while an ``ssh`` entry opens exactly its port
+- a name pinned to an address on your network (a ``lan`` line) reaches
+  exactly that address, over HTTP, HTTPS and SSH, whatever DNS says; no
+  other name reaches it, an unpinned name inside is still refused (nothing
+  passes through, even the first time squid looks it up), a pin with no
+  entry allows nothing, and the log says why a name inside was refused
 - an empty allowlist renders a policy that allows nothing
 - the renderer agrees with the CLI's grammar (tests/allowlist-corpus.txt) and
   renders a last line that has no newline
@@ -26,6 +31,7 @@ Every container is memory-capped; nothing of your own stack is touched.
 
 from __future__ import annotations
 
+import json
 import os
 from dataclasses import dataclass
 from pathlib import Path
@@ -56,6 +62,28 @@ INTERNAL_RANGES = """\
 169.254.0.0/16
 100.64.0.0/10
 """
+
+# The names on your network: two origins on the test network, which is
+# private, so internal to the proxy's default ranges. Docker's DNS answers
+# pinned.test and neighbour.test with origin A, and moved.test and
+# inside.test with origin B; the pins send pinned.test, moved.test and
+# entryless.test to origin A ({inside} is its address).
+PIN_ALLOWLIST = """\
+pinned.test
+pinned.test:22 ssh
+moved.test
+moved.test:22 ssh
+neighbour.test
+inside.test
+inside.test:22 ssh
+lan pinned.test {inside}
+lan moved.test {inside}
+lan entryless.test {inside}
+"""
+
+# A refusal the proxy can't reset at once: the CONNECT is answered, and the
+# tunnel reset as the client speaks. Either way nothing passes through.
+TUNNEL_REFUSED = ("reset", "200 reset")
 
 
 @dataclass(frozen=True)
@@ -156,6 +184,28 @@ TUNNELS = [
     Request("a tunnel to an unlisted host is reset, not answered", "CONNECT", "other.test:443", "reset"),
     Request("a tunnel to a name that resolves inside is reset", "CONNECT", "metadata.test:443", "reset"),
     Request("a tunnel to a non-TLS port is reset", "CONNECT", "origin.test:22", "reset"),
+]
+
+PINNED = [
+    # The first lookup of each name below is the request itself: squid has
+    # cached nothing for them, so none of this depends on what it has.
+    Request(
+        "an ssh tunnel to an unpinned name inside is refused, the first time too",
+        "SSH",
+        "inside.test:22",
+        TUNNEL_REFUSED,
+    ),
+    Request("and again, once squid has looked it up", "SSH", "inside.test:22", TUNNEL_REFUSED),
+    Request("a pinned name reaches its address over plain HTTP", "GET", "http://pinned.test/x", "200 GET /x from A"),
+    Request("through an inspected HTTPS tunnel", "GET", "https://pinned.test/x", "200 GET /x from A"),
+    Request("and through its ssh tunnel", "SSH", "pinned.test:22", "200 SSH-2.0-A"),
+    Request("what DNS says for a pinned name is ignored", "GET", "http://moved.test/x", "200 GET /x from A"),
+    Request("for its ssh tunnel too", "SSH", "moved.test:22", "200 SSH-2.0-A"),
+    Request("another name for the pinned address is still refused", "GET", "http://neighbour.test/x"),
+    Request("its HTTPS tunnel too", "GET", "https://neighbour.test/x", ("tunnel reset", "tls-error")),
+    Request("an unpinned name inside is refused over HTTP", "GET", "http://inside.test/x"),
+    Request("a pin without an entry allows nothing", "GET", "http://entryless.test/x"),
+    Request("nor a tunnel", "SSH", "entryless.test:22", "reset"),
 ]
 
 NOTHING_ALLOWED = [
@@ -290,7 +340,8 @@ class ProxyTest:
                 -subj "/CN=proxy test CA" -addext "basicConstraints=critical,CA:TRUE" \
                 -keyout ca.key -out ca.pem
             openssl req -newkey rsa:2048 -nodes \
-                -subj "/CN=origin.test" -addext "subjectAltName=DNS:origin.test,DNS:sshonly.test" \
+                -subj "/CN=origin.test" \
+                -addext "subjectAltName=DNS:origin.test,DNS:sshonly.test,DNS:pinned.test,DNS:moved.test,DNS:neighbour.test" \
                 -keyout origin.key -out origin.csr
             openssl x509 -req -in origin.csr -CA ca.pem -CAkey ca.key -CAcreateserial \
                 -days 2 -copy_extensions copy -out origin.pem
@@ -393,6 +444,56 @@ class ProxyTest:
         if not harness.wait_until(accepts_connections, timeout=30, interval=0.5):
             self.suite.abort("squid did not come up", self.docker.logs(name))
 
+    def start_inside_origins(self, tls: Path) -> str:
+        """
+        Origins A and B, the two machines on "your network" (the test
+        network is private): their names, as Docker's DNS answers them, are
+        in PIN_ALLOWLIST's comment. Returns A's address.
+        """
+        mounts = [f"{FIXTURES / 'proxy_origin.py'}:/origin.py:ro", f"{tls}:/tls:ro"]
+
+        for name, aliases in (("A", ["pinned.test", "neighbour.test"]), ("B", ["moved.test", "inside.test"])):
+            self.docker.run(
+                harness.BUILD_IMAGE,
+                "python3",
+                "/origin.py",
+                name,
+                memory="128m",
+                name=f"{NETWORK}-inside-{name.lower()}",
+                detach=True,
+                network=NETWORK,
+                aliases=aliases,
+                volumes=mounts,
+            )
+
+        found = harness.run(
+            ["docker", "inspect", "--format", "{{json .NetworkSettings.Networks}}", f"{NETWORK}-inside-a"]
+        )
+        networks = json.loads(found.text) if found.ok else {}
+        address = (networks.get(NETWORK) or {}).get("IPAddress", "")
+        if not address:
+            self.suite.abort("could not tell origin A's address", found.text)
+
+        return address
+
+    def check_refusal_reasons(self, squid: str) -> None:
+        """
+        The access log says why a name inside was refused, and only then.
+        """
+        log = self.docker.logs(squid, lines=200)
+        lines = [line for line in log.splitlines() if "TCP_DENIED" in line]
+
+        def reasons(name: str) -> set[str]:
+            return {line.split()[-1] for line in lines if f"{name}/" in line or f"{name}:" in line}
+
+        self.suite.check(
+            "the log says a name inside was refused for its address",
+            reasons("neighbour.test") == {"internal-address"},
+            log,
+        )
+        self.suite.check("and an ssh tunnel's", reasons("inside.test") == {"internal-address"}, log)
+        self.suite.check("but gives no such reason for a name with no entry", reasons("entryless.test") == {"-"}, log)
+
     def send(self, request: Request, ca_public: Path) -> str:
         """
         Send one request through the proxy from a client container.
@@ -460,8 +561,19 @@ def run_checks(suite: Suite) -> None:
         test.check_requests(INSPECTED_HTTPS, ca_public)
         test.check_requests(TUNNELS, ca_public)
 
-        suite.section("the proxy with nothing allowed")
+        suite.section("names on your network")
         docker.remove(f"{NETWORK}-squid")
+        inside = test.start_inside_origins(tls)
+
+        accepted, pinned, log = test.render(PIN_ALLOWLIST.format(inside=inside), "pins")
+        suite.require("an allowlist with names on your network renders", accepted, log)
+        test.start_squid(f"{NETWORK}-pins", pinned / "squid", ca_private, tls)
+
+        test.check_requests(PINNED, ca_public)
+        test.check_refusal_reasons(f"{NETWORK}-pins")
+
+        suite.section("the proxy with nothing allowed")
+        docker.remove(f"{NETWORK}-pins")
         empty = scratch / "empty" / "squid"
         test.start_squid(f"{NETWORK}-deny-all", empty, ca_private, tls)
         test.check_requests(NOTHING_ALLOWED, ca_public)
