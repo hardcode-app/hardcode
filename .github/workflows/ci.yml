@@ -224,6 +224,7 @@ jobs:
             INSTALL_RUBY=false
             INSTALL_NODE=false
             INSTALL_JAVA=false
+            INSTALL_ANDROID=false
             INSTALL_DOTNET=false
             INSTALL_DOCKER=false
             INSTALL_CLAUDE_CLI=false

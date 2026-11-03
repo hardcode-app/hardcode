@@ -204,7 +204,7 @@ spec:
 | `spec.` field | Default | Meaning |
 |---|---|---|
 | `allowlist` | empty (the admin UI starts new profiles from the template) | the profile's own allowlist: its own entries, and an `off <entry>` line for each provided entry it switches off ([format](allowlist.md#entry-format)). The operator adds the entries HardCode provides |
-| `languages` | `profileDefaults.languages`, or all of them | the languages and tools the profile is built around: `python`, `node`, `java`, `dotnet`, `go`, `rust`, `cpp`, `ruby`, `perl`, `build_essentials`, `docker`, `claude_cli`, `codex_cli` (an empty list: none). They decide the VS Code container's extensions and the allowlist entries HardCode provides. See [below](#languages-on-kubernetes) |
+| `languages` | `profileDefaults.languages`, or all of them | the languages and tools the profile is built around: `python`, `node`, `java`, `android`, `dotnet`, `go`, `rust`, `cpp`, `ruby`, `perl`, `build_essentials`, `docker`, `claude_cli`, `codex_cli` (an empty list: none). They decide the VS Code container's extensions and the allowlist entries HardCode provides. See [below](#languages-on-kubernetes) |
 | `extensions` | `[]` | VS Code extensions of the profile's own (`publisher.name`, up to 100), kept installed besides those every VS Code container has and those of its languages; a change is installed or removed in the running container, without a restart; only publishers with a domain the Marketplace has verified |
 | `image`, `squidImage`, `docker.image`, `coredns.image`, `imagePullPolicy`, `imagePullSecrets` | `profileDefaults` | images |
 | `suspended` | `false` | scale the VS Code container, squid and CoreDNS to 0; volumes stay |

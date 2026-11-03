@@ -26,6 +26,7 @@ are open, and which VS Code extensions it gets.
 | `python` | Python | Python 3.14, pip, venv, pipx, black; uv and ruff | `ms-python.python`, `ms-python.vscode-pylance`, `ms-python.debugpy`, `ms-python.black-formatter`, `charliermarsh.ruff`, `ms-toolsai.jupyter` |
 | `node` | JavaScript / TypeScript | Node.js 22, npm, yarn, TypeScript; pnpm | `dbaeumer.vscode-eslint`, `esbenp.prettier-vscode` |
 | `java` | Java | OpenJDK 25, Maven; Gradle | `vscjava.vscode-java-pack` |
+| `android` | Android | OpenJDK 21, sdkmanager; the Android SDK goes in your home ([below](#android)) | `jetbrains.kotlin-server`, `vscjava.vscode-java-pack` |
 | `dotnet` | C# / .NET | .NET SDK 10 | `ms-dotnettools.csdevkit`, `ms-dotnettools.csharp` |
 | `go` | Go | Go 1.26, gopls, delve, Go's extra tools | `golang.go` |
 | `rust` | Rust | rustc, cargo, rustfmt, clippy, rust-src, rust-gdb, rust-lldb | `rust-lang.rust-analyzer`, `vadimcn.vscode-lldb` |
@@ -155,6 +156,35 @@ and crash reports stay closed.
 - **Its connections.** The proxy doesn't pass WebSocket connections, so
   Codex uses HTTPS instead, as it is built to.
 
+## Android
+
+With **Android**, the image has OpenJDK 21 and `sdkmanager`. The Android
+SDK itself goes into your home folder, `~/Android/Sdk` (`ANDROID_HOME`),
+where it lasts.
+
+1. **Accept Google's licences**, once: `sdkmanager --licenses` shows them
+   and asks. They are yours to accept, so HardCode doesn't accept them for
+   you.
+2. **Build**: `./gradlew assembleDebug`. Android's Gradle plugin downloads
+   the SDK platforms and build tools the project needs. To install a
+   package yourself: `sdkmanager --install "platform-tools"`. This
+   `sdkmanager` is F-Droid's, from Ubuntu, and checks every package
+   against F-Droid's public log of the SDK's checksums.
+
+- **JDK 21 is the default `java`**, with Java on as well (its JDK 25 stays
+  in `/usr/lib/jvm`): the Gradle 8 that most Android projects' wrappers
+  name can't run on JDK 25.
+- **Kotlin by JetBrains** gives VS Code Kotlin's completion, errors and
+  navigation. It is an alpha, and its Android support experimental. Its
+  `intellij.dataSharing` setting decides what it would send JetBrains; the
+  allowlist doesn't open JetBrains' hosts.
+- **Running the app is for your computer.** The sandbox has no hardware
+  virtualisation for the emulator, and can't reach USB devices or your
+  network, so neither an emulator nor a phone works from inside it. Keep
+  the project in a [shared folder](#what-is-kept-and-what-isnt), build it
+  here, and install it from your computer:
+  `adb install app/build/outputs/apk/debug/app-debug.apk`.
+
 ## Using Docker inside the sandbox
 
 With the **Docker CLI** tool, `docker`, `docker compose` and `docker
@@ -245,21 +275,22 @@ the app compare with the profile's to say when a rebuild is due.
 
 1. Takes ownership of the home folder and `/shared` if they were created
    as root's.
-2. Adds the proxy's certificate to the system's trusted certificates
+2. Makes the Android SDK's folder in the home, when the image has Android.
+3. Adds the proxy's certificate to the system's trusted certificates
    (which also refreshes Java's). For tools that keep their own, the
    container's environment points `SSL_CERT_FILE`, `REQUESTS_CA_BUNDLE`,
    `PIP_CERT` and `CODEX_CA_CERTIFICATE` at the system's bundle, and
    `NODE_EXTRA_CA_CERTS` at the proxy's certificate.
-3. Sets the proxy up for tools that ignore `HTTP(S)_PROXY`: apt, SSH (only
+4. Sets the proxy up for tools that ignore `HTTP(S)_PROXY`: apt, SSH (only
    to hosts with an `ssh` entry), the Docker CLI (`~/.docker/config.json`,
    which also passes the proxy to every container and build it starts),
    Maven (`~/.m2/settings.xml`) and Gradle (`~/.gradle/gradle.properties`).
    The files in your home folder are only written when missing, so your
    own edits win; delete one to have it written again. Codex's first
    configuration is written the same way.
-4. Starts installing the profile's extensions in the background, and
+5. Starts installing the profile's extensions in the background, and
    keeps following the list.
-5. Starts VS Code. Its token is never written to the container's log:
+6. Starts VS Code. Its token is never written to the container's log:
    `hardcode open` gives the address with it.
 
 ### The extensions' progress

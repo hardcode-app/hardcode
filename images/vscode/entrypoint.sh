@@ -33,6 +33,17 @@ if [ "${ENABLE_DOCKER:-true}" != true ]; then
 fi
 
 # ---------------------------------------------------------------------------
+# The home: the Android SDK's folder
+# ---------------------------------------------------------------------------
+
+# The Android SDK's folder in the home: sdkmanager refuses an ANDROID_HOME
+# that doesn't exist, and a home made before Android was switched on has
+# none.
+if command -v sdkmanager >/dev/null && [ -n "${ANDROID_HOME:-}" ]; then
+  mkdir -p "$ANDROID_HOME"
+fi
+
+# ---------------------------------------------------------------------------
 # Trust the egress proxy's CA: squid inspects HTTPS. update-ca-certificates
 # also refreshes the Java keystore, through ca-certificates-java.
 # ---------------------------------------------------------------------------

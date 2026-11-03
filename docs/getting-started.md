@@ -164,7 +164,7 @@ The tools are:
    ```
    No profile 'default' yet. Choose what it is built around: the image installs them,
    the allowlist opens their registries, and VS Code gets their extensions.
-     languages: python node java dotnet go rust cpp ruby perl
+     languages: python node java android dotnet go rust cpp ruby perl
      tools:     build_essentials docker claude_cli codex_cli
    Languages and tools, comma-separated [build_essentials,docker,claude_cli,codex_cli]:
    ```

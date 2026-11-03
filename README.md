@@ -55,9 +55,9 @@ There are three ways to run it:
   Marketplace publishers with a verified domain, and so does everything
   they pull in.
 - **Built around your languages.** Python, JavaScript/TypeScript, Java,
-  C#/.NET, Go, Rust, C/C++, Ruby and Perl: each one you switch on installs
-  its toolchain, opens its package registries (read-only) and brings its VS
-  Code extensions.
+  Android, C#/.NET, Go, Rust, C/C++, Ruby and Perl: each one you switch on
+  installs its toolchain, opens its package registries (read-only) and
+  brings its VS Code extensions.
 - **Coding agents ready to go.** Claude Code and Codex, installed and working
   through the proxy.
 - **Docker inside.** A rootless Docker daemon per sandbox, behind the same

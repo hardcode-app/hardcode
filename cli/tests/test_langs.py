@@ -65,6 +65,25 @@ class LangTests(unittest.TestCase):
             self.assertEqual(agent.extensions, (extension,))
             self.assertNotIn(extension, langs.CORE_EXTENSIONS)
 
+    def test_android_opens_googles_paths_and_builds_without_java(self):
+        # dl.google.com serves all of Google's downloads: only the SDK's and
+        # Google's Maven repository's paths on it. Java's entries (Gradle,
+        # Maven Central) are Android's too, so that it builds with Java off.
+        android = langs.BY_KEY["android"]
+        java = langs.BY_KEY["java"]
+
+        self.assertNotIn("dl.google.com", android.domains)
+        self.assertIn("dl.google.com/android/repository", android.domains)
+        self.assertIn("dl.google.com/dl/android/maven2", android.domains)
+
+        # sdkmanager picks one of the three copies of F-Droid's checksum log
+        # at random, and stops when that one is refused.
+        transparency_log = [domain for domain in android.domains if domain.endswith("/android-sdk-transparency-log")]
+        self.assertEqual(len(transparency_log), 3, transparency_log)
+        self.assertLessEqual(set(java.domains), set(android.domains))
+        self.assertEqual(android.rw, ())
+        self.assertEqual(android.extensions, ("jetbrains.kotlin-server", "vscjava.vscode-java-pack"))
+
     def test_uploads_only_where_a_language_says_so(self):
         for lang in langs.CATALOGUE:
             self.assertLessEqual(set(lang.rw), set(lang.domains), lang.key)

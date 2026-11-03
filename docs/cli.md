@@ -144,7 +144,7 @@ are open, and which VS Code extensions the sandbox gets.
 | `extensions` | Every VS Code extension the sandbox gets, and where it comes from: every VS Code container, a language or tool, or the profile's own. While the sandbox runs, which are still installing, refused (a publisher without a verified domain) or to be tried again. |
 | `extension add\|remove <publisher.name>` | Add or remove one of the profile's own extensions (`VSCODE_EXTENSIONS` in `.env`). A running sandbox installs or removes it within seconds, without a restart. One a language or tool already brings isn't added twice; a language's own goes when the language is switched off, and the one every sandbox has can't be removed. Only publishers with a verified domain are installed. |
 
-Languages: `python node java dotnet go rust cpp ruby perl`; tools:
+Languages: `python node java android dotnet go rust cpp ruby perl`; tools:
 `build_essentials docker claude_cli codex_cli`. Short names work too:
 `c`, `c++`, `cxx`, `c#`, `csharp`, `net`, `.net`, `js`, `javascript`,
 `ts`, `typescript`, `nodejs`, `golang`, `claude`, `claude_code`, `codex`,

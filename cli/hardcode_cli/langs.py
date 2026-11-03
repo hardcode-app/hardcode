@@ -159,6 +159,12 @@ NOTES = {
     "public.ecr.aws": "AWS ECR Public",
     "d5l0dvt14r5h8.cloudfront.net": "AWS ECR Public's layers",
     "raw.githubusercontent.com": "raw file downloads; Claude Code's release notes",
+    "dl.google.com/android/repository": "the Android SDK's packages",
+    "dl.google.com/dl/android/maven2": "Google's Maven repository",
+    "maven.google.com": "Google's Maven repository (redirects to dl.google.com)",
+    "f-droid.github.io/android-sdk-transparency-log": "the SDK's checksums, which sdkmanager checks",
+    "fdroid.gitlab.io/android-sdk-transparency-log": "the SDK's checksums, which sdkmanager checks",
+    "raw.githubusercontent.com/f-droid/android-sdk-transparency-log": "the SDK's checksums, which sdkmanager checks",
     "github.com/vadimcn/codelldb/releases/download": "CodeLLDB's platform packages",
     "release-assets.githubusercontent.com/github-production-release-asset/49407251": (
         "where GitHub sends CodeLLDB's downloads"
@@ -218,6 +224,35 @@ CATALOGUE = (
             "plugins-artifacts.gradle.org",
         ),
         extensions=("vscjava.vscode-java-pack",),
+    ),
+    Lang(
+        "android",
+        "Android",
+        "OpenJDK 21, sdkmanager, Kotlin by JetBrains, Extension Pack for Java",
+        # Google's own paths on dl.google.com, never the whole host (it
+        # serves all of Google's downloads): the SDK's packages, which
+        # sdkmanager and Android's Gradle plugin fetch, and Google's Maven
+        # repository (AndroidX, the Gradle plugin), with the name that
+        # redirects to it. F-Droid's signed log of the SDK's checksums,
+        # which sdkmanager checks every package against, from whichever of
+        # its three copies it picks at random. Then what Java's block opens
+        # for Gradle, so that Android builds without Java switched on: Maven
+        # Central, Gradle's distributions and its plugin portal.
+        domains=(
+            "dl.google.com/android/repository",
+            "dl.google.com/dl/android/maven2",
+            "maven.google.com",
+            "f-droid.github.io/android-sdk-transparency-log",
+            "fdroid.gitlab.io/android-sdk-transparency-log",
+            "raw.githubusercontent.com/f-droid/android-sdk-transparency-log",
+            "repo.maven.apache.org",
+            "repo1.maven.org",
+            "services.gradle.org",
+            "downloads.gradle.org",
+            "plugins.gradle.org",
+            "plugins-artifacts.gradle.org",
+        ),
+        extensions=("jetbrains.kotlin-server", "vscjava.vscode-java-pack"),
     ),
     Lang(
         "dotnet",

@@ -258,6 +258,7 @@ given its rules. Entries are read-only unless marked `rw`.
 | Python | `pypi.org`, `files.pythonhosted.org` |
 | JavaScript / TypeScript | `registry.npmjs.org`, `registry.yarnpkg.com`, `repo.yarnpkg.com` |
 | Java | `repo.maven.apache.org`, `repo1.maven.org`, `services.gradle.org`, `downloads.gradle.org`, `plugins.gradle.org`, `plugins-artifacts.gradle.org` |
+| Android | Google's SDK packages and Maven repository, as paths on `dl.google.com` rather than the whole host: `dl.google.com/android/repository`, `dl.google.com/dl/android/maven2`, and `maven.google.com`, which redirects there; the three copies of F-Droid's signed log of the SDK's checksums, which `sdkmanager` checks every package against: `f-droid.github.io/android-sdk-transparency-log`, `fdroid.gitlab.io/android-sdk-transparency-log` and `raw.githubusercontent.com/f-droid/android-sdk-transparency-log`; then Java's entries, so that Android builds with Java off |
 | C# / .NET | `api.nuget.org`, `globalcdn.nuget.org`, `builds.dotnet.microsoft.com` |
 | Go | `proxy.golang.org`, `sum.golang.org` |
 | Rust | `crates.io`, `index.crates.io`, `static.crates.io`, `static.rust-lang.org`, and for the CodeLLDB debugger's own downloads, that one project's releases on GitHub: `github.com/vadimcn/codelldb/releases/download` and `release-assets.githubusercontent.com/github-production-release-asset/49407251` |

@@ -35,6 +35,7 @@ ARG INSTALL_PERL=true
 ARG INSTALL_RUBY=true
 ARG INSTALL_NODE=true
 ARG INSTALL_JAVA=true
+ARG INSTALL_ANDROID=true
 ARG INSTALL_DOTNET=true
 ARG INSTALL_DOCKER=true
 ARG INSTALL_CLAUDE_CLI=true
@@ -187,6 +188,29 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     fi
 
 # ---------------------------------------------------------------------------
+# Android: JDK 21 and sdkmanager (F-Droid's, which checks each package
+# against its public log of the SDK's checksums). The SDK itself goes into
+# the home, ~/Android/Sdk (ANDROID_HOME, below): the user accepts Google's
+# licences with `sdkmanager --licenses`, and Android's Gradle plugin then
+# fetches what a project needs.
+# ---------------------------------------------------------------------------
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    --mount=type=cache,target=/var/lib/apt,sharing=locked \
+    if [ "${INSTALL_ANDROID}" = "true" ]; then \
+      apt-install openjdk-21-jdk-headless sdkmanager \
+      # JDK 21 is the default java, beside Java's 25 too: the Gradle 8 that
+      # most Android projects' wrappers name can't run on 25. Tool by tool,
+      # as the headless JDK has no GUI tools for update-java-alternatives.
+      && jdk="/usr/lib/jvm/java-21-openjdk-$(dpkg --print-architecture)" \
+      && for tool in "${jdk}"/bin/*; do \
+           name="$(basename "${tool}")"; \
+           if update-alternatives --list "${name}" 2>/dev/null | grep -qx "${tool}"; then \
+             update-alternatives --set "${name}" "${tool}"; \
+           fi; \
+         done; \
+    fi
+
+# ---------------------------------------------------------------------------
 # C# / .NET
 # ---------------------------------------------------------------------------
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
@@ -282,7 +306,8 @@ COPY --chmod=0644 ssh_config /etc/ssh/ssh_config.d/10-hardcode-proxy.conf
 # Last, so that editing it doesn't rebuild the layers above.
 COPY --chmod=0755 entrypoint.sh /usr/local/bin/hardcode-entrypoint
 
-ENV PATH=/home/${USERNAME}/.local/bin:/home/${USERNAME}/.cargo/bin:/home/${USERNAME}/go/bin:/home/${USERNAME}/.gem/bin:/home/${USERNAME}/perl5/bin:${PATH} \
+ENV PATH=/home/${USERNAME}/.local/bin:/home/${USERNAME}/.cargo/bin:/home/${USERNAME}/go/bin:/home/${USERNAME}/.gem/bin:/home/${USERNAME}/perl5/bin:/home/${USERNAME}/Android/Sdk/cmdline-tools/latest/bin:/home/${USERNAME}/Android/Sdk/platform-tools:${PATH} \
+    ANDROID_HOME=/home/${USERNAME}/Android/Sdk \
     NPM_CONFIG_PREFIX=/home/${USERNAME}/.local \
     GEM_HOME=/home/${USERNAME}/.gem \
     PERL5LIB=/home/${USERNAME}/perl5/lib/perl5 \
@@ -298,4 +323,4 @@ ENTRYPOINT ["/usr/bin/tini", "--", "/usr/local/bin/hardcode-entrypoint"]
 # The languages and tools this image was built with: `hardcode show` compares
 # them with the profile's, to say when a rebuild is due. Last, so that a
 # change of language doesn't throw away the cache of every layer above.
-LABEL io.github.hardcode-app.languages="python=${INSTALL_PYTHON} node=${INSTALL_NODE} java=${INSTALL_JAVA} dotnet=${INSTALL_DOTNET} go=${INSTALL_GO} rust=${INSTALL_RUST} cpp=${INSTALL_CPP} ruby=${INSTALL_RUBY} perl=${INSTALL_PERL} build_essentials=${INSTALL_BUILD_ESSENTIALS} docker=${INSTALL_DOCKER} claude_cli=${INSTALL_CLAUDE_CLI} codex_cli=${INSTALL_CODEX_CLI}"
+LABEL io.github.hardcode-app.languages="python=${INSTALL_PYTHON} node=${INSTALL_NODE} java=${INSTALL_JAVA} android=${INSTALL_ANDROID} dotnet=${INSTALL_DOTNET} go=${INSTALL_GO} rust=${INSTALL_RUST} cpp=${INSTALL_CPP} ruby=${INSTALL_RUBY} perl=${INSTALL_PERL} build_essentials=${INSTALL_BUILD_ESSENTIALS} docker=${INSTALL_DOCKER} claude_cli=${INSTALL_CLAUDE_CLI} codex_cli=${INSTALL_CODEX_CLI}"
