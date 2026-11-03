@@ -12,7 +12,7 @@ from hardcode_cli import allowlist, envfile, langs, override, profiles
 from hardcode_cli.compose import ComposeError
 from hardcode_cli.ops import STATUS_BYTES, Image, Ops
 
-from .helpers import FakeRunner, HomeTestCase, updated_catalogue
+from .helpers import FakeRunner, HomeTestCase, fake_host, updated_catalogue
 from .resolver import FakeResolver
 
 
@@ -47,6 +47,7 @@ class OpsTests(HomeTestCase):
             docker="docker",
             sleep=lambda _: None,
             resolve=self.resolver,
+            host=fake_host(),
         )
 
     def make_folder(self, name="src"):
@@ -795,6 +796,7 @@ class LanTests(HomeTestCase):
             sleep=lambda _: None,
             resolve=self.resolver,
             this_computer=lambda address: address in this_computer,
+            host=fake_host(),
         )
 
     def pins(self, ops):

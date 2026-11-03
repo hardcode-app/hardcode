@@ -454,6 +454,12 @@ input.mono {
   background: #fff;
 }
 
+/* A switch that can't be used: a device this computer doesn't have. */
+.switch input:disabled+span {
+  opacity: .4;
+  cursor: not-allowed;
+}
+
 /* ---- cards, grids, tables ----------------------------------------------- */
 .grid {
   display: grid;
@@ -478,6 +484,36 @@ input.mono {
   display: flex;
   flex-direction: column;
   gap: 14px;
+}
+
+/* The Overview's right-hand column: VS Code, and the devices under it. */
+.overview-side {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+/* The Devices card: a row per device, what it gives and its switch. */
+.device-list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.device-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  font-size: 13.5px;
+}
+
+.device-row .device-text {
+  flex: 1;
+  min-width: 0;
+}
+
+.device-row.unavailable b {
+  color: var(--muted);
 }
 
 /* Buttons side by side under a card's content. */
@@ -1136,6 +1172,15 @@ td.actions {
 /* The new-profile dialog: wide enough for three languages a row. */
 .modal-card.new-profile-card {
   width: 600px;
+}
+
+/* The dialog that turns a device on: room for its warning. */
+.modal-card.device-card {
+  width: 520px;
+}
+
+.modal-card.device-card .callout {
+  margin: 0;
 }
 
 /* The logs dialog: wide and tall, the log scrolling inside it. */

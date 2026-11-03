@@ -6,9 +6,11 @@ Each profile is a separate environment with its own ``.env`` (only what
 differs from compose.yaml's defaults), ``allowlist.txt`` and
 ``compose.override.yaml``, and its own containers, volumes, port and image.
 Two more files are written from those for the containers: the allowlist the
-proxy is given, and the VS Code extension list. Its own Dockerfile steps, if
-it has any, are in ``image/`` (see ``dockerfile``). A new profile starts from
-the stack's template (see ``stack``), or as a copy of another.
+proxy is given, and the VS Code extension list; and, while it has devices of
+this computer on, the Compose file that gives them to the VS Code container
+(see ``devices``). Its own Dockerfile steps, if it has any, are in
+``image/`` (see ``dockerfile``). A new profile starts from the stack's
+template (see ``stack``), or as a copy of another.
 """
 
 from __future__ import annotations
@@ -24,7 +26,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Iterable, Iterator, Optional
 
-from . import allowlist, dockerfile, envfile, lan, langs, override, stack, yamlio
+from . import allowlist, devices, dockerfile, envfile, lan, langs, override, stack, yamlio
 
 # A DNS label of up to 32 characters, because the name ends up in container
 # and resource names. The admin and the CRD also want a leading letter
@@ -102,6 +104,15 @@ class Profile:
         written from the profile's languages and its own extensions.
         """
         return self.dir / "vscode-extensions.txt"
+
+    @property
+    def devices_file(self) -> Path:
+        """
+        The Compose file that gives the VS Code container the devices of
+        this computer the profile has on (``devices.fragment``), merged
+        after the stack's files; there is none while it has none on.
+        """
+        return self.dir / devices.FRAGMENT
 
     @property
     def image_dir(self) -> Path:
@@ -330,7 +341,9 @@ def create(
     switches off.
 
     A copy also gets its source's ``image/`` folder, its own Dockerfile
-    steps, when it has one; a profile from the template has none.
+    steps, when it has one; a profile from the template has none. It gets
+    none of its source's devices: each one weakens the sandbox, and is
+    turned on for a profile of its own, with its warning.
     """
     if not valid_name(name):
         raise ProfileError(f"'{name}' is not a valid profile name ({NAME_RULE})")
@@ -378,6 +391,9 @@ def create(
 
         # A copy gets a token of its own, generated when it first starts.
         envfile.unset(target / ".env", "VSCODE_CONNECTION_TOKEN")
+
+        # A device weakens the sandbox: one profile's choice isn't another's.
+        envfile.unset(target / ".env", devices.ENV_KEY)
 
     port, subnet = _assign_network(root, name, target / ".env", warn, taken_subnets)
 

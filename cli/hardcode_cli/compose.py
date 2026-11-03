@@ -178,7 +178,9 @@ class Compose:
 
         A profile with Dockerfile steps of its own gets the stack's
         compose.image.yaml after compose.yaml, which builds them on
-        HardCode's image; its override still comes last.
+        HardCode's image. One with devices of this computer on gets the
+        file that gives them to the VS Code container next, from its own
+        folder (see ``devices``). Its override still comes last.
         """
         stack_dir = stack.current()
 
@@ -196,6 +198,8 @@ class Compose:
         ]
         if self.profile.dockerfile.is_file():
             command += ["-f", (stack_dir / stack.IMAGE_STEPS).as_posix()]
+        if self.profile.devices_file.is_file():
+            command += ["-f", self.profile.devices_file.as_posix()]
         if self.profile.override_file.exists():
             command += ["-f", self.profile.override_file.as_posix()]
 

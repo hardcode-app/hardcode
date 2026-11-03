@@ -50,6 +50,7 @@
         <div class="topbar-left">
           <h1 id="view-title">Overview</h1>
           <span id="status-pill" class="pill">checking…</span>
+          <span id="weakened" class="pill bad" hidden></span>
         </div>
         <div class="topbar-actions">
           <button class="btn" id="btn-start" title="docker compose up -d">▶ Start</button>
@@ -93,6 +94,16 @@
       <div class="field"><label>Port</label><input type="number" id="pm-port" class="mono" min="1" max="65535"></div>
       <div class="form-error" id="pm-error"></div>
       <div class="modal-actions"><button class="btn" id="pm-cancel">Cancel</button><button class="btn primary" id="pm-save">Move</button></div>
+    </div>
+  </div>
+  <div id="device-modal" class="modal hidden">
+    <div class="modal-card device-card">
+      <h2 id="dm-title">Turn a device on?</h2>
+      <p class="muted small" id="dm-summary"></p>
+      <div class="callout" id="dm-warning"></div>
+      <label class="check"><input type="checkbox" id="dm-understand"> I understand this weakens the sandbox</label>
+      <div class="form-error" id="dm-error"></div>
+      <div class="modal-actions"><button class="btn" id="dm-cancel">Cancel</button><button class="btn danger" id="dm-confirm" disabled>Turn it on</button></div>
     </div>
   </div>
   <div id="logs-modal" class="modal hidden">

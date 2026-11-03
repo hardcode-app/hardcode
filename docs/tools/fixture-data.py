@@ -10,15 +10,17 @@ admin API return.
 """
 
 import json
+import stat
 import subprocess
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path[:0] = [str(ROOT / "cli"), str(ROOT / "admin")]
 
 from hardcode_admin import manifests, totp  # noqa: E402
-from hardcode_cli import allowlist, blocked, dockerfile, langs  # noqa: E402
+from hardcode_cli import allowlist, blocked, devices, dockerfile, langs  # noqa: E402
 
 # A few refusals of each kind: repeated URLs, an upload, refused tunnels.
 SQUID_LOG = """\
@@ -106,6 +108,21 @@ def summarise(obj: dict) -> dict:
     }
 
 
+def device_host() -> devices.Host:
+    """
+    The computer the app's screenshots show: Linux, with /dev/kvm and an
+    AMD or Intel GPU's /dev/dri, and nothing else.
+    """
+    nodes = {"/dev/kvm": stat.S_IFCHR, "/dev/dri": stat.S_IFDIR}
+
+    def stat_of(path: str) -> SimpleNamespace:
+        if path not in nodes:
+            raise FileNotFoundError(path)
+        return SimpleNamespace(st_mode=nodes[path] | 0o660, st_gid=0)
+
+    return devices.Host(platform="linux", stat=stat_of, listdir=lambda path: [])
+
+
 def enrolment_qr(otpauth: str):
     """
     The enrolment QR code, made in the admin image, where the qrcode package
@@ -187,8 +204,13 @@ def main(stage: Path) -> None:
         "rebuildReasons": [],
     }
 
+    # Its devices: all off, on a computer with KVM and a GPU, whose Docker
+    # has no NVIDIA runtime.
+    app_devices = devices.states([], device_host(), lambda: devices.Runtimes(("io.containerd.runc.v2", "runc")))
+
     app_data = {
         "allowlist": allowlist.as_dicts(allowlist.effective(text, chosen)),
+        "devices": app_devices,
         "langs": app_langs,
         "extensions": langs.extension_sources(chosen, ["eamodio.gitlens", "somedev.handy-snippets"]),
         "image": image,

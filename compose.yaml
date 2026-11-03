@@ -31,7 +31,9 @@
 # outside the default home, the project and the VS Code image's tag carry a
 # short id of the home, so two homes' profiles of one name stay apart. A
 # profile with Dockerfile steps of its own, image/Dockerfile, gets
-# -f compose.image.yaml after compose.yaml, and HARDCODE_DOCKERFILE_DIGEST.)
+# -f compose.image.yaml after compose.yaml, and HARDCODE_DOCKERFILE_DIGEST;
+# one with devices of this computer on, VSCODE_DEVICES, gets
+# -f <profile>/compose.devices.yaml next, which hardcode writes.)
 
 name: ${HARDCODE_PROJECT:?run docker compose through hardcode (hardcode compose <args>), which names the profile}
 

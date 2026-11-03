@@ -21,6 +21,7 @@ from typing import Callable, Optional
 from . import (
     allowlist,
     bounded,
+    devices,
     dockerfile,
     envfile,
     home,
@@ -59,6 +60,8 @@ hardcode [-p NAME | --all] [--json] [--config DIR] <command> [args]
   forward <port> [vscode|docker] [target]                              unforward <port>
   mount <local> <remote> [--ro]  (--all)                             unmount <remote>  (--all)
   docker on|off  (--all)    the Docker daemon beside the VS Code container (off: nothing privileged, no docker)
+  devices                 this computer's devices the VS Code container may use (kvm, gpu, nvidia), on or off
+  device on|off <name> [--yes]  switch one on (it weakens the sandbox: asks first, or --yes) or off
   blocked [--since 30m]   what the proxy refused                     show     everything about the profile (--json)
 """
 
@@ -90,6 +93,7 @@ USER_ERRORS = (
     langs.LangError,
     packages.PackageError,
     dockerfile.DockerfileError,
+    devices.DeviceError,
     ComposeError,
     yamlio.YamlError,
 )
@@ -108,7 +112,8 @@ def _print_error(message: str) -> None:
 class App:
     """
     What the command handlers share: the home (where the profiles are), the
-    output mode, and the runner and printers (all injectable, for tests).
+    output mode, and the runner, printers and this computer as the devices
+    see it (all injectable, for tests).
     """
 
     def __init__(
@@ -123,6 +128,7 @@ class App:
         ask: Optional[Callable[[str], str]] = None,
         resolve: lan.Resolver = lan.resolve,
         this_computer: lan.ThisComputer = lan.is_this_computer,
+        host: Optional[devices.Host] = None,
     ):
         self.root = root
         self.home_id = home.home_id(root)
@@ -135,6 +141,7 @@ class App:
         self.ask = ask
         self.resolve = resolve
         self.this_computer = this_computer
+        self.host = host or devices.Host()
         self.results: list[Result] = []
 
     def profile(self, name: str) -> profiles.Profile:
@@ -150,6 +157,7 @@ class App:
             warn=self.err,
             resolve=self.resolve,
             this_computer=self.this_computer,
+            host=self.host,
         )
 
     def compose(self, name: str) -> Compose:
@@ -283,8 +291,14 @@ def _start(app: App, name: str, compose_args: list[str]) -> int:
     keeps the rules it last loaded, so it is reloaded afterwards when those
     aren't the file's: something changed, now or at a start or reload that
     failed before the proxy had it.
+
+    A device of this computer the profile has on, which this computer can't
+    give, stops the start before anything else, with why; the ones it can
+    are written for Compose with their groups as they are now.
     """
     ops = app.ops(name)
+    ops.check_devices()
+
     was_running = ops.compose.running()
 
     changes = ops.update_proxy_allowlist()
@@ -745,6 +759,66 @@ def cmd_docker(app: App, args: argparse.Namespace) -> int:
     return _for_each(app, args, lambda ops: ops.set_docker(args.state == "on"))
 
 
+def cmd_devices(app: App, args: argparse.Namespace) -> int:
+    """
+    The devices of this computer the profile's VS Code container may be
+    given: each one on or off, and whether this computer has it, or why not.
+    """
+    rows = app.ops(args.profile).device_states()
+
+    if app.json_output:
+        app.out(json.dumps({"devices": rows}, indent=2))
+        return 0
+
+    for row in rows:
+        mark = "on " if row["enabled"] else "off"
+        where = "available here" if row["available"] else f"not available here: {row['reason']}"
+
+        # What it gives, and under it whether this computer has it.
+        app.out(f"{mark}  {row['key']:<7} {row['summary']}")
+        app.out(f"{'':<13}{where}")
+
+    on = [row["key"] for row in rows if row["enabled"]]
+    if on:
+        app.out(f"\non, each weakening the sandbox: {', '.join(on)} (hardcode device off NAME takes one away)")
+
+    return 0
+
+
+def cmd_device(app: App, args: argparse.Namespace) -> int:
+    """
+    device on and device off. On says first, on a terminal, what the device
+    gives code in the sandbox, and asks; without a terminal (the app, a
+    script, --json) it needs --yes, and refuses without it. Off asks nothing.
+    """
+    enabled = args.state == "on"
+    declined: list[str] = []
+
+    def confirm(device: devices.Device) -> bool:
+        if args.yes:
+            return True
+
+        if app.ask is None:
+            raise devices.DeviceError(
+                f"device on {device.key} weakens the sandbox, and there is no terminal to ask on: "
+                f"hardcode -p {args.profile} device on {device.key} --yes, once you have read what it gives "
+                "(hardcode devices)"
+            )
+
+        app.err(f"Turning {device.key} on weakens profile '{args.profile}''s sandbox. {device.warning}")
+        answer = app.ask(f"Turn {device.key} on for profile '{args.profile}'? [y/N] ")
+
+        agreed = answer.strip().lower() in ("y", "yes")
+        if not agreed:
+            declined.append(device.key)
+        return agreed
+
+    code = _for_each(app, args, lambda ops: ops.set_device(args.name, enabled, confirm))
+
+    # A no is the user's, as it is for removing a profile: not done.
+    return 1 if declined else code
+
+
 def cmd_allowlist(app: App, args: argparse.Namespace) -> int:
     """
     Without an action, every entry the profile's allowlist has; with one,
@@ -927,6 +1001,7 @@ def cmd_show(app: App, args: argparse.Namespace) -> int:
     languages = [lang["key"] for lang in state["langs"] if lang["enabled"]]
     extensions = [row["id"] for row in state["extensions"] if row["enabled"]]
     steps = state["dockerfile"]["path"] if state["dockerfile"]["exists"] else "none (HardCode's image as it is)"
+    devices_on = [row["key"] for row in state["devices"] if row["enabled"]]
 
     app.out(f"profile {state['profile']}  (VS Code port {state['vscodePort']})")
     app.out("languages: " + (", ".join(languages) or "none"))
@@ -938,6 +1013,7 @@ def cmd_show(app: App, args: argparse.Namespace) -> int:
     app.out("forwards:  " + (", ".join(forwards) or "none"))
     app.out("mounts:    " + (", ".join(mounts) or "none"))
     app.out("docker:      " + ("on" if state["docker"] else "off (no Docker daemon; nothing privileged)"))
+    app.out("devices:   " + (f"{', '.join(devices_on)} (each weakens the sandbox)" if devices_on else "none"))
 
     return 0
 
@@ -1182,8 +1258,37 @@ def _add_image_commands(sub) -> None:
     rebuild = sub.add_parser("rebuild", help="rebuild the VS Code image and recreate the container")
     rebuild.set_defaults(func=cmd_rebuild)
 
-    show = sub.add_parser("show", help="the profile's allowlist, forwards, mounts, languages, packages and image")
+    show = sub.add_parser(
+        "show",
+        help="the profile's allowlist, forwards, mounts, languages, packages, image and devices",
+    )
     show.set_defaults(func=cmd_show)
+
+
+def _add_device_commands(sub) -> None:
+    """
+    ``devices``, and ``device on|off NAME``: one profile's at a time, never
+    ``--all``, as each device is a choice made for a profile of its own.
+    """
+    devices_command = sub.add_parser(
+        "devices",
+        help="this computer's devices the VS Code container may use: on or off, and whether this computer has them",
+    )
+    devices_command.set_defaults(func=cmd_devices)
+
+    device = sub.add_parser(
+        "device",
+        help="give the VS Code container a device of this computer, or take it away (on weakens the sandbox)",
+    )
+    device.add_argument("state", choices=["on", "off"])
+    device.add_argument("name", choices=list(devices.KEYS), help="kvm, gpu (AMD and Intel) or nvidia")
+    device.add_argument(
+        "-y",
+        "--yes",
+        action="store_true",
+        help="on: don't ask (without a terminal, it is needed)",
+    )
+    device.set_defaults(func=cmd_device)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -1214,6 +1319,7 @@ def build_parser() -> argparse.ArgumentParser:
     _add_allowlist_commands(sub)
     _add_network_commands(sub)
     _add_image_commands(sub)
+    _add_device_commands(sub)
 
     return parser
 
@@ -1240,6 +1346,7 @@ def main(
     env: Optional[dict[str, str]] = None,
     resolve: lan.Resolver = lan.resolve,
     this_computer: lan.ThisComputer = lan.is_this_computer,
+    host: Optional[devices.Host] = None,
 ) -> int:
     """
     Run the command line in *argv* and return the exit code.
@@ -1247,8 +1354,9 @@ def main(
     The command asks a question (with *ask*, ``input`` by default) only on a
     *terminal* (by default, when its input is one), and never with
     ``--json``. *env* stands in for the environment (the home, sudo) in
-    tests, *resolve* for this machine's name lookups and *this_computer* for
-    its test of whether an address is its own.
+    tests, *resolve* for this machine's name lookups, *this_computer* for
+    its test of whether an address is its own, and *host* for this computer
+    as the devices see it.
     """
     parser = build_parser()
     args = parser.parse_args(argv)
@@ -1282,6 +1390,7 @@ def main(
             ask=(ask or _ask) if terminal and not args.json else None,
             resolve=resolve,
             this_computer=this_computer,
+            host=host,
         )
         return args.func(app, args)
     except (CommandError, *USER_ERRORS) as error:

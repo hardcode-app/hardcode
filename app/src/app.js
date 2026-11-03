@@ -65,6 +65,7 @@ const state = {
   showToken: false, // whether the URL box shows the token, or hides it
   logsService: null, // the container whose logs the logs dialog shows
   logsTimer: null,
+  deviceDialog: null, // the key of the device the dialog would turn on, while it is open
 };
 
 const TITLES = {
@@ -97,6 +98,7 @@ const ALLOWLIST_OUTCOME = { applied: 'proxy reloaded', waiting: 'applies when th
 const EXTENSION_ADDED = { applied: 'installing in the background', waiting: 'applies when the sandbox starts' };
 const EXTENSION_REMOVED = { applied: 'removing in the background', waiting: 'applies when the sandbox starts' };
 const DOCKER_OUTCOME = { applied: 'containers recreated', waiting: 'applies when the sandbox starts' };
+const DEVICE_OUTCOME = { applied: 'VS Code container recreated', waiting: 'applies when the sandbox starts' };
 // The profile's own packages change nothing that runs: the image has them after its next rebuild.
 const PACKAGE_OUTCOME = { applied: '', waiting: '' };
 
@@ -561,6 +563,23 @@ function showStatusPill() {
   pill.title = title;
 }
 
+/**
+ * The header's mark of a weakened sandbox: while the profile shown has
+ * devices of this computer on, "weakened: kvm, gpu", with what that means
+ * in its tooltip; nothing while it has none, or there is no profile.
+ */
+function showWeakened() {
+  const badge = $('#weakened');
+  const on = state.data ? state.data.devices.filter((device) => device.enabled) : [];
+
+  badge.hidden = !on.length;
+  badge.textContent = `weakened: ${on.map((device) => device.key).join(', ')}`;
+  badge.title = on.length
+    ? `This profile's VS Code container can use ${joinNames(on.map((device) => device.name))} of this computer, ` +
+      "and each one weakens the sandbox. The Overview's Devices card switches them off."
+    : '';
+}
+
 /** Whether the profile's VS Code container is running. */
 function isUp() {
   return state.status.services.some((service) => service.service === 'vscode' && service.state === 'running');
@@ -812,6 +831,71 @@ $('#pm-port').onkeydown = (event) => {
   }
 };
 
+// ---------------------------------------------------------------------------
+// The dialog that turns a device of this computer on
+// ---------------------------------------------------------------------------
+
+/**
+ * Open the dialog that turns *device* on: what it gives code in the sandbox,
+ * in the CLI's words, and a box to tick that this is understood, without
+ * which it can't be confirmed.
+ */
+function openDeviceDialog(device) {
+  state.deviceDialog = device.key;
+
+  $('#dm-title').textContent = `Turn ${device.name} on for profile ${state.data.profile}?`;
+  $('#dm-summary').textContent = `It gives the VS Code container ${device.summary}. A running one is recreated with it.`;
+  $('#dm-warning').textContent = device.warning;
+  $('#dm-understand').checked = false;
+  $('#dm-confirm').disabled = true;
+  $('#dm-confirm').textContent = `Turn ${device.name} on`;
+  $('#dm-error').textContent = '';
+
+  $('#device-modal').classList.remove('hidden');
+}
+
+/** Close the device dialog, with nothing turned on. */
+function closeDeviceDialog() {
+  state.deviceDialog = null;
+  $('#device-modal').classList.add('hidden');
+}
+
+/**
+ * Turn the dialog's device on, once its box is ticked; what the CLI says is
+ * shown in the dialog when it refuses (the computer doesn't have it).
+ */
+async function confirmDevice() {
+  const key = state.deviceDialog;
+  if (!key || !$('#dm-understand').checked) {
+    return;
+  }
+
+  $('#dm-confirm').disabled = true;
+  try {
+    state.data = await api.invoke('device:set', key, true);
+  } catch (error) {
+    $('#dm-error').textContent = errorText(error);
+    $('#dm-confirm').disabled = !$('#dm-understand').checked;
+    return;
+  }
+
+  closeDeviceDialog();
+  render();
+  reportOutcome(DEVICE_OUTCOME);
+  refreshStatus();
+}
+
+$('#dm-understand').onchange = () => {
+  $('#dm-confirm').disabled = !$('#dm-understand').checked;
+};
+$('#dm-confirm').onclick = confirmDevice;
+$('#dm-cancel').onclick = closeDeviceDialog;
+document.addEventListener('keydown', (event) => {
+  if (event.key === 'Escape' && state.deviceDialog) {
+    closeDeviceDialog();
+  }
+});
+
 /** Open VS Code in the browser, at the URL the VS Code container gave. */
 function openVscode() {
   if (state.vscodeUrl) {
@@ -905,6 +989,7 @@ function render() {
   }
 
   $('#view-title').textContent = TITLES[state.view];
+  showWeakened();
   document.querySelectorAll('.nav-item').forEach((button) => {
     button.classList.toggle('active', button.dataset.view === state.view);
   });
@@ -1071,11 +1156,14 @@ function emptyServiceList() {
   return `<div class="empty">Not created yet. Press <b>Start</b> to build and run this profile's sandbox.</div>`;
 }
 
-/** The Overview: the profile's containers and VS Code, what it is built around, and counts for the rest. */
+/**
+ * The Overview: the profile's containers beside VS Code and the devices of
+ * this computer it may use, what it is built around, and counts for the rest.
+ */
 function overview() {
   return `
     <div class="overview">
-      <div class="grid cols-2">${profileCard()}${vscodeCard()}</div>
+      <div class="grid cols-2">${profileCard()}<div class="overview-side">${vscodeCard()}${devicesCard()}</div></div>
       ${languagesCard()}
       <div class="grid cols-4">${extensionsCount()}${otherCounts()}</div>
     </div>`;
@@ -1127,6 +1215,43 @@ function vscodeCard() {
         <div class="url-box"><input type="text" class="mono small" id="vscode-url" readonly placeholder="${esc(urlPlaceholder())}"><button class="btn small" id="show-token" title="Show or hide the token" ${ready ? '' : 'disabled'}>${state.showToken ? 'Hide' : 'Show'}</button><button class="btn small" id="copy-url" ${ready ? '' : 'disabled'}>Copy</button></div>
         <div class="row-buttons"><button class="btn small primary" data-act="vscode" ${ready ? '' : 'disabled'}>Open VS Code ↗</button><button class="btn small" id="new-token" title="A new token: every copy of this one stops working, and VS Code restarts" ${ready && !state.running ? '' : 'disabled'}>New token…</button></div>
       </div>`;
+}
+
+/**
+ * The Overview's Devices card: a switch for each device of this computer the
+ * VS Code container may be given, off unless the profile turned it on. One
+ * this computer doesn't have can't be switched on, and says why; one that is
+ * on can always be switched off. Switching one on asks first (the device
+ * dialog).
+ */
+function devicesCard() {
+  const busy = state.running ? 'disabled' : '';
+  const rows = state.data.devices.map((device) => deviceRow(device, busy)).join('');
+
+  return `
+      <div class="card" id="devices-card">
+        <div class="card-head"><h2>Devices</h2><span class="muted small">off unless you need one: each weakens the sandbox</span></div>
+        <div class="device-list">${rows}</div>
+      </div>`;
+}
+
+/** One device's row on the Devices card: its name, what it gives (or why this computer can't), and its switch. */
+function deviceRow(device, busy) {
+  const locked = !device.available && !device.enabled;
+  const note = device.available ? device.summary : `Not available here: ${device.reason}`;
+
+  let help = `Give the VS Code container ${device.summary}`;
+  if (device.enabled) {
+    help = `Take ${device.name} away from the VS Code container`;
+  } else if (locked) {
+    help = `Not available here: ${device.reason}`;
+  }
+
+  return (
+    `<div class="device-row${locked ? ' unavailable' : ''}">` +
+    `<div class="device-text"><b>${esc(device.name)}</b> <span class="mono muted small">${esc(device.key)}</span><div class="muted small">${esc(note)}</div></div>` +
+    `<label class="switch" title="${esc(help)}"><input type="checkbox" data-device="${esc(device.key)}" ${device.enabled ? 'checked' : ''} ${locked ? 'disabled' : busy}><span></span></label></div>`
+  );
 }
 
 /** The Overview's Languages / Tools card: what the profile is built around, and whether its image is behind. */
@@ -2261,7 +2386,7 @@ function bindImage() {
   }
 }
 
-/** The Overview's Docker daemon switch, Copy button and container rows. */
+/** The Overview's Docker daemon and device switches, Copy button and container rows. */
 function bindOverview() {
   each('[data-docker]', (toggle) => {
     // The switch sits on the daemon's row, which opens its logs: a click on
@@ -2272,6 +2397,25 @@ function bindOverview() {
       state.data = await change('docker:set', toggle.checked, 'profile');
       render();
       reportOutcome(DOCKER_OUTCOME);
+      refreshStatus();
+    };
+  });
+
+  // On waits for the dialog's yes, so the switch stays off until then; off
+  // happens at once.
+  each('[data-device]', (toggle) => {
+    toggle.onchange = async () => {
+      const device = state.data.devices.find((item) => item.key === toggle.dataset.device);
+
+      if (toggle.checked) {
+        toggle.checked = false;
+        openDeviceDialog(device);
+        return;
+      }
+
+      state.data = await change('device:set', device.key, false);
+      render();
+      reportOutcome(DEVICE_OUTCOME);
       refreshStatus();
     };
   });
@@ -2771,8 +2915,8 @@ $('#btn-home').onclick = () => call('home:open');
 
 // ---------------------------------------------------------------------------
 // Smoke mode (`--smoke`, for CI and tests/app.py): render every view once,
-// check what each must show, try the language, extension, package and
-// image channels against the real CLI, report what went wrong, and exit
+// check what each must show, try the language, extension, package, image
+// and device channels against the real CLI, report what went wrong, and exit
 // ---------------------------------------------------------------------------
 
 /** Wait until *condition* holds, for at most *milliseconds*; whether it did. */
@@ -3006,6 +3150,81 @@ async function checkImage(errors) {
   }
 }
 
+/**
+ * The Devices card and its dialog, through the bridge and the CLI for real,
+ * giving the sandbox nothing: a switch per device showing the profile's
+ * state, one this computer doesn't have locked with why; the header's mark
+ * only while one is on; the dialog's warning, its confirm locked until the
+ * box is ticked, and its Cancel; an off that is so already, which the CLI
+ * declines; and an on this computer can't give, which the CLI refuses
+ * whatever the page says.
+ */
+async function checkDevices(errors) {
+  const listed = state.data.devices;
+  if (!Array.isArray(listed) || listed.map((device) => device.key).join(',') !== 'kvm,gpu,nvidia') {
+    errors.push(`the profile's devices are ${JSON.stringify(listed)}`);
+    return;
+  }
+
+  for (const device of listed) {
+    const toggle = $(`#devices-card [data-device="${device.key}"]`);
+    if (!toggle) {
+      errors.push(`the Devices card has no switch for ${device.key}`);
+      continue;
+    }
+
+    const locked = !device.available && !device.enabled;
+    if (toggle.checked !== device.enabled || toggle.disabled !== locked) {
+      errors.push(`the ${device.key} switch is checked ${toggle.checked} and disabled ${toggle.disabled}, for ${JSON.stringify(device)}`);
+    }
+    if (locked && !$('#devices-card').textContent.includes(device.reason)) {
+      errors.push(`the Devices card does not say why ${device.key} isn't on this computer`);
+    }
+  }
+
+  const on = listed.filter((device) => device.enabled);
+  if ($('#weakened').hidden !== !on.length) {
+    errors.push(`the header's weakened mark is ${$('#weakened').hidden ? 'hidden' : 'shown'} with ${on.length} devices on`);
+  }
+
+  openDeviceDialog(listed[0]);
+  if ($('#device-modal').classList.contains('hidden') || $('#dm-warning').textContent !== listed[0].warning) {
+    errors.push("the device dialog does not open with the device's warning");
+  }
+  if (!$('#dm-confirm').disabled) {
+    errors.push('the device dialog can be confirmed before its box is ticked');
+  }
+  $('#dm-understand').click();
+  if ($('#dm-confirm').disabled) {
+    errors.push("ticking the device dialog's box does not let it be confirmed");
+  }
+  $('#dm-cancel').click();
+  if (!$('#device-modal').classList.contains('hidden') || state.deviceDialog) {
+    errors.push('Cancel does not close the device dialog');
+  }
+
+  try {
+    const result = (await api.invoke('device:set', 'kvm', false)).lastResults[0];
+    if (result.changed || result.message !== 'device kvm is already off') {
+      errors.push(`device:set kvm off: ${result.message}`);
+    }
+  } catch (error) {
+    errors.push(`device:set kvm off: ${errorText(error)}`);
+  }
+
+  const lacking = listed.find((device) => !device.available);
+  if (lacking) {
+    try {
+      await api.invoke('device:set', lacking.key, true);
+      errors.push(`device:set ${lacking.key} on was not refused, on a computer without it`);
+    } catch (error) {
+      if (!errorText(error).includes("can't be given to the VS Code container here")) {
+        errors.push(`device:set ${lacking.key} on: ${errorText(error)}`);
+      }
+    }
+  }
+}
+
 /** Whether *element* is on the screen: shown, not merely in the page. */
 function displayed(element) {
   return element.getClientRects().length > 0;
@@ -3150,6 +3369,9 @@ async function smoke() {
     errors.push('the Docker daemon switch does not show the profile state');
   }
 
+  // So must the devices of this computer it may use, beside it.
+  await checkDevices(errors);
+
   // The logs dialog, through the bridge and the CLI for real (the smoke
   // run's profile has no containers, so the log is empty, not an error).
   await openLogs('vscode');
@@ -3215,6 +3437,7 @@ async function showHomeProfile() {
     state.catalogue = where.catalogue;
     $('#view').innerHTML = '';
     $('#profile-select').innerHTML = '';
+    showWeakened();
     openNewProfile(true);
     return;
   }

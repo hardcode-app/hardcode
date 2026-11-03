@@ -119,7 +119,9 @@
    * extension and where it comes from; `packages` its own Ubuntu packages
    * and `dockerfile` its own Dockerfile steps ({path, exists}); `image`,
    * `rebuildNeeded` and `rebuildReasons` whether the image was built with
-   * the profile's languages, packages and steps, and what differs.
+   * the profile's languages, packages and steps, and what differs;
+   * `devices` each device of this computer the VS Code container may be
+   * given ({key, name, summary, warning, enabled, available, reason}).
    */
   async function refresh() {
     state = await cli(['show']);
@@ -142,6 +144,7 @@
       rebuildNeeded: state.rebuildNeeded,
       rebuildReasons: state.rebuildReasons,
       docker: state.docker,
+      devices: state.devices,
       busy: null,
     };
   }
@@ -402,6 +405,15 @@
 
     async 'docker:set'(enabled, scope) {
       return withResults(await cli(['docker', enabled ? 'on' : 'off'], scoped(scope)));
+    },
+
+    // A device of this computer for the profile's VS Code container: kvm,
+    // gpu or nvidia. The page asks first, with what the device gives code
+    // in the sandbox, so on is passed --yes; off asks nothing. One profile
+    // at a time, always.
+    async 'device:set'(key, enabled) {
+      const confirmed = enabled ? ['--yes'] : [];
+      return withResults(await cli(['device', enabled ? 'on' : 'off', ...confirmed, '--', key]));
     },
 
     // -- the stack

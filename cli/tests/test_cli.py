@@ -12,7 +12,7 @@ from unittest import mock
 import hardcode_cli
 from hardcode_cli import allowlist, cli, envfile, langs, profiles
 
-from .helpers import FakeRunner, HomeTestCase, updated_catalogue
+from .helpers import FakeRunner, HomeTestCase, fake_host, updated_catalogue
 from .resolver import FakeResolver
 
 NOT_RUNNING = "(profile 'default' isn't running; applies when it starts)"
@@ -38,11 +38,15 @@ class CliTestCase(HomeTestCase):
         self.this_computer = set()
         self.asked = []
 
+        # A Linux computer without devices: this machine's /dev is never read.
+        self.host = fake_host()
+
     def run_cli(self, *argv, running=False, runner=None, config=None, answers=None):
         """
         Run ``hardcode --config <home> <argv>``; returns the exit code and
         what was printed to stdout and stderr. With *answers*, the command
-        runs on a terminal and they answer its questions, in order.
+        runs on a terminal and they answer its questions, in order. The
+        computer is ``self.host``.
         """
         self.runner = runner or FakeRunner(running=running)
         out, err = [], []
@@ -59,6 +63,7 @@ class CliTestCase(HomeTestCase):
             terminal=answers is not None,
             resolve=self.resolver,
             this_computer=lambda address: address in self.this_computer,
+            host=self.host,
         )
         return code, "\n".join(out), "\n".join(err)
 

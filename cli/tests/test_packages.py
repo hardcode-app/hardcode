@@ -11,7 +11,7 @@ from hardcode_cli import envfile, langs, packages, profiles
 from hardcode_cli.ops import IMAGE_LANGUAGES_LABEL, IMAGE_PACKAGES_LABEL, Ops
 from hardcode_cli.packages import PackageError
 
-from .helpers import REPO, FakeRunner, HomeTestCase
+from .helpers import REPO, FakeRunner, HomeTestCase, fake_host
 from .test_cli import CliTestCase
 
 # The languages label of an image built with every language and tool.
@@ -97,7 +97,7 @@ class OpsTests(HomeTestCase):
         if not profiles.exists(self.root, "default"):
             profiles.create(self.root, "default", languages=list(langs.LANGS))
 
-        return Ops(self.root, profiles.get(self.root, "default"), runner=self.runner, docker="docker")
+        return Ops(self.root, profiles.get(self.root, "default"), runner=self.runner, docker="docker", host=fake_host())
 
     def stored(self, ops):
         return envfile.read(ops.profile.env_file).get(packages.ENV_KEY)

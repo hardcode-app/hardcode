@@ -16,7 +16,7 @@ from hardcode_cli.compose import Compose
 from hardcode_cli.dockerfile import DockerfileError
 from hardcode_cli.ops import BASE_IMAGE, IMAGE_DOCKERFILE_LABEL, IMAGE_LANGUAGES_LABEL, Ops
 
-from .helpers import REPO, FakeRunner, HomeTestCase, yaml_available
+from .helpers import REPO, FakeRunner, HomeTestCase, fake_host, yaml_available
 from .test_cli import CliTestCase
 
 # The languages label of an image built with every language and tool.
@@ -218,7 +218,7 @@ class OpsTests(HomeTestCase):
             profiles.create(self.root, name, languages=list(langs.LANGS))
             dockerfile.save(profiles.get(self.root, name).image_dir, dockerfile.STARTER)
 
-        return Ops(self.root, profiles.get(self.root, name), runner=self.runner, docker="docker")
+        return Ops(self.root, profiles.get(self.root, name), runner=self.runner, docker="docker", host=fake_host())
 
     def built_from(self, ops, digest):
         """

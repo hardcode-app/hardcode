@@ -1,7 +1,7 @@
 """
 Shared fixtures for the CLI's tests: a throwaway home and stack, a fake
-``docker compose`` runner, and the catalogue as a newer HardCode might have
-it.
+``docker compose`` runner, a computer with the device nodes a test wants,
+and the catalogue as a newer HardCode might have it.
 """
 
 from __future__ import annotations
@@ -9,14 +9,16 @@ from __future__ import annotations
 import dataclasses
 import json
 import shutil
+import stat
 import subprocess
 import tempfile
 import unittest
-from pathlib import Path
+from pathlib import Path, PurePosixPath
+from types import SimpleNamespace
 from typing import Iterable, Optional
 from unittest import mock
 
-from hardcode_cli import home, langs, stack, yamlio
+from hardcode_cli import devices, home, langs, stack, yamlio
 
 REPO = Path(__file__).resolve().parent.parent.parent
 
@@ -82,6 +84,52 @@ services: {}
 """
 
 
+def fake_host(nodes: Optional[dict[str, int]] = None, platform: str = "linux") -> devices.Host:
+    """
+    A computer for the device tests: *platform* (``sys.platform``'s name
+    for it), and the device nodes *nodes*, each with the group that owns
+    it (``{"/dev/kvm": 108}``). The folders they are in are there too, and
+    nothing else is: this machine's own /dev is never looked at.
+    """
+    nodes = dict(nodes or {})
+
+    folders = set()
+    for path in nodes:
+        folders.update(str(parent) for parent in PurePosixPath(path).parents)
+
+    def stat_of(path: str) -> SimpleNamespace:
+        if path in nodes:
+            return SimpleNamespace(st_mode=stat.S_IFCHR | 0o660, st_gid=nodes[path])
+        if path in folders:
+            return SimpleNamespace(st_mode=stat.S_IFDIR | 0o755, st_gid=0)
+        raise FileNotFoundError(path)
+
+    def listdir(path: str) -> list[str]:
+        if path not in folders:
+            raise FileNotFoundError(path)
+
+        inside = [PurePosixPath(item) for item in (*nodes, *folders) if item != path]
+        return sorted({item.relative_to(path).parts[0] for item in inside if item.is_relative_to(path)})
+
+    return devices.Host(platform=platform, stat=stat_of, listdir=listdir)
+
+
+# Device nodes as a Linux computer with KVM and an AMD GPU has them: KVM's
+# group, the video group's card and the render group's render node (and a
+# folder of links beside them), and ROCm's compute node.
+KVM_NODES = {"/dev/kvm": 108}
+GPU_NODES = {
+    "/dev/dri/card0": 44,
+    "/dev/dri/renderD128": 992,
+    "/dev/dri/by-path/pci-0000:03:00.0-render": 992,
+}
+KFD_NODES = {"/dev/kfd": 992}
+
+# The runtimes docker info lists for a Docker without, and with, NVIDIA's.
+RUNTIMES = {"io.containerd.runc.v2": {"path": "runc"}, "runc": {"path": "runc"}}
+NVIDIA_RUNTIMES = {**RUNTIMES, "nvidia": {"path": "nvidia-container-runtime"}}
+
+
 def yaml_available() -> bool:
     """
     Whether a YAML backend (yq, PyYAML or Docker) exists here.
@@ -127,8 +175,10 @@ class FakeRunner:
     reports, ``published`` is where ``docker compose port`` says the running
     gateway publishes VS Code, ``image_labels`` are the VS Code image's labels
     (``None``: no image), ``log_output`` is what ``docker compose logs``
-    prints, and ``networks`` are Docker's networks, with their subnets. A
-    command containing any string in ``fail_on`` fails.
+    prints, ``networks`` are Docker's networks, with their subnets, and
+    ``runtimes`` the runtimes ``docker info`` lists (``None``: it can't say,
+    the daemon isn't running). A command containing any string in
+    ``fail_on`` fails.
     """
 
     def __init__(self, running: bool = False, healthy: bool = True):
@@ -140,6 +190,7 @@ class FakeRunner:
         self.extension_status: Optional[dict] = None  # what the running container's extension sync wrote
         self.log_output = ""
         self.networks: dict[str, str] = {}  # Docker's networks: name -> their subnets, space-separated
+        self.runtimes: Optional[dict] = dict(RUNTIMES)  # what docker info lists; None: it can't say
         self.fail_on: set[str] = set()
         self.stdout_targets: list = []  # where each command's stdout went: "captured", a file, or None (inherited)
 
@@ -175,6 +226,10 @@ class FakeRunner:
             code = 0 if self.running else 1
         elif " logs " in joined:
             stdout = self.log_output
+        elif argv[1:2] == ["info"]:
+            if self.runtimes is None:
+                return subprocess.CompletedProcess(argv, 1, "", "Cannot connect to the Docker daemon. Is it running?\n")
+            stdout = json.dumps(self.runtimes)
         elif argv[1:4] == ["network", "ls", "-q"]:
             stdout = "".join(f"{name}\n" for name in self.networks)
         elif argv[1:3] == ["network", "inspect"]:

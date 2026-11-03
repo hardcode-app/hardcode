@@ -12,9 +12,12 @@ own profiles are never touched.
 
 from __future__ import annotations
 
+import json
 import os
 import re
 import secrets
+import shutil
+import stat
 import sys
 import tempfile
 import zipfile
@@ -36,6 +39,9 @@ COPY = f"{TAG}-copy"
 # and `compose config` works as it does anywhere.
 NO_DAEMON = "unix:///nonexistent/hardcode-cli-scenario.sock"
 REAL_DAEMON = os.environ.get("DOCKER_HOST", "unix:///var/run/docker.sock")
+
+# The stand-in docker whose Docker has NVIDIA's runtime (the rest is the real one's).
+DOCKER_WITH_NVIDIA = ROOT / "tests" / "fixtures" / "docker_with_nvidia.py"
 
 # Every language and tool: the scenario switches some of them off later.
 LANGUAGES = [
@@ -394,6 +400,115 @@ def check_packages(suite: Suite, home: Home) -> None:
     )
 
 
+def check_devices(suite: Suite, home: Home) -> None:
+    """
+    Devices of this computer, as the real ``docker compose config``
+    resolves the file the command writes for them: NVIDIA's request, with a
+    stand-in docker whose Docker has NVIDIA's runtime, and KVM's node and
+    group where this computer has /dev/kvm. Only the VS Code container gets
+    them; with none on, there is no file.
+    """
+    hc = home.hardcode
+    devices_file = home.root / "profiles" / "default" / "compose.devices.yaml"
+    resolved_file = home.root.parent / "resolved.json"
+
+    def resolved(env: Optional[dict[str, str]] = None) -> dict:
+        """
+        The profile's services, as Compose resolves its files: {} when it can't.
+        """
+        output = hc("compose", "config", "--format", "json", "--output", resolved_file, env=env)
+        if not output.ok:
+            return {}
+        return json.loads(resolved_file.read_text(encoding="utf-8"))["services"]
+
+    def reservations(service: dict) -> list:
+        """
+        The devices a service asks Docker for (deploy.resources.reservations).
+        """
+        return (((service.get("deploy") or {}).get("resources") or {}).get("reservations") or {}).get("devices") or []
+
+    suite.section("devices")
+    listed = hc("devices")
+    suite.expect("devices lists the three, all off", listed, r"^off  kvm .*\n.*\noff  gpu .*\n.*\noff  nvidia ")
+    suite.check("no file without devices", not devices_file.exists())
+    suite.expect_failure(
+        "a Docker that can't say it has NVIDIA's runtime doesn't give NVIDIA GPUs",
+        hc("device", "on", "nvidia", "--yes"),
+        r"can't be given to the VS Code container here: Docker can't say whether it has NVIDIA's runtime",
+    )
+
+    # A docker that says it has NVIDIA's runtime, and is the real one otherwise.
+    bin_dir = home.root.parent / "nvidia-bin"
+    bin_dir.mkdir()
+    shutil.copyfile(DOCKER_WITH_NVIDIA, bin_dir / "docker")
+    (bin_dir / "docker").chmod(0o755)
+    nvidia = {"PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}", "REAL_DOCKER": shutil.which("docker") or "docker"}
+
+    suite.expect_failure(
+        "without a terminal, on needs --yes",
+        hc("device", "on", "nvidia", env=nvidia),
+        r"weakens the sandbox, and there is no terminal to ask on",
+    )
+    suite.expect("device on nvidia --yes", hc("device", "on", "nvidia", "--yes", env=nvidia), r"^device nvidia on")
+    suite.check("the file is written into the profile's folder", devices_file.is_file())
+    suite.expect("compose config takes it", hc("compose", "config", "--quiet"))
+
+    services = resolved()
+    suite.check(
+        "the VS Code container asks for every NVIDIA GPU",
+        reservations(services.get("vscode", {})) == [{"capabilities": ["gpu"], "driver": "nvidia", "count": -1}],
+        json.dumps(services.get("vscode", {}).get("deploy")),
+    )
+    suite.check(
+        "...keeping its memory cap",
+        services.get("vscode", {}).get("mem_limit") == str(8 * 1024**3),
+        str(services.get("vscode", {}).get("mem_limit")),
+    )
+    suite.check(
+        "the Docker daemon gets nothing",
+        reservations(services.get("docker", {})) == [] and not services.get("docker", {}).get("group_add"),
+        json.dumps(services.get("docker", {}).get("deploy")),
+    )
+    suite.expect_failure(
+        "a start refuses a device the computer can't give, before anything starts",
+        hc("up"),
+        r"has device nvidia on, but Docker can't say whether it has NVIDIA's runtime",
+    )
+
+    # KVM's node and its group, where this computer has them; else the refusal.
+    kvm = Path("/dev/kvm")
+    if kvm.exists() and stat.S_ISCHR(kvm.stat().st_mode):
+        suite.expect("device on kvm --yes", hc("device", "on", "kvm", "--yes"), r"^device kvm on")
+
+        vscode = resolved().get("vscode", {})
+        group = kvm.stat().st_gid
+        suite.check(
+            "the VS Code container gets /dev/kvm",
+            {"source": "/dev/kvm", "target": "/dev/kvm", "permissions": "rwm"} in (vscode.get("devices") or []),
+            json.dumps(vscode.get("devices")),
+        )
+        suite.check(
+            "...and its group",
+            group == 0 or str(group) in (vscode.get("group_add") or []),
+            json.dumps(vscode.get("group_add")),
+        )
+        suite.expect("device off kvm", hc("device", "off", "kvm"), r"^device kvm off")
+    else:
+        suite.expect_failure(
+            "a computer without /dev/kvm can't give it",
+            hc("device", "on", "kvm", "--yes"),
+            r"this computer has no /dev/kvm",
+        )
+
+    suite.expect("device off nvidia asks nothing", hc("device", "off", "nvidia"), r"^device nvidia off")
+    suite.check("the last one off takes the file away", not devices_file.exists())
+    suite.check(
+        "and the VS Code container is as it was",
+        reservations(resolved().get("vscode", {})) == [],
+        resolved_file.read_text(encoding="utf-8")[:2000],
+    )
+
+
 def check_mounts(suite: Suite, home: Home) -> None:
     hc = home.hardcode
 
@@ -635,6 +750,7 @@ def run_checks(suite: Suite) -> None:
         check_docker_daemon(suite, home)
         check_languages(suite, home)
         check_packages(suite, home)
+        check_devices(suite, home)
         check_image_steps(suite, home)
         check_removal(suite, home)
 

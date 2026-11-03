@@ -18,7 +18,20 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Callable, Optional
 
-from . import allowlist, blocked, bounded, dockerfile, envfile, lan, langs, override, packages, profiles, stack
+from . import (
+    allowlist,
+    blocked,
+    bounded,
+    devices,
+    dockerfile,
+    envfile,
+    lan,
+    langs,
+    override,
+    packages,
+    profiles,
+    stack,
+)
 from .compose import Compose, ComposeError, Runner
 
 # Where the VS Code container's extension sync says how far it has got,
@@ -153,6 +166,9 @@ def _pinned_name(entry: str) -> str:
 class Ops:
     """
     The operations on one profile of a checkout.
+
+    *host* is this computer as the devices see it (``devices.Host``): its
+    platform and its device nodes, which tests replace.
     """
 
     def __init__(
@@ -165,12 +181,14 @@ class Ops:
         warn: Callable[[str], None] = _print_warning,
         resolve: lan.Resolver = lan.resolve,
         this_computer: lan.ThisComputer = lan.is_this_computer,
+        host: Optional[devices.Host] = None,
     ):
         self.root = root
         self.profile = profile
         self.warn = warn
         self.resolve = resolve
         self.this_computer = this_computer
+        self.host = host or devices.Host()
         self.compose = Compose(profile, runner=runner, docker=docker, sleep=sleep)
 
     # -- helpers --------------------------------------------------------------
@@ -889,6 +907,166 @@ class Ops:
         # switching on, the daemon starts beside it.
         self.compose.run("--progress", "quiet", "up", "-d", capture=True, check=True)
 
+    # -- devices of this computer ----------------------------------------------
+
+    def devices_on(self) -> list[str]:
+        """
+        The devices the profile has on, from ``VSCODE_DEVICES``, in the
+        catalogue's order; what isn't a device is left out.
+        """
+        return devices.ordered(self._devices_named())
+
+    def _devices_named(self) -> list[str]:
+        """
+        Everything ``VSCODE_DEVICES`` names, a device or not.
+        """
+        return devices.parse(envfile.read(self.profile.env_file).get(devices.ENV_KEY, ""))
+
+    def _docker_runtimes(self) -> devices.Runtimes:
+        """
+        The runtimes this computer's Docker has, as ``docker info`` lists
+        them; or why it couldn't say (no docker command, no daemon).
+        """
+        try:
+            result = self.compose.run_docker("info", "--format", "{{json .Runtimes}}", timeout=30)
+        except (ComposeError, bounded.OutputTooLarge, OSError, subprocess.TimeoutExpired) as error:
+            return devices.Runtimes(None, str(error) or "docker info failed")
+
+        if result.returncode != 0:
+            complaint = (result.stderr or result.stdout or "").strip().splitlines()
+            return devices.Runtimes(None, complaint[-1] if complaint else "docker info failed")
+
+        return devices.parse_runtimes(result.stdout)
+
+    def _device_problem(self, key: str) -> str:
+        """
+        Why this computer can't give the VS Code container the device *key*;
+        ``""`` when it can.
+        """
+        return devices.unavailable(key, self.host, self._docker_runtimes)
+
+    def device_states(self) -> list[dict]:
+        """
+        Every device, on or off for the profile, and whether this computer
+        has it (``devices.states``).
+        """
+        return devices.states(self.devices_on(), self.host, self._docker_runtimes)
+
+    def write_devices(self) -> bool:
+        """
+        Write the Compose file that gives the VS Code container the devices
+        the profile has on, with their groups as this computer has them now;
+        none is no file. Whether that changed it.
+        """
+        return devices.write(self.profile.devices_file, self.devices_on(), self.host)
+
+    def check_devices(self) -> None:
+        """
+        Before a start: refuse to start with a device this computer can't
+        give, saying why and what to do, or with ``VSCODE_DEVICES`` naming
+        something that isn't a device; then write the Compose file for the
+        devices (see ``write_devices``). A profile without any asks nothing
+        of Docker.
+        """
+        name = self.profile.name
+        named = self._devices_named()
+
+        strangers = devices.unknown(named)
+        if strangers:
+            raise devices.DeviceError(
+                f"{devices.ENV_KEY} in profile '{name}''s .env names {', '.join(strangers)}, which isn't a device: "
+                f"the devices are {', '.join(devices.KEYS)} (hardcode -p {name} devices lists them)"
+            )
+
+        for key in devices.ordered(named):
+            problem = self._device_problem(key)
+            if problem:
+                raise devices.DeviceError(
+                    f"profile '{name}' has device {key} on, but {problem}; "
+                    f"or switch it off: hardcode -p {name} device off {key}"
+                )
+
+        self.write_devices()
+
+    def set_device(self, key: str, enabled: bool, confirm: Callable[[devices.Device], bool]) -> Result:
+        """
+        Switch a device of this computer on or off for the VS Code
+        container: ``VSCODE_DEVICES`` in the ``.env``, the Compose file
+        written from it, and the VS Code container recreated with them if
+        the profile is running (only it: the Docker daemon gets no devices).
+
+        On is refused for a device this computer can't give, and needs
+        *confirm*'s yes, asked with the device; off asks nothing. Either the
+        whole change happens, or none of it: when Compose rejects the file,
+        or the container can't be recreated with it, both files go back,
+        and the container is recreated from them again.
+        """
+        key = devices.check(key)
+        word = "on" if enabled else "off"
+
+        current = self.devices_on()
+        if (key in current) == enabled:
+            return Result(self.profile.name, f"device {key} is already {word}", changed=False)
+
+        if enabled:
+            problem = self._device_problem(key)
+            if problem:
+                raise devices.DeviceError(f"device {key} can't be given to the VS Code container here: {problem}")
+
+            if not confirm(devices.BY_KEY[key]):
+                return Result(self.profile.name, f"device {key} stays off", changed=False)
+
+        wanted = [other for other in current if other != key] + ([key] if enabled else [])
+
+        # What the two files were, to put back when the change can't be made.
+        env_file = self.profile.env_file
+        fragment_file = self.profile.devices_file
+        env_before = env_file.read_bytes()
+        fragment_before = fragment_file.read_bytes() if fragment_file.exists() else None
+
+        def restore() -> None:
+            """
+            Put both files back as they were; a file that wasn't there goes.
+            """
+            env_file.write_bytes(env_before)
+            if fragment_before is None:
+                fragment_file.unlink(missing_ok=True)
+            else:
+                fragment_file.write_bytes(fragment_before)
+
+        try:
+            self._write_device_list(wanted)
+            self.write_devices()
+            ok, complaint = self.compose.config_check()
+        except BaseException:
+            # Docker missing, a check that timed out: nothing was applied, so
+            # nothing may stay written either.
+            restore()
+            raise
+
+        if not ok:
+            restore()
+            raise devices.DeviceError(f"compose rejected the change; it was undone: {complaint}")
+
+        try:
+            applied = self._recreate("vscode")
+        except ComposeError as error:
+            restore()
+            self._restart_as_before("vscode")
+            raise ComposeError(f"{error}; the change was undone") from error
+
+        return Result(self.profile.name, f"device {key} {word}", applied=applied)
+
+    def _write_device_list(self, keys: list[str]) -> None:
+        """
+        Record the devices the profile has on in its ``.env``; none is
+        unset, which is off.
+        """
+        if keys:
+            envfile.set_value(self.profile.env_file, devices.ENV_KEY, devices.join(keys))
+        else:
+            envfile.unset(self.profile.env_file, devices.ENV_KEY)
+
     # -- languages -------------------------------------------------------------
 
     def set_language(self, lang: str, enabled: bool, build: bool = True) -> Result:
@@ -1273,6 +1451,7 @@ class Ops:
             "rebuildNeeded": None if reasons is None else bool(reasons),
             "rebuildReasons": reasons,
             "docker": self.compose.docker_enabled(),
+            "devices": self.device_states(),
         }
 
     def services(self) -> list[dict]:

@@ -3,11 +3,12 @@
  * the documentation screenshots: `window.hardcode` answers from fixture data
  * (fixture-data.json, written by fixture-data.py) instead of running the CLI.
  *
- * `?view=<a nav view | new-profile | console | logs>` and `&scope=all` choose
- * what is shown; `&q=` types into the allowlist's search box. The nav views
- * are overview, langs, extensions, allowlist, blocked, forwards and mounts.
- * On the overview and extensions, the VS Code container is still installing
- * extensions, so the status pill and the Extensions view show it.
+ * `?view=<a nav view | new-profile | console | logs | device>` and
+ * `&scope=all` choose what is shown; `&q=` types into the allowlist's search
+ * box. The nav views are overview, langs, extensions, allowlist, blocked,
+ * forwards and mounts; device is the Overview with the dialog that turns KVM
+ * on. On the overview and extensions, the VS Code container is still
+ * installing extensions, so the status pill and the Extensions view show it.
  */
 'use strict';
 
@@ -26,8 +27,8 @@
     notes: 'https://github.com/you/hardcode/releases/tag/v0.3.0',
   };
 
-  // The profile the page shows; the allowlist, languages, extensions and
-  // image come from the fixture.
+  // The profile the page shows; the allowlist, languages, extensions, image
+  // and devices come from the fixture.
   const state = {
     home: '/home/you/.config/hardcode',
     profile: 'default',
@@ -52,6 +53,7 @@
     image: { built: null, languages: null },
     rebuildNeeded: null,
     docker: true,
+    devices: [],
     busy: null,
   };
 
@@ -119,6 +121,7 @@
     state.rebuildReasons = data.rebuildReasons;
     state.packages = data.packages;
     state.lan = data.lan;
+    state.devices = data.devices;
     return state;
   }
 
@@ -252,6 +255,13 @@
     if (view === 'logs') {
       await waitFor(() => $('[data-logs="squid"]'));
       $('[data-logs="squid"]').click();
+      return;
+    }
+
+    // The switch opens the dialog; the profile's state is left as it is.
+    if (view === 'device') {
+      await waitFor(() => $('[data-device="kvm"]'));
+      $('[data-device="kvm"]').click();
       return;
     }
 
