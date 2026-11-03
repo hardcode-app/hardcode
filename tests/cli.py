@@ -363,10 +363,12 @@ def check_languages(suite: Suite, home: Home) -> None:
     suite.expect("disable two at once", hc("disable", "c#", "java", "--no-build"), r"dotnet off, java off")
     suite.check("off is unset in .env", "INSTALL_DOTNET=" not in home.profile_file("default", ".env"))
 
+    # C#'s entries go. Java's all come with Android too, which is still on,
+    # so they stay: an entry goes when no language that's on provides it.
     given = home.profile_file("default", "proxy-allowlist.txt")
     suite.check(
-        "the proxy is no longer given their entries",
-        "api.nuget.org" not in given and "repo1.maven.org" not in given,
+        "the proxy is no longer given their entries, but still those a language that's on provides",
+        "api.nuget.org" not in given and "repo1.maven.org" in given,
         given,
     )
     suite.expect("languages says so", hc("languages"), r"^off\s+java ")
