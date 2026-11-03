@@ -85,6 +85,10 @@ capped() {
 shoot() {
   local name="$1" url="$2"
 
+  # Chrome's output goes nowhere: without this, a Chrome that didn't start
+  # would leave the last run's picture to pass for this one.
+  rm -f "$OUT/$name.png"
+
   capped "$CHROME" \
     --headless=new --disable-gpu --hide-scrollbars --no-first-run --disable-extensions \
     --user-data-dir="$STAGE/chrome" \

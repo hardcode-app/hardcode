@@ -592,6 +592,12 @@ tr.section-row td {
   letter-spacing: .02em;
 }
 
+/* A long entry (a path such as storage.googleapis.com/proxy-golang-org-prod)
+   wraps, rather than widening the table past its columns of badges. */
+td.entry {
+  overflow-wrap: anywhere;
+}
+
 tr.disabled td.entry {
   color: var(--muted);
   text-decoration: line-through;
