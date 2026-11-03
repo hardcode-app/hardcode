@@ -112,20 +112,25 @@ class EffectiveSpecTests(unittest.TestCase):
         self.assertEqual(manifests.with_memory_limit("junk", manifests.SQUID_RESOURCES)["limits"]["memory"], "512Mi")
 
     def test_compose_and_the_chart_pin_the_same_images(self):
-        # Dependabot moves both in one pull request: compose.yaml's
-        # "image:" lines, and the chart's values keys named "image".
+        # Dependabot moves each pair together: CoreDNS in compose.yaml's
+        # "image:" line, and Docker's image in the FROM line of the Docker
+        # sidecar's Dockerfile, which Compose builds HardCode's image on; and
+        # the chart's values keys named "image".
         compose = (REPO / "compose.yaml").read_text(encoding="utf-8")
+        sidecar = (REPO / "images" / "docker" / "Dockerfile").read_text(encoding="utf-8")
         chart = chart_defaults()
 
-        for key, name in (("coredns", "coredns/coredns"), ("docker", "docker")):
-            with self.subTest(image=name):
-                in_compose = re.search(rf"^ +image: ({re.escape(name)}:\S+)$", compose, re.MULTILINE)
-
-                self.assertIsNotNone(in_compose, f"no {name} image in compose.yaml")
+        pinned = {
+            "coredns": re.search(r"^ +image: (coredns/coredns:\S+)$", compose, re.MULTILINE),
+            "docker": re.search(r"^FROM (docker:\S+)$", sidecar, re.MULTILINE),
+        }
+        for key, found in pinned.items():
+            with self.subTest(image=key):
+                self.assertIsNotNone(found, f"no {key} image pinned")
                 self.assertEqual(
                     chart[key]["image"],
-                    in_compose.group(1),
-                    f"the chart's profileDefaults.{key}.image follows compose.yaml",
+                    found.group(1),
+                    f"the chart's profileDefaults.{key}.image follows it",
                 )
 
     def test_the_operator_has_no_images_of_its_own(self):
