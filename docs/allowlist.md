@@ -35,9 +35,10 @@ is [below](#what-hardcode-provides).
 
 ![The Allowlist page](images/app-allowlist.png)
 
-**In the app**, open **Allowlist**. HardCode's entries come first, block by
-block (*VS Code · every profile*, then *Python · comes with the language*
-and so on), then the profile's own, under *Custom · this profile's own*.
+**In the app**, open **Allowlist**. The profile's own entries come first,
+under *Custom · this profile's own*, so one you add is in sight; then
+HardCode's, block by block (*VS Code · every profile*, then *Python ·
+comes with the language* and so on).
 Each row shows the entry's type (host, subdomains, path, ssh) and access
 (read-only, `rw`, `ssh`). Search and the filter buttons narrow the list:
 *provided* and *your own* show just those.

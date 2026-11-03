@@ -51,6 +51,7 @@ const state = {
   running: null, // the name of the command whose output is streaming to the console
   runningId: null, // its stream id, for the Stop button
   prefill: null, // {entry, flag} handed from Blocked traffic to the allowlist form
+  adding: null, // {entry, flag}: the allowlist entry being added, shown until the CLI answers
   vscodeUrl: '', // VS Code's URL with its token, once the running VS Code container has told it
   vscodeError: '', // why it couldn't, when it couldn't
   vscodeFetching: false,
@@ -227,6 +228,19 @@ function languageOutcome(lang, enabled) {
   }
 
   return { applied: now.join(' · '), waiting: 'applies when the sandbox starts' };
+}
+
+/**
+ * What the toast says as an allowlist entry is being added: that, where to,
+ * and that the proxy is reloading when this profile's is running.
+ */
+function addingMessage(entry) {
+  if (state.scope === 'all') {
+    return `Adding ${entry} to every profile…`;
+  }
+
+  const proxyRunning = state.status.services.some((service) => service.service === 'squid' && service.state === 'running');
+  return proxyRunning ? `Adding ${entry} · reloading the proxy…` : `Adding ${entry}…`;
 }
 
 /** Whether the running sandbox took any of the last change's results. */
@@ -1487,6 +1501,44 @@ function sectionRow(entry) {
 }
 
 /**
+ * The entry being added (state.adding) among the rows to show, where the
+ * CLI puts it: after the profile's own, which come first. It is shown
+ * whatever the search and the filter say, being what was just typed.
+ */
+function withAdding(entries) {
+  if (!state.adding) {
+    return entries;
+  }
+
+  const row = {
+    ...state.adding,
+    id: null,
+    kind: '',
+    comment: '',
+    enabled: true,
+    provided: false,
+    source: 'custom',
+    section: 'Custom',
+    adding: true,
+  };
+
+  const firstProvided = entries.findIndex((entry) => entry.provided);
+  const at = firstProvided === -1 ? entries.length : firstProvided;
+
+  return [...entries.slice(0, at), row, ...entries.slice(at)];
+}
+
+/** The row of the entry being added: no switch or ✕ until the CLI has written it. */
+function addingRow(entry) {
+  return `<tr class="adding">
+      <td style="width:48px"></td>
+      <td class="entry mono">${esc(entry.entry)}</td>
+      <td><span class="badge info">adding…</span> ${accessBadge(entry.flag)}</td>
+      <td class="muted small"></td>
+      <td class="actions"></td></tr>`;
+}
+
+/**
  * The allowlist table's rows, with a heading row where a section starts.
  * An entry HardCode provides can be switched off, but not deleted: it comes
  * with every profile, or with its language. A language's has a way to the
@@ -1504,6 +1556,11 @@ function allowlistRows(entries) {
     if (section !== lastSection) {
       html += sectionRow(entry);
       lastSection = section;
+    }
+
+    if (entry.adding) {
+      html += addingRow(entry);
+      continue;
     }
 
     const invalid = entry.invalid ? ' <span class="badge" style="color:var(--danger)">invalid</span>' : '';
@@ -1540,7 +1597,8 @@ function allowlist() {
   const data = state.data;
   const filter = state.allowlistFilter;
   const query = state.allowlistQuery.toLowerCase();
-  const rows = allowlistRows(data.allowlist.filter((entry) => entryMatches(entry, query, filter)));
+  const shown = data.allowlist.filter((entry) => entryMatches(entry, query, filter));
+  const rows = allowlistRows(withAdding(shown));
   const prefill = state.prefill || {};
   const all = state.scope === 'all';
 
@@ -1567,7 +1625,7 @@ function allowlist() {
       <div class="form-row">
         <div class="field grow"><label>Entry</label><input type="text" class="mono" id="al-entry" placeholder="example.com  ·  .example.com  ·  github.com/myuser  ·  host:22 (ssh)" value="${esc(prefill.entry || '')}"></div>
         <div class="field"><label>Access</label><select id="al-flag">${accessOptions}</select></div>
-        <button class="btn primary" data-act="add-allowlist">Add${all ? ' to all' : ''}</button>
+        <button class="btn primary" data-act="add-allowlist" ${state.adding ? 'disabled' : ''}>Add${all ? ' to all' : ''}</button>
       </div>
       <div class="form-error" id="al-error"></div>
       <p class="muted small" style="margin:0">Read-only still lets git clone, fetch and pull. A path such as <code>github.com/myuser</code> allows only that namespace. The entries HardCode provides (every profile's, and those of the languages and tools that are on) can be switched off but not deleted: one switched off stays off through updates, and one an update adds arrives switched on. Every change is written to <code>profiles/${esc(data.profile)}/allowlist.txt</code> and applied to the running proxy at once; with the sandbox stopped it applies at the next start. <b>Reload</b> is for edits you made to the file by hand.</p>
@@ -1935,15 +1993,35 @@ const actions = {
     const entry = $('#al-entry').value.trim();
     const flag = $('#al-flag').value;
 
-    // A refused entry is explained next to the form, not in a toast.
+    // One at a time: Enter in the entry box gets here with Add disabled too.
+    if (state.adding) {
+      return;
+    }
+
+    // The entry shows at once, among the profile's own, while the CLI
+    // writes it and restarts a running proxy with it, which takes a few
+    // seconds; the list the CLI reads back then takes its place. With
+    // nothing typed, the CLI just says what to type.
+    if (entry) {
+      state.adding = { entry, flag };
+      state.prefill = null;
+      render();
+      toast(addingMessage(entry));
+    }
+
+    // A refused entry goes back into the form, with why next to it rather
+    // than in a toast.
     try {
       state.data = await api.invoke('allowlist:add', entry, flag, state.scope);
     } catch (error) {
+      state.adding = null;
+      state.prefill = { entry, flag };
+      render();
       $('#al-error').textContent = errorText(error);
       return;
     }
 
-    state.prefill = null;
+    state.adding = null;
     render();
     reportOutcome(ALLOWLIST_OUTCOME);
   },
@@ -2378,6 +2456,42 @@ async function checkLanguageChannels(errors) {
   }
 }
 
+/**
+ * The allowlist form's Add, through the bridge and the CLI for real: the
+ * entry shows at once, marked as being added, with Add disabled; then as
+ * the CLI wrote it, among the profile's own, which come before the blocks
+ * HardCode provides.
+ */
+async function checkAllowlistAdd(errors) {
+  showView('allowlist');
+  await sleep(200);
+
+  $('#al-entry').value = 'smoke.example';
+  const adding = actions['add-allowlist']();
+
+  const row = $('tr.adding');
+  if (!row || !row.textContent.includes('smoke.example')) {
+    errors.push('an allowlist entry being added is not shown at once');
+  }
+  if (!$('[data-act="add-allowlist"]').disabled) {
+    errors.push('Add is not disabled while an allowlist entry is being added');
+  }
+
+  await adding;
+
+  const entries = state.data.allowlist;
+  const added = entries.findIndex((entry) => entry.entry === 'smoke.example' && !entry.provided);
+  const firstProvided = entries.findIndex((entry) => entry.provided);
+  if (added === -1) {
+    errors.push(`the allowlist entry added is not in the list: ${$('#al-error').textContent}`);
+  } else if (firstProvided !== -1 && added > firstProvided) {
+    errors.push("the profile's own allowlist entries are not listed first");
+  }
+  if ($('tr.adding')) {
+    errors.push('the allowlist entry added is still marked as being added');
+  }
+}
+
 /** Whether *element* is on the screen: shown, not merely in the page. */
 function displayed(element) {
   return element.getClientRects().length > 0;
@@ -2540,6 +2654,7 @@ async function smoke() {
 
   await checkExtensionStatus(errors);
   await checkLanguageChannels(errors);
+  await checkAllowlistAdd(errors);
   await checkNewProfile(errors);
   checkVersion(errors);
   await checkUpdate(errors);

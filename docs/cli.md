@@ -155,7 +155,7 @@ doesn't matter.
 
 | Command | Does |
 |---|---|
-| `allowlist` | Every entry of one profile's allowlist, as the app lists them: those HardCode provides, by block (every profile's, then its languages' and tools'), then its own from `allowlist.txt`; each on or off, with its access and note; an invalid line is marked. |
+| `allowlist` | Every entry of one profile's allowlist, as the app lists them: its own from `allowlist.txt` first, then those HardCode provides, by block (every profile's, then its languages' and tools'); each on or off, with its access and note; an invalid line is marked. |
 | `allow <entry> [rw\|ssh]` | Add the entry (or uncomment and re-flag an existing line), and reload a running proxy. A provided entry that already allows as much isn't added; one that was switched off is switched back on. |
 | `deny <entry> [ssh]` | Switch an entry off: one of the profile's own is commented out (wherever it is in the file), a provided one gets an `off <entry>` line. An error if it isn't on. `ssh` means the host's SSH entry; without it, its HTTPS one. |
 | `allowlist enable\|disable\|remove <entry> [ssh]` | Comment the entry's line back in, comment it out, or delete it. A provided entry is switched on or off (its `off` line removed or added) and can't be removed: it would come back with its block. |

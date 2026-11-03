@@ -507,14 +507,17 @@ class CliTests(HomeTestCase):
         code, out, _ = self.run_cli("allowlist")
         self.assertEqual(code, 0)
 
+        # The profile's own first, so that one just added is in sight.
         lines = out.splitlines()
-        self.assertEqual(lines[0], "VS Code (every profile)")
+        self.assertTrue(lines[0].endswith("(this profile's own, in allowlist.txt)"), lines[0])
+        self.assertIn("VS Code (every profile)", lines)
         self.assertIn("Rust (comes with the language)", lines)
         self.assertIn("Codex CLI (comes with the tool)", lines)
         self.assertIn("  off  crates.io", lines)
         self.assertIn("  on   static.crates.io", lines)
         self.assertIn("  on   github.com/me               rw", lines)
         self.assertIn("Custom (this profile's own, in allowlist.txt)", lines)
+        self.assertLess(lines.index("  on   github.com/me               rw"), lines.index("VS Code (every profile)"))
 
         code, out, _ = self.run_cli("--json", "allowlist")
         rows = json.loads(out)["allowlist"]

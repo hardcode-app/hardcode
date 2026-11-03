@@ -308,7 +308,7 @@ class OffLineTests(unittest.TestCase):
 
 class EffectiveTests(unittest.TestCase):
     """
-    The full list: the provided entries, block by block, then the profile's own.
+    The full list: the profile's own, then the provided entries, block by block.
     """
 
     def test_every_profiles_blocks_then_the_languages_in_catalogue_order(self):
@@ -328,7 +328,7 @@ class EffectiveTests(unittest.TestCase):
         self.assertEqual((gallery.flag, gallery.comment), ("rw", "extension search is a POST"))
         self.assertEqual((gallery.section, gallery.language), ("VS Code", ""))
 
-    def test_an_off_line_switches_a_provided_entry_off_and_the_profiles_own_follow(self):
+    def test_an_off_line_switches_a_provided_entry_off_and_the_profiles_own_come_first(self):
         text = "mine.example rw\n#paused.example\noff crates.io\n"
         entries = allowlist.effective(text, ["rust"])
         by_entry = {item.entry: item for item in entries}
@@ -344,13 +344,13 @@ class EffectiveTests(unittest.TestCase):
                 ("paused.example", False, "custom"),
             ],
         )
-        self.assertEqual(entries[-2:], own)
+        self.assertEqual(entries[:2], own)
 
     def test_an_off_line_the_proxy_could_not_read_is_listed_with_the_profiles_own(self):
         entries = allowlist.effective("off crates.io rw\n", ["rust"])
 
         self.assertTrue(next(item for item in entries if item.entry == "crates.io" and item.provided).enabled)
-        self.assertTrue(entries[-1].invalid and entries[-1].off_line)
+        self.assertTrue(entries[0].invalid and entries[0].off_line)
 
     def test_an_update_adds_entries_switched_on_and_drops_others(self):
         text = "off static.crates.io\n"
@@ -379,8 +379,8 @@ class EffectiveTests(unittest.TestCase):
         rows = allowlist.as_dicts(allowlist.effective("mine.example\n", []))
 
         self.assertEqual([row["id"] for row in rows], list(range(len(rows))))
-        self.assertEqual(rows[-1]["entry"], "mine.example")
-        self.assertEqual(rows[-1]["kind"], "host")
+        self.assertEqual(rows[0]["entry"], "mine.example")
+        self.assertEqual(rows[0]["kind"], "host")
 
 
 class RenderTests(unittest.TestCase):

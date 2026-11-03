@@ -486,22 +486,27 @@ def providers(enabled: Iterable[str], entry: str, ssh: bool = False) -> list[Ent
 
 def effective(text: str, enabled: Iterable[str]) -> list[Entry]:
     """
-    Everything a profile's allowlist has: the provided entries block by
-    block, each switched on unless an ``off`` line in *text* switches it
-    off, then the profile's own, as *text* has them (``source`` custom).
+    Everything a profile's allowlist has: the profile's own, as *text* has
+    them (``source`` custom), then the provided entries block by block, each
+    switched on unless an ``off`` line in *text* switches it off.
 
-    An ``off`` line the proxy couldn't make sense of is listed with the
-    profile's own, as invalid.
+    The profile's own come first, so that the app, the admin and ``hardcode
+    allowlist`` show one just added at the top rather than below every block.
+    An ``off`` line the proxy couldn't make sense of is listed with them, as
+    invalid.
     """
     lines = parse(text)
     switched_off = {_key(item) for item in lines if item.off_line and not item.invalid}
 
-    entries = [replace(item, enabled=_key(item) not in switched_off) for item in provided(enabled)]
+    entries = []
 
     for item in lines:
         if item.off_line and not item.invalid:
             continue
         entries.append(replace(item, source=CUSTOM))
+
+    for item in provided(enabled):
+        entries.append(replace(item, enabled=_key(item) not in switched_off))
 
     return entries
 

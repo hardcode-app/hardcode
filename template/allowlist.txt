@@ -36,16 +36,11 @@
 # --- Custom ----------------------------------------------------------------
 # Entries added by `hardcode allow` or the HardCode app land here.
 #
-# Git hosting: add the namespaces you work in, never the whole host.
-# Read-only lets you clone/fetch/pull; add "rw" for the ones you push to.
+# Git hosting: add the namespaces you work in, never the whole host, with
+# "rw" for the ones you push to. SSH instead of HTTPS opens the whole host,
+# read-write, with nothing inspected.
 #github.com/myuser          rw
-#github.com/some-org
-#api.github.com/repos/myuser
-# Claude Code's official plugin marketplace is a GitHub repo:
-#github.com/anthropics/claude-code
-# SSH instead of HTTPS: whole host, read-write, nothing inspected.
 #github.com                 ssh   # port 22
-#ssh.github.com:443         ssh
 
 # --- Switched off ----------------------------------------------------------
 # Entries HardCode provides that this profile doesn't allow, one "off <entry>" each.

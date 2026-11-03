@@ -629,7 +629,7 @@ def cmd_allowlist(app: App, args: argparse.Namespace) -> int:
 def _list_allowlist(app: App, args: argparse.Namespace) -> int:
     """
     Every entry of one profile's allowlist, as the app and the admin show
-    them: the provided ones block by block, then its own, each on or off.
+    them: its own, then the provided ones block by block, each on or off.
     """
     if args.all:
         raise CommandError("the list is one profile's: -p NAME picks which")

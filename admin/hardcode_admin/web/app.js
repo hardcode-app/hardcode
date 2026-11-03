@@ -479,9 +479,9 @@ function allowlistSectionTitle(entry) {
 }
 
 /**
- * The allowlist tab: the add form, and every entry by section: those
- * HardCode provides (every profile's, then the languages' and tools'), then
- * the profile's own.
+ * The allowlist tab: the add form, and every entry by section: the
+ * profile's own, which one just added joins, then those HardCode provides
+ * (every profile's, then the languages' and tools').
  *
  * A provided entry carries a badge where the delete button would be: it
  * comes with every profile, or with its language (Languages / Tools). It

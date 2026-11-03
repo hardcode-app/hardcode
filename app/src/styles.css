@@ -598,6 +598,11 @@ tr.disabled td.entry {
   text-decoration-color: #475569;
 }
 
+/* An allowlist entry on its way: shown until the CLI has added it. */
+tr.adding td.entry {
+  color: var(--muted);
+}
+
 td.actions {
   text-align: right;
   white-space: nowrap;
