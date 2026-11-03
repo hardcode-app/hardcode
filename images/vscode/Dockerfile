@@ -286,6 +286,7 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
 COPY --chmod=0755 verify-extensions.sh /usr/local/bin/hardcode-verify-extensions
 COPY --chmod=0755 sync-extensions.sh /usr/local/bin/hardcode-sync-extensions
 COPY --chmod=0755 ssh-proxy-config.sh /usr/local/bin/hardcode-ssh-proxy-config
+COPY --chmod=0755 ssh-key.sh /usr/local/bin/hardcode-ssh-key
 
 # ---------------------------------------------------------------------------
 # Everything below is installed into the user's home. On first start Docker

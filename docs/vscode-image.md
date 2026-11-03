@@ -275,7 +275,12 @@ the app compare with the profile's to say when a rebuild is due.
 
 1. Takes ownership of the home folder and `/shared` if they were created
    as root's.
-2. Makes the Android SDK's folder in the home, when the image has Android.
+2. Makes the Android SDK's folder in the home, when the image has Android,
+   and the sandbox's own SSH key, when the home has none: an ed25519 key,
+   `~/.ssh/id_ed25519`, without a passphrase. Its log says so, once; `cat
+   ~/.ssh/id_ed25519.pub` shows the public half to add to a git host
+   ([staying safe](staying-safe.md#keep-secrets-out-of-the-sandbox) says
+   how). A home with a key already keeps it.
 3. Adds the proxy's certificate to the system's trusted certificates
    (which also refreshes Java's). For tools that keep their own, the
    container's environment points `SSL_CERT_FILE`, `REQUESTS_CA_BUNDLE`,

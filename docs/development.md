@@ -5,7 +5,7 @@
 ```
 compose.yaml                the stack, parameterised by profile; with images/ and template/ it ships inside the hardcode command
 template/                   what a new profile starts from: .env (every setting, commented out), allowlist.txt, compose.override.yaml
-images/vscode/              the VS Code image: Dockerfile, entrypoint.sh, sync-extensions.sh, verify-extensions.sh, ssh_config
+images/vscode/              the VS Code image: Dockerfile, entrypoint.sh, sync-extensions.sh, verify-extensions.sh, ssh_config, ssh-proxy-config.sh, ssh-key.sh
 images/squid/               the proxy image: squid.conf, entrypoint, make-ca.sh (pki), allowlist-render.sh
 images/gateway/             publishes ports from the internal network to the host (socat)
 images/admin/               the Kubernetes operator + admin UI image; pyproject.toml and uv.lock, its Python packages

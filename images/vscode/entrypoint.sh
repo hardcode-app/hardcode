@@ -33,7 +33,7 @@ if [ "${ENABLE_DOCKER:-true}" != true ]; then
 fi
 
 # ---------------------------------------------------------------------------
-# The home: the Android SDK's folder
+# The home: the Android SDK's folder, and an SSH key
 # ---------------------------------------------------------------------------
 
 # The Android SDK's folder in the home: sdkmanager refuses an ANDROID_HOME
@@ -41,6 +41,18 @@ fi
 # none.
 if command -v sdkmanager >/dev/null && [ -n "${ANDROID_HOME:-}" ]; then
   mkdir -p "$ANDROID_HOME"
+fi
+
+# The sandbox's own SSH key, made once when the home has none, so that no
+# key of yours needs copying in: its public half goes to a git host, best as
+# one repository's deploy key. A failure here mustn't keep VS Code from
+# starting.
+if made="$(hardcode-ssh-key "$(id -un)@hardcode")"; then
+  if [ -n "$made" ]; then
+    log "made this sandbox's SSH key; its public half is $made"
+  fi
+else
+  log "couldn't make an SSH key in ~/.ssh"
 fi
 
 # ---------------------------------------------------------------------------

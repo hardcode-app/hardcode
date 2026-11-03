@@ -5,6 +5,9 @@ The VS Code image's start-up scripts, run for real without the 12 GB image.
 - The SSH proxy stanza the entrypoint writes, read back by the real OpenSSH
   client: ``%h`` and ``%p`` must reach the proxy command as the destination's
   host and port.
+- The sandbox's own SSH key, which the entrypoint makes once when the home
+  has none: made by the real ssh-keygen, kept private, and never made
+  beside a key the home already has.
 - The Kubernetes home-seeding script, run as uid 1000 in a container onto a
   volume root that belongs to root and is world-writable, as a freshly
   provisioned PVC is.
@@ -35,6 +38,7 @@ from harness import ROOT, Docker, Suite
 
 VSCODE = ROOT / "images" / "vscode"
 SSH_PROXY_CONFIG = VSCODE / "ssh-proxy-config.sh"
+SSH_KEY = VSCODE / "ssh-key.sh"
 FIXTURES = ROOT / "tests" / "fixtures"
 
 # The fake Marketplace: what each extension needs. One pulls in a
@@ -86,6 +90,63 @@ def check_ssh_proxy_stanza(suite: Suite, scratch: Path) -> None:
         )
 
     usage = harness.run(["bash", SSH_PROXY_CONFIG, "only-one"])
+    suite.check("usage is checked", not usage.ok, usage.text)
+
+
+def check_ssh_key(suite: Suite, scratch: Path) -> None:
+    """
+    A home with no SSH key gets an ed25519 one, private to its owner, once;
+    a home with a key of its own keeps it and gets no other.
+    """
+    home = scratch / "ssh-home"
+    home.mkdir()
+    environment = {**os.environ, "HOME": str(home)}
+
+    def make() -> harness.Output:
+        return harness.run(["bash", SSH_KEY, "dev@hardcode"], env=environment)
+
+    first = make()
+    private = home / ".ssh" / "id_ed25519"
+    public = home / ".ssh" / "id_ed25519.pub"
+    made = first.ok and private.exists() and public.exists()
+    suite.check(
+        "a home with no key gets one, and is told where its public half is",
+        made and first.text.strip() == str(public),
+        f"exit {first.code}\n{first.text}",
+    )
+    if not made:
+        return
+
+    suite.check(
+        "the key is ed25519, with the comment it was given",
+        public.read_text(encoding="utf-8").split()[::2] == ["ssh-ed25519", "dev@hardcode"],
+        public.read_text(encoding="utf-8"),
+    )
+
+    # ssh refuses a private key others can read, and a folder others can write.
+    modes = (oct(private.stat().st_mode & 0o777), oct((home / ".ssh").stat().st_mode & 0o777))
+    suite.check("only its owner can read the key or its folder", modes == ("0o600", "0o700"), str(modes))
+
+    key = private.read_bytes()
+    second = make()
+    suite.check(
+        "the next start keeps it, and says nothing",
+        second.ok and second.text == "" and private.read_bytes() == key,
+        f"exit {second.code}\n{second.text}",
+    )
+
+    # A home whose key is of another kind keeps that one alone.
+    other = scratch / "rsa-home"
+    (other / ".ssh").mkdir(parents=True)
+    (other / ".ssh" / "id_rsa").write_text("a key of the user's own\n", encoding="utf-8")
+    kept = harness.run(["bash", SSH_KEY, "dev@hardcode"], env={**os.environ, "HOME": str(other)})
+    suite.check(
+        "a home with a key of its own gets no other",
+        kept.ok and not (other / ".ssh" / "id_ed25519").exists(),
+        f"exit {kept.code}\n{kept.text}",
+    )
+
+    usage = harness.run(["bash", SSH_KEY], env=environment)
     suite.check("usage is checked", not usage.ok, usage.text)
 
 
@@ -494,6 +555,9 @@ def run_checks(suite: Suite) -> None:
     with harness.scratch_directory("hc-images-") as scratch, Docker() as docker:
         suite.section("ssh proxy configuration")
         check_ssh_proxy_stanza(suite, scratch)
+
+        suite.section("the sandbox's own SSH key")
+        check_ssh_key(suite, scratch)
 
         suite.section("seeding a home onto a root-owned volume")
         check_home_seeding(suite, docker, scratch)
