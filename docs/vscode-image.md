@@ -78,6 +78,11 @@ Software you install for yourself lands in your home folder, and lasts:
 `gem install` (`~/.gem`), `cpanm` (`~/perl5`). Their folders are on the
 `PATH`.
 
+A Go project whose `go.mod` asks for a newer Go than the image's gets it
+too: `go` downloads that toolchain from Go's module proxy, checks it
+against Go's checksum database, and keeps it in `~/go`. Go's
+[allowlist block](allowlist.md#what-hardcode-provides) opens both.
+
 ## VS Code and its extensions
 
 VS Code's server updates itself as it runs, inside your home folder (the

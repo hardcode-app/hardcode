@@ -265,7 +265,17 @@ CATALOGUE = (
         "go",
         "Go",
         "Go 1.26, gopls, delve",
-        domains=("proxy.golang.org", "sum.golang.org"),
+        # The module proxy and the checksum database; then the module
+        # proxy's own storage bucket, which it redirects the larger module
+        # downloads and every toolchain to (a project whose go.mod asks for
+        # a newer Go than the image's makes go fetch that one). Both are
+        # checked against the checksum database. Only that bucket, never
+        # the whole host: every Google Cloud Storage bucket is on it.
+        domains=(
+            "proxy.golang.org",
+            "sum.golang.org",
+            "storage.googleapis.com/proxy-golang-org-prod",
+        ),
         extensions=("golang.go",),
     ),
     Lang(

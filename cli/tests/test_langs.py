@@ -65,6 +65,17 @@ class LangTests(unittest.TestCase):
             self.assertEqual(agent.extensions, (extension,))
             self.assertNotIn(extension, langs.CORE_EXTENSIONS)
 
+    def test_go_fetches_a_newer_toolchain_from_one_bucket(self):
+        # The module proxy redirects the larger modules and every toolchain
+        # (a go.mod asking for a newer Go than the image's) to its own
+        # storage bucket: that bucket, read-only, and never the host every
+        # Google Cloud Storage bucket is on.
+        go = langs.BY_KEY["go"]
+
+        self.assertIn("storage.googleapis.com/proxy-golang-org-prod", go.domains)
+        self.assertNotIn("storage.googleapis.com", go.domains)
+        self.assertEqual(go.rw, ())
+
     def test_android_opens_googles_paths_and_builds_without_java(self):
         # dl.google.com serves all of Google's downloads: only the SDK's and
         # Google's Maven repository's paths on it. Java's entries (Gradle,
