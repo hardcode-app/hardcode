@@ -51,7 +51,7 @@ filters the list, which refreshes itself every 10 seconds.
 3. Choose where its **allowlist and settings** come from: the template,
    or a copy of an existing profile (a copy never takes the source's
    Ingress host or fixed token).
-4. Tick its **languages and tools**. From the template, the four tools
+4. Tick its **languages and tools**. From the template, the five tools
    are ticked and no language: pick the ones the profile is for, and the
    allowlist entries HardCode provides follow them. A copy starts with its
    source's ticked, and keeps its source's allowlist (its own entries, and

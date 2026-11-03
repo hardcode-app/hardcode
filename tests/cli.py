@@ -40,7 +40,7 @@ REAL_DAEMON = os.environ.get("DOCKER_HOST", "unix:///var/run/docker.sock")
 # Every language and tool: the scenario switches some of them off later.
 LANGUAGES = [
     "python", "node", "java", "android", "dotnet", "go", "rust", "cpp", "ruby", "perl",
-    "build_essentials", "docker", "claude_cli", "codex_cli",
+    "build_essentials", "docker", "kubernetes", "claude_cli", "codex_cli",
 ]  # fmt: skip
 
 # A new profile's .env: the header, the port, subnet and DNS address, the

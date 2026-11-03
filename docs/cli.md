@@ -104,7 +104,7 @@ however it ends.
 
 | Command | Does |
 |---|---|
-| `up [--build] [service…]` | Start the profile (`docker compose up -d`), building the images that don't exist yet (`--build`: build them again first). With no such profile yet, on a terminal, it asks which languages and tools to build it around (Enter alone: the four tools) and makes it; without a terminal it says how to (`hardcode profile add default --lang …`). It gives the proxy the allowlist as this HardCode provides it first, as `reload` does, so entries a newer HardCode added to a block arrive (and ones it dropped go), and prints what changed (`allowlist: Rust: + newrustsite.com`); a proxy that was already running is reloaded when something did. |
+| `up [--build] [service…]` | Start the profile (`docker compose up -d`), building the images that don't exist yet (`--build`: build them again first). With no such profile yet, on a terminal, it asks which languages and tools to build it around (Enter alone: the five tools) and makes it; without a terminal it says how to (`hardcode profile add default --lang …`). It gives the proxy the allowlist as this HardCode provides it first, as `reload` does, so entries a newer HardCode added to a block arrive (and ones it dropped go), and prints what changed (`allowlist: Rust: + newrustsite.com`); a proxy that was already running is reloaded when something did. |
 | `down [-v]` | Remove the containers; with `-v` the storage too (the home folder, `/shared`, the Docker daemon's data, the proxy's certificate). |
 | `start`, `stop`, `restart` | Start, stop or restart the existing containers, keeping everything. `start` and `restart` give the proxy its allowlist first, as `up` does. |
 | `build [service…]` | Build the profile's images. |
@@ -131,9 +131,9 @@ a letter.)
 
 ### Languages, tools and extensions
 
-A profile is built around its languages and four tools (build essentials,
-the Docker CLI, the Claude Code CLI, the Codex CLI). Each decides what the
-image installs, which [allowlist entries](allowlist.md#what-hardcode-provides)
+A profile is built around its languages and five tools (build essentials,
+the Docker CLI, Kubernetes, the Claude Code CLI, the Codex CLI). Each
+decides what the image installs, which [allowlist entries](allowlist.md#what-hardcode-provides)
 are open, and which VS Code extensions the sandbox gets.
 
 | Command | Does |
@@ -145,11 +145,11 @@ are open, and which VS Code extensions the sandbox gets.
 | `extension add\|remove <publisher.name>` | Add or remove one of the profile's own extensions (`VSCODE_EXTENSIONS` in `.env`). A running sandbox installs or removes it within seconds, without a restart. One a language or tool already brings isn't added twice; a language's own goes when the language is switched off, and the one every sandbox has can't be removed. Only publishers with a verified domain are installed. |
 
 Languages: `python node java android dotnet go rust cpp ruby perl`; tools:
-`build_essentials docker claude_cli codex_cli`. Short names work too:
-`c`, `c++`, `cxx`, `c#`, `csharp`, `net`, `.net`, `js`, `javascript`,
-`ts`, `typescript`, `nodejs`, `golang`, `claude`, `claude_code`, `codex`,
-`build`, `build_essential`, `essentials`. A `-` counts as `_`, and case
-doesn't matter.
+`build_essentials docker kubernetes claude_cli codex_cli`. Short names
+work too: `c`, `c++`, `cxx`, `c#`, `csharp`, `net`, `.net`, `js`,
+`javascript`, `ts`, `typescript`, `nodejs`, `golang`, `claude`,
+`claude_code`, `codex`, `build`, `build_essential`, `essentials`, `k8s`,
+`kubectl`, `helm`. A `-` counts as `_`, and case doesn't matter.
 
 ### The allowlist
 

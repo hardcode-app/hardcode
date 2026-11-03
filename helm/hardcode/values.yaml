@@ -54,7 +54,7 @@ profileDefaults:
   # The languages and tools of a profile that doesn't list its own
   # (spec.languages); empty means all of them. Keys: python, node, java,
   # android, dotnet, go, rust, cpp, ruby, perl, build_essentials, docker,
-  # claude_cli, codex_cli.
+  # kubernetes, claude_cli, codex_cli.
   # The image decides which toolchains a VS Code container has (the default image has
   # them all); a profile's languages decide which VS Code extensions its
   # VS Code container keeps installed (changed without a restart) and which

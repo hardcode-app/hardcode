@@ -77,7 +77,7 @@ spec:
                     from it.
                   items:
                     type: string
-                    enum: [python, node, java, android, dotnet, go, rust, cpp, ruby, perl, build_essentials, docker, claude_cli, codex_cli]
+                    enum: [python, node, java, android, dotnet, go, rust, cpp, ruby, perl, build_essentials, docker, kubernetes, claude_cli, codex_cli]
                 # The pattern is hardcode_cli.langs.EXTENSION_ID and maxItems the
                 # admin's MAX_EXTENSIONS; the admin's tests check both.
                 extensions:

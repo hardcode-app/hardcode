@@ -7,6 +7,11 @@
 #   - uv, ruff              PyPI via pipx (not in the archive)
 #   - pnpm                  npm registry (not in the archive)
 #   - Gradle               gradle.org (archive ships 4.4.1, which can't run on JDK 25)
+#   - kubectl               dl.k8s.io, sha256-verified (not in the archive)
+#   - Helm                  get.helm.sh, sha256-verified (not in the archive)
+#   - kind                  GitHub release binary, sha256-verified (archive ships
+#                           0.30.0, whose default cluster, Kubernetes 1.34, is
+#                           further from the current kubectl than kubectl supports)
 #   - Claude Code CLI       claude.ai native installer (not in the archive)
 #   - Codex CLI             GitHub release binary, sha256-verified (not in the archive)
 #
@@ -38,6 +43,7 @@ ARG INSTALL_JAVA=true
 ARG INSTALL_ANDROID=true
 ARG INSTALL_DOTNET=true
 ARG INSTALL_DOCKER=true
+ARG INSTALL_KUBERNETES=true
 ARG INSTALL_CLAUDE_CLI=true
 ARG INSTALL_CODEX_CLI=true
 
@@ -49,6 +55,11 @@ ARG GRADLE_VERSION=latest
 # "latest" or a release such as 0.162.1. Updating Codex means rebuilding the
 # image: its own update check is switched off (see the entrypoint).
 ARG CODEX_VERSION=latest
+# kubectl, Helm and kind: each "latest" or a release, such as 1.37.1, 4.3.0
+# and 0.33.0. Updating them means rebuilding the image.
+ARG KUBECTL_VERSION=latest
+ARG HELM_VERSION=latest
+ARG KIND_VERSION=latest
 
 SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 ENV DEBIAN_FRONTEND=noninteractive \
@@ -229,6 +240,52 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     fi
 
 # ---------------------------------------------------------------------------
+# Kubernetes: kubectl, Helm and kind, each its vendor's release, checked
+# against the sha256 digest the vendor publishes beside it
+# ---------------------------------------------------------------------------
+RUN if [ "${INSTALL_KUBERNETES}" = "true" ]; then \
+      arch="$(dpkg --print-architecture)" \
+      && case "${arch}" in \
+           amd64|arm64) ;; \
+           *) echo "no Kubernetes tools for ${arch}" >&2; exit 1 ;; \
+         esac \
+      # kubectl, from dl.k8s.io: stable.txt names the newest release, and
+      # the .sha256 file beside the binary holds its digest alone.
+      && kubectl_release="v${KUBECTL_VERSION}" \
+      && if [ "${KUBECTL_VERSION}" = "latest" ]; then \
+           kubectl_release="$(curl -fsSL https://dl.k8s.io/release/stable.txt)"; \
+         fi \
+      && kubectl_url="https://dl.k8s.io/release/${kubectl_release}/bin/linux/${arch}/kubectl" \
+      && curl -fsSLo /tmp/kubectl "${kubectl_url}" \
+      && echo "$(curl -fsSL "${kubectl_url}.sha256")  /tmp/kubectl" | sha256sum -c - \
+      && install -m 0755 /tmp/kubectl /usr/local/bin/kubectl \
+      # Helm, from get.helm.sh: helm-latest-version names the newest
+      # release, and the .sha256sum file holds the digest, then the name.
+      && helm_release="v${HELM_VERSION}" \
+      && if [ "${HELM_VERSION}" = "latest" ]; then \
+           helm_release="$(curl -fsSL https://get.helm.sh/helm-latest-version)"; \
+         fi \
+      && helm_tarball="helm-${helm_release}-linux-${arch}.tar.gz" \
+      && curl -fsSLo "/tmp/${helm_tarball}" "https://get.helm.sh/${helm_tarball}" \
+      && echo "$(curl -fsSL "https://get.helm.sh/${helm_tarball}.sha256sum" | cut -d ' ' -f 1)  /tmp/${helm_tarball}" | sha256sum -c - \
+      && tar -xzf "/tmp/${helm_tarball}" -C /usr/local/bin --strip-components=1 "linux-${arch}/helm" \
+      # kind, from its GitHub release: GitHub's API names the newest, and
+      # the .sha256sum asset beside the binary holds the digest, then the name.
+      && kind_release="v${KIND_VERSION}" \
+      && if [ "${KIND_VERSION}" = "latest" ]; then \
+           kind_release="$(curl -fsSL https://api.github.com/repos/kubernetes-sigs/kind/releases/latest | jq -r .tag_name)"; \
+         fi \
+      && kind_url="https://github.com/kubernetes-sigs/kind/releases/download/${kind_release}/kind-linux-${arch}" \
+      && curl -fsSLo /tmp/kind "${kind_url}" \
+      && echo "$(curl -fsSL "${kind_url}.sha256sum" | cut -d ' ' -f 1)  /tmp/kind" | sha256sum -c - \
+      && install -m 0755 /tmp/kind /usr/local/bin/kind \
+      && rm -f /tmp/kubectl "/tmp/${helm_tarball}" /tmp/kind \
+      && kubectl version --client \
+      && helm version \
+      && kind version; \
+    fi
+
+# ---------------------------------------------------------------------------
 # Codex CLI: OpenAI's release binary (static, musl), checked against the
 # sha256 digest GitHub publishes for it
 # ---------------------------------------------------------------------------
@@ -324,4 +381,4 @@ ENTRYPOINT ["/usr/bin/tini", "--", "/usr/local/bin/hardcode-entrypoint"]
 # The languages and tools this image was built with: `hardcode show` compares
 # them with the profile's, to say when a rebuild is due. Last, so that a
 # change of language doesn't throw away the cache of every layer above.
-LABEL io.github.hardcode-app.languages="python=${INSTALL_PYTHON} node=${INSTALL_NODE} java=${INSTALL_JAVA} android=${INSTALL_ANDROID} dotnet=${INSTALL_DOTNET} go=${INSTALL_GO} rust=${INSTALL_RUST} cpp=${INSTALL_CPP} ruby=${INSTALL_RUBY} perl=${INSTALL_PERL} build_essentials=${INSTALL_BUILD_ESSENTIALS} docker=${INSTALL_DOCKER} claude_cli=${INSTALL_CLAUDE_CLI} codex_cli=${INSTALL_CODEX_CLI}"
+LABEL io.github.hardcode-app.languages="python=${INSTALL_PYTHON} node=${INSTALL_NODE} java=${INSTALL_JAVA} android=${INSTALL_ANDROID} dotnet=${INSTALL_DOTNET} go=${INSTALL_GO} rust=${INSTALL_RUST} cpp=${INSTALL_CPP} ruby=${INSTALL_RUBY} perl=${INSTALL_PERL} build_essentials=${INSTALL_BUILD_ESSENTIALS} docker=${INSTALL_DOCKER} kubernetes=${INSTALL_KUBERNETES} claude_cli=${INSTALL_CLAUDE_CLI} codex_cli=${INSTALL_CODEX_CLI}"

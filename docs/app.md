@@ -242,7 +242,7 @@ selected.
 template (defaults)* or a *copy of* a profile (its allowlist, settings and
 shared folders, with a port and network of its own); and the
 **Languages** and **Tools** to build it around, ticked as the source has
-them (the template: the four tools, no language). The line underneath adds
+them (the template: the five tools, no language). The line underneath adds
 up what they open and bring. **Create** makes it and opens it on its
 Languages / Tools page; its image is built at its first **▶ Start**.
 [Profiles](profiles.md) has more.

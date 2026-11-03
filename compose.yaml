@@ -56,6 +56,7 @@ x-languages: &languages
   INSTALL_PERL: ${INSTALL_PERL:-false}
   INSTALL_BUILD_ESSENTIALS: ${INSTALL_BUILD_ESSENTIALS:-false}
   INSTALL_DOCKER: ${INSTALL_DOCKER:-false}
+  INSTALL_KUBERNETES: ${INSTALL_KUBERNETES:-false}
   INSTALL_CLAUDE_CLI: ${INSTALL_CLAUDE_CLI:-false}
   INSTALL_CODEX_CLI: ${INSTALL_CODEX_CLI:-false}
 
@@ -243,6 +244,9 @@ services:
         VSCODE_VERSION: ${VSCODE_VERSION:-latest}
         GRADLE_VERSION: ${GRADLE_VERSION:-latest}
         CODEX_VERSION: ${CODEX_VERSION:-latest}
+        KUBECTL_VERSION: ${KUBECTL_VERSION:-latest}
+        HELM_VERSION: ${HELM_VERSION:-latest}
+        KIND_VERSION: ${KIND_VERSION:-latest}
     image: hardcode-vscode:${HARDCODE_VSCODE_TAG:?run docker compose through hardcode}
     logging: *logging
     hostname: vscode

@@ -169,6 +169,9 @@ NOTES = {
     "release-assets.githubusercontent.com/github-production-release-asset/49407251": (
         "where GitHub sends CodeLLDB's downloads"
     ),
+    "dl.k8s.io": "kubectl's downloads",
+    "cdn.dl.k8s.io": "kubectl's downloads (where dl.k8s.io redirects)",
+    "get.helm.sh": "Helm's downloads",
     "api.anthropic.com": "the API",
     "claude.ai": "account sign-in",
     "platform.claude.com": "OAuth token exchange",
@@ -330,6 +333,22 @@ CATALOGUE = (
         extensions=("ms-azuretools.vscode-containers",),
     ),
     Lang(
+        "kubernetes",
+        "Kubernetes",
+        "kubectl, Helm, kind, the Kubernetes extension",
+        kind="tool",
+        # kubectl's release downloads, on dl.k8s.io and on cdn.dl.k8s.io,
+        # where it redirects them: the extension fetches a kubectl to match
+        # a cluster there (vs-kubernetes.kubectlVersioning "infer"), and so
+        # do Dockerfiles built in the sandbox. Helm's, on get.helm.sh, which
+        # its install script and Dockerfiles fetch. Hosts that serve those
+        # projects' releases and nothing else. Never a cluster's API server:
+        # that is a profile's own entry. Docker Hub (kind's node images) and
+        # registry.k8s.io are in every profile's block already.
+        domains=("dl.k8s.io", "cdn.dl.k8s.io", "get.helm.sh"),
+        extensions=("ms-kubernetes-tools.vscode-kubernetes-tools",),
+    ),
+    Lang(
         "claude_cli",
         "Claude Code CLI",
         "claude in the terminal and its VS Code extension: Anthropic's coding agent",
@@ -396,6 +415,9 @@ ALIASES = {
     "build": "build_essentials",
     "build_essential": "build_essentials",
     "essentials": "build_essentials",
+    "k8s": "kubernetes",
+    "kubectl": "kubernetes",
+    "helm": "kubernetes",
 }
 
 

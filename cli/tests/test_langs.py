@@ -95,6 +95,27 @@ class LangTests(unittest.TestCase):
         self.assertEqual(android.rw, ())
         self.assertEqual(android.extensions, ("jetbrains.kotlin-server", "vscjava.vscode-java-pack"))
 
+    def test_kubernetes_opens_its_downloads_and_never_a_cluster(self):
+        # kubectl's downloads (dl.k8s.io redirects to cdn.dl.k8s.io) and
+        # Helm's, read-only. A cluster's API server is a profile's own entry.
+        kubernetes = langs.BY_KEY["kubernetes"]
+
+        self.assertEqual(kubernetes.kind, "tool")
+        self.assertEqual(kubernetes.domains, ("dl.k8s.io", "cdn.dl.k8s.io", "get.helm.sh"))
+        self.assertEqual(kubernetes.rw, ())
+        self.assertEqual(kubernetes.extensions, ("ms-kubernetes-tools.vscode-kubernetes-tools",))
+
+        # The registries of kind's node images (Docker Hub) and of
+        # Kubernetes' own images are every profile's, not this block's.
+        every_profile = {domain for block in langs.EVERY_PROFILE for domain in block.domains}
+        self.assertLessEqual({"registry-1.docker.io", ".registry.k8s.io"}, every_profile)
+
+        # Its extension pulls in the YAML one, which every VS Code container has.
+        self.assertIn("redhat.vscode-yaml", langs.CORE_EXTENSIONS)
+
+        for alias in ("k8s", "kubectl", "helm", "Kubernetes"):
+            self.assertEqual(langs.normalise(alias), "kubernetes", alias)
+
     def test_uploads_only_where_a_language_says_so(self):
         for lang in langs.CATALOGUE:
             self.assertLessEqual(set(lang.rw), set(lang.domains), lang.key)

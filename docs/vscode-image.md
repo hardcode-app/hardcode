@@ -35,6 +35,7 @@ are open, and which VS Code extensions it gets.
 | `perl` | Perl | Perl 5.40, cpanminus, local::lib, perltidy, Perl::Critic | |
 | `build_essentials` | Build essentials (tool) | gcc and g++, make, autotools, pkg-config, gettext, common development libraries (OpenSSL, zlib, libffi, SQLite, readline, …) | |
 | `docker` | Docker CLI (tool) | `docker`, buildx, compose, which talk to the profile's own Docker daemon | `ms-azuretools.vscode-containers` |
+| `kubernetes` | Kubernetes (tool) | `kubectl`, `helm`, `kind` ([below](#kubernetes)) | `ms-kubernetes-tools.vscode-kubernetes-tools` |
 | `claude_cli` | Claude Code CLI (tool) | `claude`: Anthropic's coding agent | `anthropic.claude-code` |
 | `codex_cli` | Codex CLI (tool) | `codex`: OpenAI's coding agent | `openai.chatgpt` |
 
@@ -49,7 +50,7 @@ hardcode languages            # every language and tool, on or off, and whether 
 ```
 
 The keys above work, and so do short names: `js`, `ts`, `c++`, `c#`,
-`golang`, `claude`, `codex`, `build`.
+`golang`, `k8s`, `claude`, `codex`, `build`.
 
 A switch changes things at different times. The allowlist entries open or
 close at once (a running proxy reloads). The extensions follow within
@@ -234,6 +235,45 @@ row of the app's Overview.
   read-only on the allowlist.
 - **Testcontainers** works: `TESTCONTAINERS_HOST_OVERRIDE=docker` is set.
 
+## Kubernetes
+
+With the **Kubernetes** tool, the image has `kubectl`, `helm` and `kind`,
+each its project's newest release when the image was built, and VS Code
+has Microsoft's Kubernetes extension, for manifests, Helm charts and the
+clusters kubectl knows.
+
+- **Manifests and charts** need nothing more: `kubectl kustomize`, `helm
+  template`, `helm lint`, `helm package`, and charts pulled from the
+  container registries every profile has (`helm pull
+  oci://registry-1.docker.io/…`, `ghcr.io`). A chart repository on a site
+  of its own (`helm repo add`) needs an [entry of yours](allowlist.md) for
+  that site.
+- **A cluster of yours** is reached through the proxy, like everything
+  else, so its API server needs an entry of yours too: `hardcode allow
+  k8s.example.com rw` (`rw`, as kubectl makes changes with `POST`, `PUT`,
+  `PATCH` and `DELETE`; read-only is enough for `get`, `describe` and
+  `logs`). The Kubernetes block never opens one. The proxy looks inside
+  HTTPS, which narrows what it can reach: an API server on port 443, with
+  a certificate from a public certificate authority, and a kubeconfig that
+  signs in with a token rather than a client certificate and leaves out
+  the cluster's `certificate-authority-data`, so that kubectl trusts the
+  system's certificates, the proxy's among them. Most managed clusters'
+  API servers have a certificate from the cluster's own authority, which
+  the proxy refuses. `kubectl exec`, `attach`, `cp` and `port-forward`
+  don't work through the proxy: they need connections it doesn't pass.
+- **kind can't start a cluster here.** Its nodes would be containers of
+  the profile's Docker daemon, which runs rootless and without cgroups
+  (`docker info` says `Cgroup Driver: none`), and kind refuses such a
+  daemon.
+- **The extension** uses the image's `kubectl` and `helm`. Its
+  `vs-kubernetes.kubectlVersioning` setting, `user-provided` unless you
+  change it, keeps it that way; `infer` has it download a kubectl to
+  match each cluster into your home folder, from `dl.k8s.io`, which the
+  Kubernetes block opens.
+- **Updating.** kubectl, Helm and kind come with the image: rebuild to
+  update them, and set `KUBECTL_VERSION`, `HELM_VERSION` and
+  `KIND_VERSION` in the profile's `.env` to stay on one release.
+
 ## Rebuilding and updating
 
 ```sh
@@ -269,6 +309,9 @@ nothing usable:
 | uv, ruff (from PyPI, with pipx, into `/opt/pipx`) | not in Ubuntu |
 | pnpm (from npm) | not in Ubuntu; its corepack is too old |
 | Gradle (from gradle.org, checksum-checked; `GRADLE_VERSION`) | Ubuntu's 4.4.1 can't run on JDK 25 |
+| kubectl (from dl.k8s.io, checksum-checked; `KUBECTL_VERSION`) | not in Ubuntu |
+| Helm (from get.helm.sh, checksum-checked; `HELM_VERSION`) | not in Ubuntu |
+| kind (its release on GitHub, checked against the checksum published with it; `KIND_VERSION`) | Ubuntu's 0.30.0 makes Kubernetes 1.34 clusters, and kubectl supports clusters at most one minor version from its own |
 | Claude Code CLI (Anthropic's installer, from claude.ai) | not in Ubuntu |
 | Codex CLI (OpenAI's release on GitHub, checked against the checksum GitHub publishes; `CODEX_VERSION`) | not in Ubuntu |
 

@@ -128,6 +128,7 @@ The tools are:
 | Claude Code CLI | Anthropic's coding agent, `claude` in the terminal, with its VS Code extension. **Keep this one** to use Claude Code. |
 | Codex CLI | OpenAI's coding agent, `codex` in the terminal, with its VS Code extension. Leave it out if you won't use it: it opens OpenAI's hosts for uploads. |
 | Docker CLI | `docker` in the terminal, to run containers inside the sandbox. |
+| Kubernetes | `kubectl`, `helm` and `kind` in the terminal, with the Kubernetes extension, for manifests and Helm charts. Leave it out if you won't use it. |
 | Build essentials | compilers and libraries that many packages need when they install. |
 
 ### With the app
@@ -139,7 +140,7 @@ The tools are:
    make another profile later.)
 2. Under **Languages**, tick the ones you'll use. Not sure? Tick none:
    you can switch languages on at any time.
-3. Under **Tools**, all four are ticked. Untick the ones you don't need,
+3. Under **Tools**, all five are ticked. Untick the ones you don't need,
    but keep **Claude Code CLI**.
 4. Click **Create**. The app opens the new profile on its
    **Languages / Tools** page.
@@ -165,11 +166,11 @@ The tools are:
    No profile 'default' yet. Choose what it is built around: the image installs them,
    the allowlist opens their registries, and VS Code gets their extensions.
      languages: python node java android dotnet go rust cpp ruby perl
-     tools:     build_essentials docker claude_cli codex_cli
-   Languages and tools, comma-separated [build_essentials,docker,claude_cli,codex_cli]:
+     tools:     build_essentials docker kubernetes claude_cli codex_cli
+   Languages and tools, comma-separated [build_essentials,docker,kubernetes,claude_cli,codex_cli]:
    ```
 
-   Pressing Enter alone gives you the four tools and no language. What you
+   Pressing Enter alone gives you the five tools and no language. What you
    type replaces that whole list, so name the tools you want as well as
    the languages: for Python and Claude Code, type
    `python,build_essentials,docker,claude`. Short names work: `claude`,

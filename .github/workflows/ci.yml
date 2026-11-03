@@ -227,6 +227,7 @@ jobs:
             INSTALL_ANDROID=false
             INSTALL_DOTNET=false
             INSTALL_DOCKER=false
+            INSTALL_KUBERNETES=false
             INSTALL_CLAUDE_CLI=false
             INSTALL_CODEX_CLI=false
           cache-from: type=gha,scope=vscode-minimal

@@ -265,6 +265,7 @@ given its rules. Entries are read-only unless marked `rw`.
 | Rust | `crates.io`, `index.crates.io`, `static.crates.io`, `static.rust-lang.org`, and for the CodeLLDB debugger's own downloads, that one project's releases on GitHub: `github.com/vadimcn/codelldb/releases/download` and `release-assets.githubusercontent.com/github-production-release-asset/49407251` |
 | Ruby | `rubygems.org`, `index.rubygems.org` |
 | Perl | `www.cpan.org`, `cpan.metacpan.org`, `fastapi.metacpan.org`, `cpanmetadb.plackperl.org` |
+| Kubernetes | kubectl's downloads, `dl.k8s.io` and `cdn.dl.k8s.io`, where it redirects them; Helm's, `get.helm.sh`. Never a cluster's API server: [add yours](vscode-image.md#kubernetes) |
 | Claude Code CLI | `api.anthropic.com` `rw` (the API), `claude.ai` `rw` (sign-in), `platform.claude.com` `rw` (sign-in), `claude.com` (sign-in page), `downloads.claude.ai` (installer and updates) |
 | Codex CLI | `auth.openai.com` `rw` (sign-in), `chatgpt.com/backend-api` `rw` (the model, with a ChatGPT plan), `api.openai.com` `rw` (the model, with an API key) |
 
