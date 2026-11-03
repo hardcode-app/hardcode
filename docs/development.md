@@ -8,6 +8,8 @@ template/                   what a new profile starts from: .env (every setting,
 images/vscode/              the VS Code image: Dockerfile, entrypoint.sh, sync-extensions.sh, verify-extensions.sh, ssh_config, ssh-proxy-config.sh, ssh-key.sh, github.sh, gh.sh
 images/squid/               the proxy image: squid.conf, entrypoint, make-ca.sh (pki), allowlist-render.sh
 images/gateway/             publishes ports from the internal network to the host (socat)
+images/docker/              the Docker sidecar: Docker's docker:dind-rootless image with hardcode_runc.py on top, the runc wrapper
+                            that gives containers and build steps the proxy CA; test_hardcode_runc.py, its unit tests
 images/admin/               the Kubernetes operator + admin UI image; pyproject.toml and uv.lock, its Python packages
 images/build/               the build image: the Ubuntu 26.04 environment everything is built and tested in (run.sh runs a command there);
                             pyproject.toml and uv.lock, its Python packages; uv/requirements.txt, uv itself
@@ -16,7 +18,7 @@ cli/hardcode_cli/           the Python package; cli/tests/ its unit tests; cli/p
 app/src/                    the desktop app's page; app/src-tauri/ the Rust shell
 admin/hardcode_admin/       the operator and admin API (Flask); admin/tests/
 helm/hardcode/              the chart: CRD, operator, profiles
-tests/                      the test suites, in Python (commits.py, lint.py, cli.py, app.py, admin.py, proxy.py, images.py, helm.py, release.py, maintenance.py, e2e_kind.py, run_all.py), their shared harness.py and their fixtures/
+tests/                      the test suites, in Python (commits.py, lint.py, cli.py, app.py, admin.py, proxy.py, images.py, docker.py, helm.py, release.py, maintenance.py, e2e_kind.py, run_all.py), their shared harness.py and their fixtures/
 release/                    a release's steps (release.py), its known vulnerabilities (scan.py, scan.sh), its notes (notes.md, dev-notes.md), and the updater's public key (updater.pub, once there is one)
 maintenance/                what keeps dependencies moving: what is pinned and how old (pins.py), and which updates merge themselves (merge.py)
 docs/                       this documentation; docs/images/ the screenshots; docs/tools/ how they are made
@@ -171,7 +173,7 @@ release to be found first:
 | What | Moved by |
 |---|---|
 | The app's crates, the images' Python packages (their `uv.lock`), uv itself (`images/build/uv`), `cli/requirements.txt`, the actions | Dependabot, weekly, one grouped pull request per ecosystem |
-| The images: CoreDNS and the Docker sidecar (`compose.yaml` and the chart's `docker.image`, `coredns.image`), the Dockerfiles' base, and the BuildKit every image builder runs (`.github/buildkit/Dockerfile`, which no one builds) | Dependabot, weekly, one pull request for all of them |
+| The images: the Dockerfiles' bases (Ubuntu's dated builds, and Docker's `docker:dind-rootless` under the Docker sidecar, `images/docker`), the same Docker image as the chart's `docker.image`, CoreDNS (`compose.yaml` and the chart's `coredns.image`), and the BuildKit every image builder runs (`.github/buildkit/Dockerfile`, which no one builds) | Dependabot, weekly, one pull request for all of them |
 | The Rust the release's macOS and Windows builds use (`app/src-tauri/rust-toolchain.toml`) | Dependabot, weekly |
 | The build image's vendor binaries: kind, kubectl, helm, OSV-Scanner, the Tauri CLI | `maintenance/pins.py vendor`, weekly ([`dependencies.yml`](../.github/workflows/dependencies.yml)), as the `pins/vendor-binaries` pull request, with each publisher's checksums |
 | The AppImage's tools (AppRun, linuxdeploy and its AppImage plugin), pinned by checksum in the build image at the release tags the Tauri CLI names | a person, with the Tauri CLI: `app/build.sh bundle` fails if the CLI fetches a tool that isn't pinned |

@@ -61,6 +61,7 @@ IMAGE_FILES = [
     "helm/hardcode/values.yaml",
     "images/admin/Dockerfile",
     "images/build/Dockerfile",
+    "images/docker/Dockerfile",
     "images/gateway/Dockerfile",
     "images/squid/Dockerfile",
     "images/vscode/Dockerfile",

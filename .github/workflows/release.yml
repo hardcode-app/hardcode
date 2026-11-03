@@ -151,6 +151,7 @@ jobs:
           - { name: squid,   context: images/squid,   dockerfile: images/squid/Dockerfile }
           - { name: gateway, context: images/gateway, dockerfile: images/gateway/Dockerfile }
           - { name: admin,   context: .,              dockerfile: images/admin/Dockerfile }
+          - { name: docker,  context: images/docker,  dockerfile: images/docker/Dockerfile }
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -493,7 +494,8 @@ jobs:
 
   # Known vulnerabilities in what the build is made from (the lock files)
   # and in the images that are HardCode's boundary, as published: squid,
-  # the gateway, the admin, CoreDNS and the Docker sidecar. The job holds no
+  # the gateway, the admin, the Docker sidecar (Docker's image with
+  # HardCode's runc on top) and CoreDNS. The job holds no
   # secret and can only read; OSV-Scanner runs sealed (release/scan.sh: no
   # network, no token, read-only), so a compromised scanner could only lie
   # in its report. Reported in the description, not blocking.

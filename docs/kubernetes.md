@@ -169,7 +169,7 @@ The [security model](security.md#not-covered) lists every limit.
 | `admin.trustedProxies` | `[]` | addresses/CIDRs (the Ingress controller's pods or nodes) whose `X-Forwarded-For` the login throttle believes, read from the right (the first address none of them added is the client); from anyone else the header is ignored |
 | `admin.resources`, `.nodeSelector`, `.tolerations` | 96Mi request / 256Mi limit | |
 | `imagePullSecrets` | `[]` | for the admin image |
-| `profileDefaults.image`, `.squidImage`, `.docker.image`, `.coredns.image` | `hardcode-vscode:latest`, `hardcode-squid:latest` (a released chart: the release's images on GHCR), `docker:29.9.2-dind-rootless`, `coredns/coredns:1.15.0` (each by digest) | images every profile uses unless its spec says otherwise. The last two are pinned as `compose.yaml` pins them (Dependabot moves both together), and the operator has no copy of its own: a profile whose Docker sidecar or CoreDNS has no image is reported with an error |
+| `profileDefaults.image`, `.squidImage`, `.docker.image`, `.coredns.image` | `hardcode-vscode:latest`, `hardcode-squid:latest` (a released chart: the release's images on GHCR), `docker:29.9.2-dind-rootless`, `coredns/coredns:1.15.0` (each by digest) | images every profile uses unless its spec says otherwise. The last two are pinned by digest and Dependabot moves them (Docker's together with `images/docker`'s base, CoreDNS with `compose.yaml`'s), and the operator has no copy of its own: a profile whose Docker sidecar or CoreDNS has no image is reported with an error. The Docker sidecar here is still Docker's own image, so its containers and builds don't trust the proxy's CA by themselves (see below); HardCode's sidecar image, which Compose runs, comes to Kubernetes next |
 | `profileDefaults.imagePullPolicy`, `.imagePullSecrets` | `IfNotPresent`, `[]` | |
 | `profileDefaults.languages` | `[]` (all of them) | the languages and tools of a profile that doesn't list its own (`spec.languages`); see [Languages on Kubernetes](#languages-on-kubernetes) |
 | `profileDefaults.upstreamDNS` | `/etc/resolv.conf` | where allowlisted names resolve (the node's resolvers), or IPs |
@@ -351,6 +351,13 @@ read-only at `/etc/hardcode/extensions`, 1Gi `/dev/shm`) and the `docker`
 sidecar (privileged by default, proxy variables, `SSL_CERT_FILE` pointing
 at the proxy CA), sharing the `shared` PVC and the daemon's client
 certificates. No sandbox pod mounts a service-account token.
+
+The sidecar still runs Docker's own image, without HardCode's setup for
+the proxy's certificate. A container that makes HTTPS requests needs
+`/proxy-ca` mounted and `SSL_CERT_FILE` set to its bundle, and an image
+build needs the certificate copied in. Moving the sidecar to HardCode's
+image comes next.
+
 NetworkPolicies: the VS Code pod may talk to its squid on 3128 and its
 CoreDNS on 53, and accept 8000; squid may reach `squidEgressCIDR` (minus
 the exceptions) and kube-system DNS; CoreDNS may send DNS anywhere.

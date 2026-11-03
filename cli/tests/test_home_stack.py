@@ -180,7 +180,7 @@ class ImageTests(unittest.TestCase):
     """
 
     def test_every_copied_file_gets_its_mode_in_the_dockerfile(self):
-        for image in ("squid", "gateway", "vscode"):
+        for image in ("squid", "gateway", "docker", "vscode"):
             dockerfile = (REPO / "images" / image / "Dockerfile").read_text(encoding="utf-8")
             copies = [line for line in dockerfile.splitlines() if line.startswith(("COPY ", "ADD "))]
 

@@ -99,7 +99,7 @@ def make_stack(path: Path) -> Path:
     path.mkdir(parents=True, exist_ok=True)
     (path / "compose.yaml").write_text(TEMPLATE_COMPOSE, encoding="utf-8")
 
-    for image in ("squid", "gateway", "vscode"):
+    for image in ("squid", "gateway", "docker", "vscode"):
         (path / "images" / image).mkdir(parents=True)
         (path / "images" / image / "Dockerfile").write_text(f"FROM scratch  # {image}\n", encoding="utf-8")
 

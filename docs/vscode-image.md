@@ -210,25 +210,13 @@ row of the app's Overview.
   and from your browser after `hardcode forward 8080 docker`.
 - **The proxy**: containers and builds are given the proxy settings
   automatically (in `~/.docker/config.json`). They have no other way out.
-- **HTTPS inside containers** fails unless the container trusts the
-  proxy's certificate, because the proxy decrypts HTTPS to check it. The
-  certificate is at `/proxy-ca`, both in VS Code's container and where the
-  daemon runs:
-
-  ```sh
-  docker run -v /proxy-ca:/proxy-ca:ro -e SSL_CERT_FILE=/proxy-ca/ca-bundle.pem …   # Go, OpenSSL, curl, apk, Ruby, .NET
-  docker run -v /proxy-ca:/proxy-ca:ro -e NODE_EXTRA_CA_CERTS=/proxy-ca/ca.pem …     # Node (npm, yarn)
-  ```
-
-  For `RUN` steps in an image build, copy `/proxy-ca/ca.pem` into the
-  build's folder, and in the Dockerfile:
-
-  ```dockerfile
-  COPY ca.pem /etc/proxy-ca.pem
-  ENV SSL_CERT_FILE=/etc/proxy-ca.pem NODE_EXTRA_CA_CERTS=/etc/proxy-ca.pem PIP_CERT=/etc/proxy-ca.pem
-  ```
-
-  Plain-HTTP package mirrors such as `deb.debian.org` need nothing.
+- **HTTPS just works**: containers and image builds you run in the
+  sandbox reach the internet through the proxy like everything else, with
+  nothing to set up and no changes to your Dockerfiles. To leave one
+  container out, start it with `-e HARDCODE_PROXY_CA=off`. If a Java
+  program in a container can't reach the internet, set
+  `DOCKER_JAVA_PROXY=true` in the profile's settings. (On Kubernetes, this
+  isn't there yet.)
 - **Pushing images isn't possible**: the container registries are
   read-only on the allowlist.
 - **Testcontainers** works: `TESTCONTAINERS_HOST_OVERRIDE=docker` is set.

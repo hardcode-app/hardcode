@@ -61,7 +61,8 @@ There are three ways to run it:
 - **Coding agents ready to go.** Claude Code and Codex, installed and working
   through the proxy.
 - **Docker inside.** A rootless Docker daemon per sandbox, behind the same
-  allowlist: containers you start can't get around it.
+  allowlist: containers you start can't get around it. HTTPS works in
+  containers and image builds with no changes to your Dockerfiles.
 - **Profiles.** Separate environments side by side, each with its own
   languages, allowlist, ports, mounts and volumes.
 - **See what was blocked.** Every refused request, with one click to allow

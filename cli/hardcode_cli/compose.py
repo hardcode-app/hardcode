@@ -217,6 +217,7 @@ class Compose:
             "HARDCODE_VSCODE_TAG": self.profile.vscode_tag,
             "HARDCODE_SQUID_TAG": stack.image_tag("squid"),
             "HARDCODE_GATEWAY_TAG": stack.image_tag("gateway"),
+            "HARDCODE_DOCKER_TAG": stack.image_tag("docker"),
             # The docker service sits behind a Compose profile of the same name,
             # so it only exists in the project while it is switched on.
             "COMPOSE_PROFILES": "docker" if self.docker_enabled() else "",

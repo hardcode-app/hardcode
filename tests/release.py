@@ -540,11 +540,12 @@ def check_scan(suite: Suite) -> None:
     compose = (ROOT / "compose.yaml").read_text(encoding="utf-8")
     listed = dict(scan.images("ghcr.io/owner/hardcode", "sha-2c419ae", compose))
     suite.check(
-        "the images scanned: ours as this run published them, CoreDNS and Docker as compose.yaml pins them",
+        "the images scanned: ours as this run published them, the Docker sidecar too, and CoreDNS as "
+        "compose.yaml pins it",
         listed["squid"] == "ghcr.io/owner/hardcode-squid:sha-2c419ae"
-        and set(listed) == {"squid", "gateway", "admin", "coredns", "docker"}
-        and listed["coredns"].startswith("coredns/coredns:")
-        and "@sha256:" in listed["docker"],
+        and listed["docker"] == "ghcr.io/owner/hardcode-docker:sha-2c419ae"
+        and set(listed) == {"squid", "gateway", "admin", "docker", "coredns"}
+        and listed["coredns"].startswith("coredns/coredns:"),
         str(listed),
     )
 
@@ -626,7 +627,7 @@ def check_scan(suite: Suite) -> None:
     )
     suite.check(
         "...not counting a binary whose version can't be read, nor a fix older than what is installed",
-        "| The Docker sidecar | 0 | 1 | 0 | 0 | 0 | 3 |" in text,
+        "| The Docker sidecar (hardcode-docker) | 0 | 1 | 0 | 0 | 0 | 3 |" in text,
         text,
     )
     fixed = [line for line in text.splitlines() if line.startswith("- ")]

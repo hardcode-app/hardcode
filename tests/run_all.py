@@ -9,6 +9,7 @@ Every test suite, one after the other, in the build image.
     tests/admin.py     the Kubernetes operator and admin API (fake API server)
     tests/proxy.py     the squid image for real: path rules, read-only, deny-all, the renderer's grammar
     tests/images.py    the VS Code image's start-up scripts: the SSH proxy stanza, home seeding
+    tests/docker.py    the Docker sidecar: its runc wrapper with the real runc on real images, then the daemon
     tests/helm.py      the Helm chart: lint and the rendered objects
     tests/release.py   the release's steps: the version, the updater's configuration, latest.json, checksums
     tests/maintenance.py  the dependency scripts: pins and their ages, vendor releases, which updates merge
@@ -24,7 +25,7 @@ import sys
 import harness
 from harness import ROOT
 
-SUITES = ["commits", "lint", "cli", "app", "admin", "proxy", "images", "helm", "release", "maintenance"]
+SUITES = ["commits", "lint", "cli", "app", "admin", "proxy", "images", "docker", "helm", "release", "maintenance"]
 
 
 def main() -> int:

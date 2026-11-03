@@ -108,20 +108,41 @@ allows it, and `hardcode-github OWNER/REPO` sets up the sign-in.
 
 ### `certificate verify failed`, or `unable to get local issuer certificate`
 
-The tool doesn't trust the proxy's certificate (the proxy decrypts HTTPS
-to check it). In the VS Code container, the system's trusted certificates
-and the usual variables (`SSL_CERT_FILE`, `NODE_EXTRA_CA_CERTS`,
-`REQUESTS_CA_BUNDLE`, `PIP_CERT`) are set up; a tool with its own list of
-certificates needs pointing at `/proxy-ca/ca-bundle.pem`. Inside Docker
-containers, mount `/proxy-ca` and set the variable
-([Docker inside the sandbox](vscode-image.md#using-docker-inside-the-sandbox)).
+The program doesn't trust the proxy's certificate. HardCode sets this up in
+the sandbox and in Docker containers, so this usually means the program
+keeps its own list of certificates.
+
+- **In the sandbox's terminal**, point the program at
+  `/proxy-ca/ca-bundle.pem`. Most programs already find it through
+  `SSL_CERT_FILE`.
+- **In a Docker container or an image build**, it's one of these:
+  - The image has no certificates at all, for example `FROM scratch`:
+    install the image's `ca-certificates` package.
+  - It fails in the `RUN` line that installs `ca-certificates` or runs
+    `update-ca-certificates`: move the commands that need HTTPS to the
+    next `RUN` line.
+  - The container mounts its own certificate file or folder: add
+    `/proxy-ca/ca.pem` to what you mount.
+  - The container was started with `HARDCODE_PROXY_CA=off`: start it
+    without.
+
+### `update-ca-certificates` says "Device or resource busy" in a container
+
+Run it in the Dockerfile instead. In a running container, HardCode is
+using the certificate list.
+
+### A build fails with "this step changed a Java trust store"
+
+Put `ARG HARDCODE_PROXY_CA=off` before that `RUN` line.
 
 ### Java tools ignore the proxy
 
-Maven and Gradle are set up through `~/.m2/settings.xml` and
-`~/.gradle/gradle.properties`, written at start if they are missing:
-delete them to have them written again. Plain `java` programs need
-`-Dhttps.proxyHost=squid -Dhttps.proxyPort=3128`.
+Maven and Gradle are set up for you, in `~/.m2/settings.xml` and
+`~/.gradle/gradle.properties`; delete a file to have it written again at
+the next start. Other Java programs need
+`-Dhttps.proxyHost=squid -Dhttps.proxyPort=3128`. For Java in Docker
+containers and image builds, set `DOCKER_JAVA_PROXY=true` in the profile's
+settings and run `hardcode up`.
 
 ### A language's command isn't found after switching it on
 

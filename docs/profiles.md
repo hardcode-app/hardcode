@@ -239,6 +239,7 @@ Every setting a profile's `.env` can hold, with its default:
 | `VSCODE_DEFAULT_FOLDER` | empty (the home folder) | The folder VS Code opens when the address doesn't name one. |
 | `DEV_USER`, `DEV_UID`, `DEV_GID` | `dev`, `1000`, `1000` | The user inside the sandbox. Match your own user and group ids (`id -u`, `id -g`) if you mount folders; the Docker daemon always runs as 1000, so with other values its containers see those files as owned by "nobody". |
 | `ENABLE_DOCKER` | `true` | The Docker daemon beside VS Code. On only when exactly `true` (or unset). `false` leaves it out entirely: nothing privileged runs for the profile, and there is no `docker` inside. `hardcode docker on` and `off` write it. |
+| `DOCKER_JAVA_PROXY` | `false` | `true` lets Java programs in Docker containers and image builds reach the internet. It's off by default because Java then prints an extra line each time it starts. |
 | `VSCODE_MEMORY`, `DOCKER_MEMORY` | `8g`, `4g` | Hard memory limits on the VS Code container and on the Docker daemon (its containers count against it), with no swap on top. The proxy (512m), the DNS server (128m) and the gateway (64m) have fixed limits. |
 | `VSCODE_PIDS`, `DOCKER_PIDS` | `4096`, `2048` | How many processes each may run. |
 | `EGRESS_INTERNAL_RANGES` | empty (loopback, link-local, private and shared ranges) | Addresses an allowed name may never resolve to: the proxy refuses the request. Narrow it to reach a registry on your own network. |
@@ -257,11 +258,11 @@ network for a new profile, it counts a profile without `VSCODE_PORT`,
 
 ## What profiles share
 
-At run time, two images and nothing else: each profile is its own Compose
+At run time, three images and nothing else: each profile is its own Compose
 project, with its own networks, storage, proxy certificate, token and
-`hardcode-vscode:<name>` image. The proxy's and the gateway's images
-(`hardcode-squid:<hash>`, `hardcode-gateway:<hash>`, tagged with a hash of
-their build files) are built once for every profile, and built again when
-a newer HardCode changes them. Rebuilding one profile's VS Code image
-doesn't touch the others'; Docker's build cache makes building the same
-steps again quick.
+`hardcode-vscode:<name>` image. The proxy's, the gateway's and the Docker
+daemon's images (`hardcode-squid:<hash>`, `hardcode-gateway:<hash>`,
+`hardcode-docker:<hash>`, tagged with a hash of their build files) are
+built once for every profile, and built again when a newer HardCode
+changes them. Rebuilding one profile's VS Code image doesn't touch the
+others'; Docker's build cache makes building the same steps again quick.

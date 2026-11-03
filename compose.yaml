@@ -23,7 +23,7 @@
 # merged over it. Use `hardcode [-p NAME] compose <args>` (or up/down/logs/...),
 # which runs
 #   HARDCODE_PROJECT=hardcode-NAME HARDCODE_PROFILE_DIR=<home>/profiles/NAME \
-#   HARDCODE_VSCODE_TAG=NAME HARDCODE_SQUID_TAG=... HARDCODE_GATEWAY_TAG=... \
+#   HARDCODE_VSCODE_TAG=NAME HARDCODE_SQUID_TAG=... HARDCODE_GATEWAY_TAG=... HARDCODE_DOCKER_TAG=... \
 #   COMPOSE_PROFILES=docker \
 #   docker compose -p hardcode-NAME --project-directory <this folder> \
 #     --env-file <profile>/.env -f compose.yaml -f <profile>/compose.override.yaml <args>
@@ -184,9 +184,11 @@ services:
     restart: unless-stopped
 
   # Rootless Docker for the VS Code container. Its containers share devnet's restrictions
-  # (pulls and their HTTP(S) traffic go through squid).
+  # (pulls and their HTTP(S) traffic go through squid). Its runc gives every
+  # container and build step the proxy CA (images/docker/hardcode_runc.py).
   docker:
-    image: docker:29.9.2-dind-rootless@sha256:ae083cc7de51e7a8e5a597f8fb774ca7914c408a95fc0f1477826a913479518a
+    build: ./images/docker
+    image: hardcode-docker:${HARDCODE_DOCKER_TAG:-latest}
     logging: *logging
     # Only with the "docker" Compose profile, which `hardcode` activates unless
     # the profile's .env says ENABLE_DOCKER=false (a harder sandbox: nothing
@@ -200,6 +202,10 @@ services:
       DOCKER_TLS_SAN: DNS:docker
       # dockerd's pulls go through squid, so it must trust the proxy CA.
       SSL_CERT_FILE: /proxy-ca/ca-bundle.pem
+      # true: Java in containers and build steps is sent through their proxy
+      # with JAVA_TOOL_OPTIONS (Java ignores HTTPS_PROXY), and prints a
+      # "Picked up JAVA_TOOL_OPTIONS" line on stderr for it.
+      HARDCODE_JAVA_PROXY: ${DOCKER_JAVA_PROXY:-false}
     # Rootless dockerd needs to create user namespaces. These options are
     # enough; --privileged is not used. On Ubuntu 23.10+ hosts unprivileged
     # user namespaces are AppArmor-restricted, and Ubuntu's stock "rootlesskit"

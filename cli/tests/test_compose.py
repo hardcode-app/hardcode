@@ -122,6 +122,7 @@ class ComposeTests(HomeTestCase):
         self.assertEqual(environment["HARDCODE_VSCODE_TAG"], "default")
         self.assertEqual(environment["HARDCODE_SQUID_TAG"], stack.image_tag("squid"))
         self.assertEqual(environment["HARDCODE_GATEWAY_TAG"], stack.image_tag("gateway"))
+        self.assertEqual(environment["HARDCODE_DOCKER_TAG"], stack.image_tag("docker"))
         self.assertEqual(
             environment["COMPOSE_PROFILES"], "docker", "the daemon is on unless the profile says otherwise"
         )

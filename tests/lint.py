@@ -21,7 +21,7 @@ from harness import ROOT, Suite
 
 # cli/hardcode is Python without a .py suffix: ruff finds it through
 # extend-include in pyproject.toml, isort has to be told.
-PYTHON = ["cli", "admin", "docs/tools", "release", "tests"]
+PYTHON = ["cli", "admin", "docs/tools", "release", "tests", "images/docker"]
 PYTHON_SCRIPTS = ["cli/hardcode"]
 RUST = ROOT / "app" / "src-tauri"
 

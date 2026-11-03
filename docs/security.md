@@ -102,6 +102,33 @@ and CoreDNS the DNS server that answers name lookups.
 - **Docker is rootless, and not `--privileged`**, on Compose. Containers
   you start inside, `--privileged` and `--network host` included, are
   inside the same network sandbox and go through the same proxy.
+- **The daemon is Docker's own image, with one layer added.** The image
+  (`images/docker`) is `docker:dind-rootless`, pinned by digest. Its
+  dockerd, containerd, runc, rootlesskit and entrypoint are unchanged,
+  which `tests/docker.py` checks. The added layer holds the image's own
+  Python and a `runc` wrapper. The container keeps the security options,
+  devices, volumes and limits it had before. On Kubernetes, the sidecar
+  still runs Docker's image without the wrapper.
+- **Containers and builds trust the proxy's certificate, and nothing else
+  changes.** The wrapper runs before the real `runc`:
+  - For a container, it mounts a copy of each certificate bundle in the
+    image, with the proxy's certificate added. The copy is removed with the
+    container.
+  - For a build step, it adds the certificate to the image's bundle and
+    removes it before the layer is written. If it can't remove it, the step
+    fails, so a built image never contains it.
+  - It covers Java trust stores, and sets `SSL_CERT_FILE` and
+    `NODE_EXTRA_CA_CERTS`.
+
+  It adds no capabilities, namespaces, devices or other mounts, and passes
+  every other `runc` command through unchanged. Trusting the proxy's
+  certificate adds no trust: all of a container's HTTPS goes through that
+  proxy anyway.
+- **An image's files are treated as untrusted.** The wrapper opens them
+  only inside the image's root filesystem (`openat2` with
+  `RESOLVE_IN_ROOT`), so a symlink can't point it at the sidecar's own
+  files, such as the daemon's TLS key. It reads regular files only, up to
+  10 MiB each.
 - **The Docker daemon is optional.** `hardcode docker off` (the switch on
   the docker row of the app's Overview, `docker.enabled: false` on
   Kubernetes) leaves the rootless daemon out of the profile entirely:
@@ -190,7 +217,7 @@ languages while the chart's `profileDefaults.languages` is empty.
   and a development build's description ends with what OSV-Scanner finds
   in what HardCode is built from (the app's crates, the Python pins) and
   in the images that are its boundary (squid, the gateway, the admin,
-  CoreDNS, the Docker sidecar), with the full list as
+  the Docker sidecar, CoreDNS), with the full list as
   `vulnerabilities.json`. The scanner, checksum-pinned in the build image,
   runs with no network, no token and a read-only filesystem against
   databases downloaded before it starts, so a compromised scanner could

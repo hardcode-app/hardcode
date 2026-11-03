@@ -2,7 +2,7 @@
 The stack: what HardCode runs every profile with.
 
 ``compose.yaml``, the build contexts of the images it builds (squid, the
-gateway, the VS Code container) and the template a new profile's allowlist
+gateway, the Docker daemon, the VS Code container) and the template a new profile's allowlist
 and override start from. It belongs to the HardCode that is running, never
 to the user: a newer HardCode brings its own, and a profile keeps only what
 differs (its ``.env`` over compose.yaml's defaults, its
@@ -31,7 +31,7 @@ from typing import Iterable, Optional
 from . import home
 
 # The stack's files and folders, relative to the checkout (and to a copy).
-PARTS = ("compose.yaml", "images/squid", "images/gateway", "images/vscode", "template")
+PARTS = ("compose.yaml", "images/squid", "images/gateway", "images/docker", "images/vscode", "template")
 
 # The copy that ships inside the package.
 BUNDLED = Path(__file__).resolve().parent / "stack"
@@ -201,7 +201,7 @@ def defaults() -> dict[str, str]:
 def image_tag(image: str) -> str:
     """
     The tag of one of the images the stack builds that every profile shares
-    (``squid``, ``gateway``): the hash of its build context, so that a stack
+    (``squid``, ``gateway``, ``docker``): the hash of its build context, so that a stack
     with a changed image builds it again instead of running the old one.
     """
     return digest(current(), [f"images/{image}"])

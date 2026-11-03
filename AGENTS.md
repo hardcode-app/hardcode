@@ -27,6 +27,9 @@ A change is complete when all of these are true:
   `app/src-tauri/src/lib.rs` (`mod tests`), the suites in `tests/*.py`,
   and `tests/proxy.py` for anything that changes what the proxy enforces
   (it runs the real squid; the grammar corpus is `tests/allowlist-corpus.txt`).
+  The Docker sidecar's runc wrapper has unit tests beside it
+  (`images/docker/test_hardcode_runc.py`); `tests/docker.py` runs it with
+  the real runc on real images, then runs the daemon where Docker allows.
   Run the suite for what you touched (`tests/run_all.py` runs everything)
   and **report the real result**, including failures and skips.
 - **Docs** in `docs/` say what the code now does: the page for the part you
@@ -77,6 +80,11 @@ A change is complete when all of these are true:
   `ip_forward`, read-only filesystems, `no-new-privileges`, resource limits,
   `max_filedescriptors`) without saying so explicitly and updating
   [docs/security.md](docs/security.md).
+- The Docker sidecar's runc wrapper (`images/docker/hardcode_runc.py`)
+  does one thing: it gives containers and build steps the proxy's CA. It
+  changes nothing else in a container's spec, reads an image's files only
+  inside the image's root (`RESOLVE_IN_ROOT`), and passes every other runc
+  command through unchanged.
 - The repository's settings are part of the model: the rulesets on `main`
   and on `v*` tags, immutable releases, actions pinned by commit, approval
   for outside contributors, secret push protection
@@ -106,8 +114,10 @@ A change is complete when all of these are true:
   image's `pyproject.toml`, lock it again in the build image
   (`images/build/run.sh uv lock --project images/admin`).
 - The CLI stays standard-library Python 3.9+; the admin stays Flask,
-  gunicorn and qrcode; the app's page stays plain JS; Rust stays the thin
-  shell it is. A new runtime dependency anywhere is a discussion, not a
+  gunicorn and qrcode; the Docker sidecar's runc wrapper stays
+  standard-library Python, on the Python of Docker's image; the app's page
+  stays plain JS; Rust stays the thin shell it is. A new runtime
+  dependency anywhere is a discussion, not a
   commit.
 - Pin what you add (image tags, chart versions, actions) where something
   moves it: Dependabot, or `maintenance/pins.py` for the build image's

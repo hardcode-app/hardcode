@@ -27,11 +27,11 @@ publish ports from internal networks.
 | Service | Image | Role |
 |---|---|---|
 | `vscode` | built from [`images/vscode/Dockerfile`](../images/vscode/Dockerfile), tagged `hardcode-vscode:<profile>` | VS Code (`code serve-web`) as user `dev`, toolchains, Claude Code. [Details](vscode-image.md). |
-| `docker` | `docker:29.9.2-dind-rootless` (by digest) | The VS Code container's Docker daemon. Rootless, not `--privileged`; talks TLS on `docker:2376`. Behind the `docker` Compose profile, which the CLI activates unless the profile's `ENABLE_DOCKER=false`. |
+| `docker` | built from [`images/docker/Dockerfile`](../images/docker/Dockerfile): Docker's `docker:dind-rootless` (by digest), with HardCode's runc wrapper on top | The VS Code container's Docker daemon. Rootless, not `--privileged`; talks TLS on `docker:2376`. Its runc ([`hardcode_runc.py`](../images/docker/hardcode_runc.py)) gives every container and build step the proxy CA ([Using Docker inside the sandbox](vscode-image.md#using-docker-inside-the-sandbox)). Behind the `docker` Compose profile, which the CLI activates unless the profile's `ENABLE_DOCKER=false`. |
 | `squid` | built from [`images/squid/Dockerfile`](../images/squid/Dockerfile) (the archive's `squid-openssl`) | Egress proxy on `squid:3128`. Decrypts HTTPS with the profile's own CA and allows requests by URL and method. |
 | `coredns` | `coredns/coredns:1.15.0` (by digest) | The VS Code container's only nameserver. Allowlisted names resolve upstream; everything else is answered NXDOMAIN locally. |
 | `allowlist` | the squid image, one shot | Renders the profile's allowlist into Squid's and CoreDNS's rule files on the `egress-config` volume before they start. It is given `proxy-allowlist.txt`, which `hardcode` writes: the entries HardCode provides (every profile's, and the profile's languages' and tools'), less those switched off, with the profile's own from `allowlist.txt`. |
-| `pki` | the squid image, one shot | Generates the proxy CA once per profile. Squid gets key and certificate; vscode and docker only the certificate. |
+| `pki` | the squid image, one shot | Generates the proxy CA once per profile. Squid gets key and certificate; vscode and docker only the certificate (docker passes it on to its containers). |
 | `gateway` | built from [`images/gateway/Dockerfile`](../images/gateway/Dockerfile) (socat) | Publishes VS Code (`127.0.0.1:<VSCODE_PORT>` → `vscode:8000`) and any ports added with `hardcode forward`. |
 
 ## Networks and volumes
@@ -97,14 +97,14 @@ version to its cache folder; the profiles are in the user's home
 
 ```
 HARDCODE_PROJECT=hardcode-NAME HARDCODE_PROFILE_DIR=<home>/profiles/NAME HARDCODE_VSCODE_TAG=NAME \
-HARDCODE_SQUID_TAG=<hash> HARDCODE_GATEWAY_TAG=<hash> COMPOSE_PROFILES=docker \
+HARDCODE_SQUID_TAG=<hash> HARDCODE_GATEWAY_TAG=<hash> HARDCODE_DOCKER_TAG=<hash> COMPOSE_PROFILES=docker \
 docker compose -p hardcode-NAME --project-directory <stack> --env-file <home>/profiles/NAME/.env \
   -f <stack>/compose.yaml -f <home>/profiles/NAME/compose.override.yaml <args>
 ```
 
 (outside the default home, the project and the tag carry the home's id:
-`hardcode-<id>-NAME`, `<id>-NAME`; the squid and gateway images are tagged
-with a hash of their build files, so a changed one is built again)
+`hardcode-<id>-NAME`, `<id>-NAME`; the squid, gateway and docker images are
+tagged with a hash of their build files, so a changed one is built again)
 
 with `COMPOSE_PROFILES` empty when the profile's `.env` says
 `ENABLE_DOCKER=false` (the Docker daemon's service sits behind that Compose

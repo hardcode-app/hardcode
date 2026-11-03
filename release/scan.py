@@ -10,10 +10,10 @@ read-only container); these are the steps around it.
         laid out as the scanner reads them offline
     release/scan.py save --prefix PREFIX --tag TAG DIR
         copy each image to scan, the build platform's only, from its
-        registry into DIR/NAME.tar (skopeo): the proxy, the gateway and the
-        admin as this run published them, and CoreDNS and the Docker sidecar
-        as compose.yaml pins them; SCAN_REGISTRY_USER and
-        SCAN_REGISTRY_TOKEN, when set, sign in to ghcr.io
+        registry into DIR/NAME.tar (skopeo): the proxy, the gateway, the
+        admin and the Docker sidecar as this run published them, and CoreDNS
+        as compose.yaml pins it; SCAN_REGISTRY_USER and SCAN_REGISTRY_TOKEN,
+        when set, sign in to ghcr.io
     release/scan.py summary DIR --out FILE
         from the scanner's reports in DIR (NAME.json each), the description's
         "Known vulnerabilities" section (FILE) and every finding
@@ -49,7 +49,9 @@ ECOSYSTEMS = ["crates.io", "PyPI", "Go", "Alpine", "Debian", "Ubuntu"]
 
 # Our images worth scanning: the boundary. The VS Code image is what the
 # sandbox contains, not what contains it.
-OWN_IMAGES = ["squid", "gateway", "admin"]
+# The Docker sidecar is Docker's image with a layer on top, so its report
+# covers the image the chart's sidecar still runs, which has the same base.
+OWN_IMAGES = ["squid", "gateway", "admin", "docker"]
 
 # What each report is about, by its name (the report is NAME.json): in the
 # table, and in the list of fixes.
@@ -58,8 +60,8 @@ LABELS = {
     "squid": ("The proxy and allowlist renderer (hardcode-squid)", "the proxy"),
     "gateway": ("The gateway (hardcode-gateway)", "the gateway"),
     "admin": ("The operator and admin (hardcode-admin)", "the admin"),
+    "docker": ("The Docker sidecar (hardcode-docker)", "the Docker sidecar"),
     "coredns": ("CoreDNS", "CoreDNS"),
-    "docker": ("The Docker sidecar", "the Docker sidecar"),
 }
 
 # In the lock files' report, what each lock is, for the list of fixes.
@@ -112,16 +114,14 @@ def download(url: str) -> bytes:
 def images(prefix: str, tag: str, compose: str) -> list[tuple[str, str]]:
     """
     The images to scan, as (name, reference): ours at *tag* under *prefix*,
-    and the ones *compose* (compose.yaml's text) pins for CoreDNS and the
-    Docker sidecar.
+    and the one *compose* (compose.yaml's text) pins for CoreDNS.
     """
     found = [(name, f"{prefix}-{name}:{tag}") for name in OWN_IMAGES]
 
-    for name, pattern in (("coredns", r"coredns/coredns"), ("docker", r"docker")):
-        match = re.search(rf"^\s+image:\s+({pattern}:\S+)\s*$", compose, re.MULTILINE)
-        if match is None:
-            raise ScanError(f"compose.yaml pins no {name} image")
-        found.append((name, match.group(1)))
+    match = re.search(r"^\s+image:\s+(coredns/coredns:\S+)\s*$", compose, re.MULTILINE)
+    if match is None:
+        raise ScanError("compose.yaml pins no coredns image")
+    found.append(("coredns", match.group(1)))
 
     return found
 
@@ -386,7 +386,7 @@ def main(argv: list[str]) -> int:
                 raise ScanError(f"no reports in {arguments.directory}")
 
             # The lock files first, then the images in the order they're listed.
-            names = ["source"] + OWN_IMAGES + ["coredns", "docker"]
+            names = ["source"] + OWN_IMAGES + ["coredns"]
             ordered = {name: reports[name] for name in names if name in reports}
             text, every = summary(ordered, arguments.scanner)
 

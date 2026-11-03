@@ -117,6 +117,20 @@ jobs:
       - run: tests/proxy.py
       - run: tests/images.py
 
+  # The Docker sidecar for real: its runc wrapper with the real runc on
+  # Alpine, Debian, UBI, distroless and Temurin, then the rootless daemon
+  # itself, with docker run, exec and build in it.
+  docker:
+    name: Docker sidecar (the daemon and its runc wrapper)
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/build-image
+      - run: tests/docker.py
+
   release:
     name: Release steps
     runs-on: ubuntu-latest
@@ -199,6 +213,13 @@ jobs:
           push: false
           cache-from: type=gha,scope=gateway
           cache-to: type=gha,scope=gateway,mode=max
+      - name: docker
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: images/docker
+          push: false
+          cache-from: type=gha,scope=docker
+          cache-to: type=gha,scope=docker,mode=max
       - name: admin
         uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:

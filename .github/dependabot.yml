@@ -8,10 +8,12 @@ version: 2
 # and minor updates that pass (docs/development.md, "Dependencies").
 #
 # The images move together, in one pull request: Ubuntu's dated builds
-# (resolute-YYYYMMDD) in the Dockerfiles, and CoreDNS and the Docker sidecar
-# in compose.yaml and in the chart's values (keys named "image", which is
-# what Dependabot reads there). Its updates leave their commit message and
-# schedule to the group: Dependabot refuses them on the updates.
+# (resolute-YYYYMMDD) in the Dockerfiles, Docker's own image both in
+# images/docker's Dockerfile (the Docker sidecar's base) and in the chart's
+# values, and CoreDNS in compose.yaml and in the chart's values (keys named
+# "image", which is what Dependabot reads there). Its updates leave their
+# commit message and schedule to the group: Dependabot refuses them on the
+# updates.
 multi-ecosystem-groups:
   images:
     schedule: { interval: weekly }
@@ -66,7 +68,7 @@ updates:
     groups:
       actions: { patterns: ["*"] }
   - package-ecosystem: docker
-    directories: ["/images/vscode", "/images/squid", "/images/gateway", "/images/admin", "/images/build", "/.github/buildkit"]
+    directories: ["/images/vscode", "/images/squid", "/images/gateway", "/images/docker", "/images/admin", "/images/build", "/.github/buildkit"]
     patterns: ["*"]
     multi-ecosystem-group: images
     cooldown: { default-days: 7 }

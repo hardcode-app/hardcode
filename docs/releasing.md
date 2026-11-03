@@ -34,6 +34,7 @@ git push origin v1.2.0
 | Its updates, once the updater is set up (below) | a `.sig` beside each installer, `HardCode_aarch64.app.tar.gz` (macOS's update) and `latest.json` |
 | The `hardcode` command | `hardcode-linux-x64`, `hardcode-macos-arm64`, `hardcode-win-x64.exe` (one file each, the stack inside), and the Python package `hardcode_cli-X.Y.Z-py3-none-any.whl` (`pipx install` it) |
 | Kubernetes | the chart `hardcode-X.Y.Z.tgz`, also at `oci://ghcr.io/<owner>/charts/hardcode`, with its images set to `ghcr.io/<owner>/hardcode-{vscode,squid,gateway,admin}:X.Y.Z` (also tagged `X.Y` and `latest`) |
+| The Docker sidecar | `ghcr.io/<owner>/hardcode-docker:X.Y.Z` (also `X.Y` and `latest`), what Compose builds from `images/docker`; the chart's sidecar is still Docker's own image |
 | The source | `hardcode-X.Y.Z-source.tar.gz`, the tag's files (`git archive`); GitHub attaches its own archives as well |
 | Known vulnerabilities | `vulnerabilities.json`, each finding in the lock files and the boundary's images, and a summary at the end of the description ([below](#known-vulnerabilities)) |
 | Checksums | `SHA256SUMS`, every file's: `sha256sum -c SHA256SUMS --ignore-missing` |
@@ -84,10 +85,11 @@ which keep their caches.
 
 Every release and development build is scanned before it is published, by
 the *Known vulnerabilities* job: the lock files (`Cargo.lock`, the Python
-pins), and the images that are HardCode's boundary as the run published
-them (squid, the gateway, the admin) and as `compose.yaml` pins them
-(CoreDNS, the Docker sidecar). The VS Code image is what the sandbox
-contains, and isn't scanned.
+pins), and the images that are HardCode's boundary: squid, the gateway,
+the admin and the Docker sidecar as the run published them, and CoreDNS
+as `compose.yaml` pins it. The Docker sidecar is Docker's image with one
+layer added, so its report also covers the image the chart's sidecar
+runs. The VS Code image is what the sandbox contains, and isn't scanned.
 
 The job holds no secret and can only read. `release/scan.py databases`
 downloads OSV's databases (crates.io, PyPI, Go, Alpine, Debian, Ubuntu),
@@ -123,7 +125,7 @@ build publishes:
 | | Where |
 |---|---|
 | The app, the `hardcode` command, its Python package, the chart | a **`dev-N` prerelease** on the Releases page (N is the run's number), with `SHA256SUMS`, attested like a release's files. Each development build publishes itself at its own commit under its own tag, since an immutable release's tag is never used again, and then deletes the ones before it, so there is always one |
-| The images | `ghcr.io/<owner>/hardcode-{vscode,squid,gateway,admin}`, tagged `sha-<commit>` and `edge` (the newest development build); never `latest`, which is a release's |
+| The images | `ghcr.io/<owner>/hardcode-{vscode,squid,gateway,admin,docker}`, tagged `sha-<commit>` and `edge` (the newest development build); never `latest`, which is a release's |
 | The chart | `oci://ghcr.io/<owner>/charts/hardcode`, version `X.Y.Z-dev.N` (the checkout's version, which is the next release's, and the run's number), pointing at the `sha-<commit>` images. Helm takes it only when asked: `--devel`, or its exact version |
 
 Its files carry the checkout's version, since Windows installers take
