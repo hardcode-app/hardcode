@@ -171,6 +171,20 @@ Everything outside your home folder and `/shared` is reset whenever the
 container is recreated: after a rebuild, a change of shared folders, or
 Docker switched on or off. Install it again, or keep to what lives in your
 home folder ([what is kept](vscode-image.md#what-is-kept-and-what-isnt)).
+To have a package in every container, add it to the image instead:
+`hardcode package add NAME`, then `hardcode rebuild`.
+
+### A rebuild says `Unable to locate package`
+
+One of the profile's Ubuntu packages isn't in Ubuntu 26.04 under that
+name. Check the spelling, or remove it with `hardcode package remove
+NAME` (or its **✕** on the Languages / Tools page), and rebuild.
+
+### A rebuild fails in your own Dockerfile steps
+
+The Console shows the step that failed. Fix it on the app's **Image**
+page and rebuild. To go back to HardCode's image alone, delete the
+Dockerfile (`hardcode image` shows where it is) and rebuild.
 
 ### A server in the sandbox can't be reached at `localhost:<port>`
 

@@ -59,6 +59,47 @@ rebuild, which takes a few minutes: the app marks a language *not in the
 image yet* or *still in the image* until then, with a **Rebuild image**
 button.
 
+## Your own packages and steps
+
+A profile's image can have more than its languages and tools.
+
+**Ubuntu packages.** On the app's **Languages / Tools** page, type a
+package's name under **Ubuntu packages** and click **Add**. Or run:
+
+```sh
+hardcode package add postgresql-client graphviz
+hardcode package remove graphviz
+hardcode packages
+```
+
+Packages come from Ubuntu 26.04. They're installed when the image is
+rebuilt, and the app shows **Rebuild image** once there's something new to
+install.
+
+**Your own Dockerfile steps.** For anything more, such as a tool from its
+maker's website or your company's certificate, add steps of your own on the
+app's **Image** page. They're built on top of HardCode's image:
+
+```dockerfile
+FROM hardcode
+USER root
+COPY company-ca.crt /usr/local/share/ca-certificates/
+RUN update-ca-certificates
+USER dev
+```
+
+Start with `FROM hardcode`, and end with `USER dev`. A file the steps copy
+goes beside the Dockerfile, in the profile's `image` folder: `hardcode image`
+shows where it is. **Save & rebuild** builds the image.
+
+These steps run on your computer's Docker, with your computer's internet
+connection, not through the sandbox's allowlist. Only add steps you trust.
+To go back to HardCode's image alone, delete the Dockerfile and rebuild.
+
+On Kubernetes, packages are installed each time the sandbox starts, which
+makes starting slower. Dockerfile steps aren't available there; an
+administrator can give the profile an image of its own instead.
+
 ## What is kept, and what isn't
 
 | Where, inside the sandbox | Kept in | Lasts |

@@ -47,6 +47,11 @@ name: ${HARDCODE_PROJECT}
 services: {}
 """
 
+# A cut-down compose.image.yaml, for a profile with Dockerfile steps of its own.
+TEMPLATE_IMAGE_COMPOSE = """\
+services: {}
+"""
+
 # A cut-down template/.env: the reference of every setting, commented out.
 TEMPLATE_ENV = """\
 # --- Every setting, with its default -------------------------------------------
@@ -98,6 +103,7 @@ def make_stack(path: Path) -> Path:
     """
     path.mkdir(parents=True, exist_ok=True)
     (path / "compose.yaml").write_text(TEMPLATE_COMPOSE, encoding="utf-8")
+    (path / "compose.image.yaml").write_text(TEMPLATE_IMAGE_COMPOSE, encoding="utf-8")
 
     for image in ("squid", "gateway", "docker", "vscode"):
         (path / "images" / image).mkdir(parents=True)

@@ -15,7 +15,7 @@ import re
 from dataclasses import dataclass
 from typing import Any, Optional
 
-from hardcode_cli import allowlist, lan, langs
+from hardcode_cli import allowlist, lan, langs, packages
 
 # HardCode's API group, and the prefix of its labels and annotations: the
 # project's GitHub organisation's namespace, which only it controls.
@@ -260,6 +260,17 @@ def effective_languages(spec: dict, defaults: Optional[dict] = None) -> list[str
     return [key for key in langs.LANGS if key in chosen]
 
 
+def effective_packages(spec: dict) -> list[str]:
+    """
+    The profile's own Ubuntu packages, in their order and without repeats.
+    Anything that isn't a package's name by Debian's rule is left out, as
+    the CRD refuses it: only names ever reach the VS Code container.
+    """
+    named = [item for item in spec.get("packages") or [] if isinstance(item, str)]
+
+    return list(dict.fromkeys(name for name in named if packages.PACKAGE_NAME.match(name)))
+
+
 def lan_settings(defaults: Optional[dict] = None) -> dict:
     """
     Whether this cluster lets a profile's names reach an address on its
@@ -354,6 +365,7 @@ def effective_spec(profile: dict, defaults: Optional[dict] = None) -> dict:
         "lan": {**lan_config, "pins": pins},
         "languages": languages,
         "extensions": list(spec.get("extensions") or []),
+        "packages": effective_packages(spec),
         "suspended": bool(spec.get("suspended")),
         "user": spec.get("user") or "dev",
         "upstreamDNS": pick("upstreamDNS", fallback="/etc/resolv.conf"),
@@ -782,7 +794,13 @@ def _vscode_env(build: _Build) -> list[dict]:
     """
     The VS Code container's environment: the proxy, the Docker daemon beside
     it when there is one, the VS Code token, the CA bundle for tools that
-    don't read the system's, and last the profile's own variables.
+    don't read the system's, the profile's own Ubuntu packages when it has
+    any, and last the profile's own variables.
+
+    The image is shared here, not built per profile, so the packages are
+    installed as the container starts (HARDCODE_PACKAGES, which the
+    entrypoint reads): a change of them restarts the pod. Without any,
+    the variable isn't there, and the pod is as it was.
 
     The profile's own win: one of ours with the same name is left out, since
     the same variable twice in one container is something server-side apply
@@ -815,7 +833,11 @@ def _vscode_env(build: _Build) -> list[dict]:
         {"name": "CODEX_CA_CERTIFICATE", "value": SYSTEM_CA_BUNDLE},
     ]
 
-    ours = proxy_env(build.proxy_url) + docker + settings
+    wanted = []
+    if spec["packages"]:
+        wanted = [{"name": "HARDCODE_PACKAGES", "value": packages.join(spec["packages"])}]
+
+    ours = proxy_env(build.proxy_url) + docker + settings + wanted
     custom = [{"name": name, "value": str(value)} for name, value in spec["env"].items()]
 
     return [variable for variable in ours if variable["name"] not in spec["env"]] + custom

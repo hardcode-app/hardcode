@@ -106,6 +106,12 @@ docker compose -p hardcode-NAME --project-directory <stack> --env-file <home>/pr
 `hardcode-<id>-NAME`, `<id>-NAME`; the squid, gateway and docker images are
 tagged with a hash of their build files, so a changed one is built again)
 
+A profile with Dockerfile steps of its own (`profiles/NAME/image/Dockerfile`)
+also gets `-f <stack>/compose.image.yaml` after `compose.yaml`. It builds
+HardCode's image as `hardcode-vscode-base:NAME`, a service that never
+runs, and then the profile's steps on it, from the profile's `image/`
+folder, as the VS Code image.
+
 with `COMPOSE_PROFILES` empty when the profile's `.env` says
 `ENABLE_DOCKER=false` (the Docker daemon's service sits behind that Compose
 profile),

@@ -49,7 +49,8 @@ class OpsTests(HomeTestCase):
         )
 
     def make_folder(self, name="src"):
-        folder = self.root / name
+        # Beside the home, not in it: a folder in HardCode's home is never mounted.
+        folder = self.root.parent / name
         folder.mkdir()
         return folder
 
@@ -579,12 +580,13 @@ class OpsTests(HomeTestCase):
 
     def test_the_images_languages_and_whether_to_rebuild(self):
         ops = self.ops()
-        self.assertEqual(ops.image(), Image(built=False, languages=[]), "no image yet")
+        no_image = Image(built=False, languages=[], packages=[], dockerfile="")
+        self.assertEqual(ops.image(), no_image, "no image yet")
         self.assertIs(ops.state()["rebuildNeeded"], False, "the first start builds it")
 
         every = " ".join(f"{key}=true" for key in langs.LANGS)
         self.runner.image_labels = {"io.github.hardcode-app.languages": every}
-        self.assertEqual(ops.image(), Image(built=True, languages=list(langs.LANGS)))
+        self.assertEqual(ops.image(), Image(built=True, languages=list(langs.LANGS), packages=[], dockerfile=""))
         self.assertIs(ops.state()["rebuildNeeded"], False)
 
         ops.set_languages({"go": False}, build=False)
@@ -595,7 +597,7 @@ class OpsTests(HomeTestCase):
 
         # No Docker to ask: nobody can say.
         with mock.patch.object(ops.compose, "run_docker", side_effect=ComposeError("docker not found on the PATH")):
-            self.assertEqual(ops.image(), Image(built=None, languages=None))
+            self.assertEqual(ops.image(), Image(built=None, languages=None, packages=None, dockerfile=None))
             self.assertIsNone(ops.state()["rebuildNeeded"])
 
     def test_an_image_without_languages_is_an_image(self):
@@ -606,7 +608,7 @@ class OpsTests(HomeTestCase):
         self.runner.image_labels = {"io.github.hardcode-app.languages": " ".join(f"{key}=false" for key in langs.LANGS)}
 
         state = ops.state()
-        self.assertEqual(state["image"], {"built": True, "languages": []})
+        self.assertEqual(state["image"], {"built": True, "languages": [], "packages": [], "dockerfile": ""})
         self.assertIs(state["rebuildNeeded"], False)
 
         ops.set_languages({"python": True}, build=False)
@@ -618,7 +620,7 @@ class OpsTests(HomeTestCase):
         # An image without the label is there, with languages nobody can tell.
         self.runner.image_labels = {}
         state = ops.state()
-        self.assertEqual(state["image"], {"built": True, "languages": None})
+        self.assertEqual(state["image"], {"built": True, "languages": None, "packages": [], "dockerfile": ""})
         self.assertIsNone(state["rebuildNeeded"])
         self.assertIsNone(python_in_image(state))
 

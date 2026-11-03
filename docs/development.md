@@ -4,8 +4,9 @@
 
 ```
 compose.yaml                the stack, parameterised by profile; with images/ and template/ it ships inside the hardcode command
+compose.image.yaml          merged after compose.yaml for a profile with Dockerfile steps of its own: HardCode's image as a base, the profile's steps on it
 template/                   what a new profile starts from: .env (every setting, commented out), allowlist.txt, compose.override.yaml
-images/vscode/              the VS Code image: Dockerfile, entrypoint.sh, sync-extensions.sh, verify-extensions.sh, ssh_config, ssh-proxy-config.sh, ssh-key.sh, github.sh, gh.sh
+images/vscode/              the VS Code image: Dockerfile, entrypoint.sh, sync-extensions.sh, verify-extensions.sh, ssh_config, ssh-proxy-config.sh, ssh-key.sh, github.sh, gh.sh, install-packages.sh
 images/squid/               the proxy image: squid.conf, entrypoint, make-ca.sh (pki), allowlist-render.sh
 images/gateway/             publishes ports from the internal network to the host (socat)
 images/docker/              the Docker sidecar: Docker's docker:dind-rootless image with hardcode_runc.py on top, the runc wrapper

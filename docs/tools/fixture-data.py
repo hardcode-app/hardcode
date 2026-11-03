@@ -18,7 +18,7 @@ ROOT = Path(__file__).resolve().parents[2]
 sys.path[:0] = [str(ROOT / "cli"), str(ROOT / "admin")]
 
 from hardcode_admin import manifests, totp  # noqa: E402
-from hardcode_cli import allowlist, blocked, langs  # noqa: E402
+from hardcode_cli import allowlist, blocked, dockerfile, langs  # noqa: E402
 
 # A few refusals of each kind: repeated URLs, an upload, refused tunnels.
 SQUID_LOG = """\
@@ -157,11 +157,44 @@ def main(stage: Path) -> None:
     for lang in app_langs:
         lang["inImage"] = lang["key"] in chosen
 
+    # Two Ubuntu packages of its own, and Dockerfile steps that trust the
+    # company's certificate authority, both in the image already.
+    packages = ["postgresql-client", "graphviz"]
+    steps = (
+        "FROM hardcode\n"
+        "USER root\n"
+        "\n"
+        "# Our own certificate authority, so our servers' certificates are trusted.\n"
+        "COPY company-ca.crt /usr/local/share/ca-certificates/\n"
+        "RUN update-ca-certificates\n"
+        "\n"
+        "USER dev\n"
+    )
+    image = {"built": True, "languages": chosen, "packages": packages, "dockerfile": "5d0c1f7a9e42"}
+    folder = "/home/you/.config/hardcode/profiles/default/image"
+    image_steps = {
+        "profile": "default",
+        "path": f"{folder}/Dockerfile",
+        "folder": folder,
+        "exists": True,
+        "dockerfile": steps,
+        "starter": dockerfile.STARTER,
+        "digest": image["dockerfile"],
+        "base": (ROOT / "images" / "vscode" / "Dockerfile").read_text(encoding="utf-8"),
+        "basePath": "/home/you/.cache/hardcode/stack/0.1.0/images/vscode/Dockerfile",
+        "image": image,
+        "rebuildNeeded": False,
+        "rebuildReasons": [],
+    }
+
     app_data = {
         "allowlist": allowlist.as_dicts(allowlist.effective(text, chosen)),
         "langs": app_langs,
         "extensions": langs.extension_sources(chosen, ["eamodio.gitlens", "somedev.handy-snippets"]),
-        "image": {"built": True, "languages": chosen},
+        "image": image,
+        "packages": packages,
+        "imageSteps": image_steps,
+        "rebuildReasons": [],
         "rebuildNeeded": False,
         "blocked": blocked_items,
         "lan": [pin.as_dict() for pin in allowlist.pins(text)],
@@ -224,6 +257,7 @@ def main(stage: Path) -> None:
         "spec": {**team_a["spec"], "effective": effective},
         "status": team_a["status"],
         "allowlist": allowlist.as_dicts(allowlist.effective(effective["allowlist"], effective["languages"])),
+        "packages": ["postgresql-client"],
         "lan": {
             "enabled": effective["lan"]["enabled"],
             "pins": [{**pin, "resolves": [pin["address"]], "state": "ok"} for pin in effective["lan"]["pins"]],

@@ -153,7 +153,9 @@ host**, and read-only to `rw`. Nothing is allowed until you add it.
   `.git/hooks` and `git config --local --list`.
 - **Never share** your home folder, `~/.ssh`, your cloud credentials'
   folders, HardCode's own folder (where profiles are kept), or anything
-  else holding secrets.
+  else holding secrets. `hardcode mount` refuses HardCode's own folder:
+  a profile's own Dockerfile steps are kept there, and they run on your
+  computer at the next rebuild.
 - **If you need writable mounts often**, run Docker on your computer in a
   way that makes root inside a container an ordinary user outside it
   (rootless Docker, or Docker's user-namespace remapping), and keep those

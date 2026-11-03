@@ -5,7 +5,7 @@ Sign-in is a password and then a TOTP code. Signed in, an admin manages the
 profiles: the languages and tools each is built around (which open the
 allowlist entries HardCode provides for them and bring their VS Code
 extensions), its own extensions and how far its VS Code container has got
-with installing them, its allowlist (its own entries and the provided ones
+with installing them, its own Ubuntu packages, its allowlist (its own entries and the provided ones
 it switches off, one at a time or across every profile), what its proxy
 refused; and manages the other admins.
 """
@@ -24,7 +24,7 @@ from urllib.parse import urlsplit
 
 from flask import Flask, g, jsonify, request, send_file
 
-from hardcode_cli import allowlist, blocked, lan, langs
+from hardcode_cli import allowlist, blocked, lan, langs, packages
 
 from . import manifests, totp
 from .auth import AuthError, Sessions, StoreConflict, Throttle, Users, canonical, check_password, hash_password
@@ -46,6 +46,7 @@ HOST_OK = re.compile(r"^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0
 
 OPS = ("add", "remove", "enable", "disable")
 EXTENSION_OPS = ("add", "remove")
+PACKAGE_OPS = ("add", "remove")
 LAN_OPS = ("add", "remove")
 SINCE = {"10m": 600, "30m": 1800, "2h": 7200, "24h": 86400}
 WRITES = ("POST", "PUT", "PATCH", "DELETE")
@@ -54,6 +55,10 @@ WRITES = ("POST", "PUT", "PATCH", "DELETE")
 # spec.extensions. Checked here first, so the answer is a 400 that says so
 # rather than the API server's refusal.
 MAX_EXTENSIONS = 100
+
+# A profile's own Ubuntu packages, at most: the CRD's maxItems on
+# spec.packages, checked here first for the same reason.
+MAX_PACKAGES = 200
 
 # The header the page's background refresh sends: such a request isn't
 # activity, so it doesn't hold off the session's idle timeout.
@@ -357,6 +362,7 @@ class AdminApi:
             ("PATCH", "/api/profiles/<name>", self.patch_profile),
             ("DELETE", "/api/profiles/<name>", self.delete_profile),
             ("POST", "/api/profiles/<name>/extensions", self.edit_extensions),
+            ("POST", "/api/profiles/<name>/packages", self.edit_packages),
             ("POST", "/api/profiles/<name>/token", self.rotate_token),
             ("POST", "/api/profiles/<name>/allowlist", self.edit_allowlist),
             ("POST", "/api/profiles/<name>/lan", self.edit_lan),
@@ -1027,7 +1033,8 @@ class AdminApi:
         ``extensions`` every extension its VS Code container gets and why
         (those of the languages that are off too, marked so), and its
         ``extensionStatus`` how far the running VS Code container has got
-        with installing them.
+        with installing them, and its ``packages`` its own Ubuntu packages,
+        which the VS Code container installs as it starts.
         """
         self.require("full")
         profile = self.get_profile(name)
@@ -1041,6 +1048,7 @@ class AdminApi:
                 "languages": [langs.describe(lang, lang.key in enabled) for lang in langs.CATALOGUE],
                 "extensions": langs.extension_sources(enabled, spec["extensions"]),
                 "extensionStatus": self.extension_status(profile),
+                "packages": spec["packages"],
                 "spec": {**(profile.get("spec") or {}), "effective": spec},
                 "status": profile.get("status") or {},
                 "allowlist": entries,
@@ -1228,6 +1236,84 @@ class AdminApi:
 
             # None removes the field: a profile with no extensions of its own.
             patch = {"spec": {"extensions": updated or None}}
+
+            try:
+                self.k8s.merge_patch(self.profile_path(name), self.versioned(profile, patch))
+                return self.respond({"changed": True, "message": message})
+            except ApiError as error:
+                if error.status != 409 or attempt == PATCH_RETRIES - 1:
+                    raise
+
+        raise HttpError(409, "the profile changed meanwhile; try again")  # pragma: no cover
+
+    @staticmethod
+    def package_names(value: object) -> list[str]:
+        """
+        The Ubuntu package names a request gives, checked with Debian's
+        rule, in their order and without repeats; 400 for anything else.
+        """
+        if not isinstance(value, list) or not value or not all(isinstance(item, str) for item in value):
+            raise HttpError(400, "names: a list of Ubuntu package names")
+
+        try:
+            return list(dict.fromkeys(packages.check(item) for item in value))
+        except packages.PackageError as error:
+            raise HttpError(400, str(error)) from error
+
+    @staticmethod
+    def package_edit(op: str, names: list[str], current: list[str]) -> tuple[Optional[list[str]], str]:
+        """
+        A profile's own Ubuntu packages after one edit of *names*, and what
+        to say about it; ``None`` instead of the list when nothing changes.
+        Removing one the profile doesn't have is refused, and nothing changes.
+        """
+        words = "package" if len(names) == 1 else "packages"
+        restart = "the VS Code container restarts, and installs what it has as it starts"
+
+        if op == "add":
+            new = [name for name in names if name not in current]
+            if not new:
+                return None, f"already added: {packages.join(names)}"
+            if len(current) + len(new) > MAX_PACKAGES:
+                raise HttpError(400, f"a profile has at most {MAX_PACKAGES} packages of its own; remove some first")
+
+            return [*current, *new], f"added {words} {packages.join(new)}; {restart}"
+
+        missing = [name for name in names if name not in current]
+        if missing:
+            raise HttpError(400, f"not one of this profile's packages: {packages.join(missing)}")
+
+        return [name for name in current if name not in names], f"removed {words} {packages.join(names)}; {restart}"
+
+    def edit_packages(self, name: str):
+        """
+        Add Ubuntu packages of a profile's own, or remove them.
+
+        The list is the profile's ``spec.packages``. The image is shared on
+        Kubernetes, so the operator hands the list to the VS Code container,
+        which installs the packages as it starts: a change restarts its
+        pod. Read, edit, and write conditionally on the version read; when
+        another edit landed in between, read again and edit on top of it.
+        """
+        self.require("full")
+        data = self.body()
+
+        op = data.get("op")
+        if op not in PACKAGE_OPS:
+            raise HttpError(400, "op must be add or remove")
+
+        names = self.package_names(data.get("names"))
+
+        for attempt in range(PATCH_RETRIES):
+            profile = self.get_profile(name)
+            current = manifests.effective_spec(profile, self.defaults)["packages"]
+
+            updated, message = self.package_edit(op, names, current)
+            if updated is None:
+                return self.respond({"changed": False, "message": message})
+
+            # None removes the field: a profile with no packages of its own.
+            patch = {"spec": {"packages": updated or None}}
 
             try:
                 self.k8s.merge_patch(self.profile_path(name), self.versioned(profile, patch))

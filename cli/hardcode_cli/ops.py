@@ -9,6 +9,7 @@ command line prints, or emits as JSON for the app.
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import subprocess
 import sys
@@ -17,7 +18,7 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Callable, Optional
 
-from . import allowlist, blocked, bounded, envfile, lan, langs, override, profiles, stack
+from . import allowlist, blocked, bounded, dockerfile, envfile, lan, langs, override, packages, profiles, stack
 from .compose import Compose, ComposeError, Runner
 
 # Where the VS Code container's extension sync says how far it has got,
@@ -27,6 +28,17 @@ EXTENSION_STATUS = ".vscode-server/.hardcode-extensions-status.json"
 # The VS Code image's label naming the languages and tools it was built
 # with (images/vscode/Dockerfile sets it), in the project's namespace.
 IMAGE_LANGUAGES_LABEL = "io.github.hardcode-app.languages"
+
+# ... the one naming the profile's own Ubuntu packages (the Dockerfile's
+# too), and the one with the hash of the profile's own Dockerfile steps
+# (compose.image.yaml's, on the image built from them).
+IMAGE_PACKAGES_LABEL = "io.github.hardcode-app.packages"
+IMAGE_DOCKERFILE_LABEL = "io.github.hardcode-app.dockerfile"
+
+# The image a profile's own Dockerfile steps are built on, HardCode's
+# (compose.image.yaml builds it under this name), and HardCode's Dockerfile.
+BASE_IMAGE = "hardcode-vscode-base"
+BASE_DOCKERFILE = "images/vscode/Dockerfile"
 
 # How much of the extension status is read. Anything in the VS Code
 # container can write that file; the sync's own is a few kilobytes.
@@ -97,10 +109,18 @@ class Image:
     ``[]`` when there is no image, and ``None`` when nobody can tell (no
     answer from Docker, or an image without the label). An image built with
     none at all is built, with ``[]``.
+    ``packages``: the profile's own Ubuntu packages it was built with, from
+    its label; ``[]`` when there is none (no image, or one built without),
+    and ``None`` when Docker can't say.
+    ``dockerfile``: the hash of the profile's own Dockerfile steps it was
+    built with, from its label; ``""`` when there are none (no image, or one
+    built without), and ``None`` when Docker can't say.
     """
 
     built: Optional[bool]
     languages: Optional[list[str]]
+    packages: Optional[list[str]]
+    dockerfile: Optional[str]
 
 
 def _print_warning(message: str) -> None:
@@ -667,8 +687,11 @@ class Ops:
 
     def mount(self, local: str, remote: str, read_only: bool = False) -> Result:
         """
-        Mount a folder of this machine into the VS Code container and the Docker daemon.
+        Mount a folder of this machine into the VS Code container and the
+        Docker daemon; never one that holds HardCode's home, or is in it.
         """
+        self._refuse_the_home(local)
+
         added: list[override.Mount] = []
         applied = self._change_override(
             lambda path: added.append(override.add_mount(path, local, remote, read_only, self._dev_user())),
@@ -683,6 +706,29 @@ class Ops:
             f"mounted {mounted.local} at {mounted.remote}{note}",
             applied=applied,
         )
+
+    def _refuse_the_home(self, local: str) -> None:
+        """
+        Refuse to mount *local* when it is HardCode's home, holds it, or is
+        in it.
+
+        The home has every profile's files. Mounted, they would be the
+        sandbox's to change, and some of them run on this computer: a
+        profile's own Dockerfile steps (image/Dockerfile) at its next
+        rebuild, its compose.override.yaml at its next start.
+        """
+        if not local.strip():
+            return
+
+        folder = Path(os.path.expanduser(local.strip())).resolve()
+        home_dir = self.root.resolve()
+
+        if folder == home_dir or folder.is_relative_to(home_dir) or home_dir.is_relative_to(folder):
+            raise override.OverrideError(
+                f"'{local}' holds HardCode's home ({home_dir}) or is in it: mounted, the sandbox could change "
+                "the profiles' files, whose Dockerfile steps run on this computer at the next rebuild. "
+                "Mount a folder outside it"
+            )
 
     def unmount(self, remote: str) -> Result:
         """
@@ -889,6 +935,100 @@ class Ops:
 
         return Result(self.profile.name, f"removed extension {extension_id}", applied=self.compose.running())
 
+    # -- the profile's own Ubuntu packages ----------------------------------------
+
+    def own_packages(self) -> list[str]:
+        """
+        The profile's own Ubuntu packages, from ``VSCODE_PACKAGES``.
+        """
+        return packages.parse(envfile.read(self.profile.env_file).get(packages.ENV_KEY, ""))
+
+    def _write_packages(self, wanted: list[str]) -> None:
+        """
+        Record the profile's own Ubuntu packages in its ``.env``; none is
+        unset, compose.yaml's default.
+        """
+        if wanted:
+            envfile.set_value(self.profile.env_file, packages.ENV_KEY, packages.join(wanted))
+        else:
+            envfile.unset(self.profile.env_file, packages.ENV_KEY)
+
+    def add_packages(self, names: list[str]) -> Result:
+        """
+        Add Ubuntu packages of the profile's own. The image installs them,
+        so they arrive with its next rebuild (``hardcode rebuild``), which is
+        due until then; a name the archive doesn't have fails that build.
+        """
+        named = list(dict.fromkeys(packages.check(name) for name in names))
+        current = self.own_packages()
+
+        new = [name for name in named if name not in current]
+        if not new:
+            return Result(self.profile.name, f"already added: {' '.join(named)}", changed=False)
+
+        self._write_packages([*current, *new])
+
+        words = "package" if len(new) == 1 else "packages"
+        message = f"added {words} {' '.join(new)} (installed at the image's next rebuild: hardcode rebuild)"
+        return Result(self.profile.name, message)
+
+    def remove_packages(self, names: list[str]) -> Result:
+        """
+        Remove Ubuntu packages of the profile's own; the image loses them at
+        its next rebuild.
+        """
+        named = list(dict.fromkeys(packages.check(name) for name in names))
+        current = self.own_packages()
+
+        missing = [name for name in named if name not in current]
+        if missing:
+            raise packages.PackageError(f"not one of this profile's packages: {' '.join(missing)}")
+
+        self._write_packages([name for name in current if name not in named])
+
+        words = "package" if len(named) == 1 else "packages"
+        message = f"removed {words} {' '.join(named)} (gone from the image at its next rebuild: hardcode rebuild)"
+        return Result(self.profile.name, message)
+
+    # -- the profile's own Dockerfile steps -----------------------------------------
+
+    def image_steps(self) -> dict:
+        """
+        The profile's own Dockerfile steps, for ``hardcode image`` and the
+        app's Image page: where the file is and whether it exists, its text,
+        the starter to begin one from, HardCode's Dockerfile they are built
+        on, and whether a rebuild is due (for them, or anything else the
+        image is built with).
+        """
+        image = self.image()
+        reasons = self._rebuild_reasons(image)
+        base = stack.current() / BASE_DOCKERFILE
+
+        return {
+            "profile": self.profile.name,
+            "path": str(self.profile.dockerfile),
+            "folder": str(self.profile.image_dir),
+            "exists": self.profile.dockerfile.is_file(),
+            "dockerfile": dockerfile.read(self.profile.image_dir),
+            "starter": dockerfile.STARTER,
+            "digest": dockerfile.digest(self.profile.image_dir),
+            "base": base.read_text(encoding="utf-8"),
+            "basePath": str(base),
+            "image": asdict(image),
+            "rebuildNeeded": None if reasons is None else bool(reasons),
+            "rebuildReasons": reasons,
+        }
+
+    def save_image_steps(self, text: str) -> Result:
+        """
+        Write the profile's own Dockerfile steps: the next rebuild builds
+        them on HardCode's image, on this computer's Docker.
+        """
+        path = dockerfile.save(self.profile.image_dir, text)
+
+        message = f"saved {path} (built at the image's next rebuild: hardcode rebuild)"
+        return Result(self.profile.name, message, data={"path": str(path)})
+
     # -- VS Code's token ---------------------------------------------------------
 
     def rotate_token(self) -> Result:
@@ -931,29 +1071,60 @@ class Ops:
     def image(self) -> Image:
         """
         Whether the profile's VS Code image exists, and the languages and
-        tools it was built with; see ``Image``.
+        tools, packages and Dockerfile steps it was built with; see ``Image``.
         """
         image = f"hardcode-vscode:{self.profile.vscode_tag}"
 
         try:
             result = self.compose.run_docker("image", "inspect", "--format", "{{json .Config.Labels}}", image)
         except (ComposeError, subprocess.TimeoutExpired):
-            return Image(built=None, languages=None)
+            return Image(built=None, languages=None, packages=None, dockerfile=None)
 
         if result.returncode != 0:
-            return Image(built=False, languages=[])
+            return Image(built=False, languages=[], packages=[], dockerfile="")
 
         try:
             labels = json.loads(result.stdout or "null") or {}
         except json.JSONDecodeError:
-            return Image(built=True, languages=None)
+            labels = {}
+
+        # Without its label, an image says nothing of its languages; without
+        # the others, it was built without packages or steps of the profile's.
+        built_with = packages.parse(labels.get(IMAGE_PACKAGES_LABEL) or "")
+        steps = labels.get(IMAGE_DOCKERFILE_LABEL) or ""
 
         label = labels.get(IMAGE_LANGUAGES_LABEL)
         if not label:
-            return Image(built=True, languages=None)
+            return Image(built=True, languages=None, packages=built_with, dockerfile=steps)
 
         pairs = dict(word.split("=", 1) for word in label.split() if "=" in word)
-        return Image(built=True, languages=[key for key in langs.LANGS if pairs.get(key) == "true"])
+        languages = [key for key in langs.LANGS if pairs.get(key) == "true"]
+        return Image(built=True, languages=languages, packages=built_with, dockerfile=steps)
+
+    def _rebuild_reasons(self, image: Image) -> Optional[list[str]]:
+        """
+        What the profile says that its image wasn't built with:
+        ``languages``, ``packages`` (its own Ubuntu packages) and
+        ``dockerfile`` (its own Dockerfile steps), those that differ. ``[]``
+        when nothing does, or there is no image yet (the first start builds
+        it); ``None`` when nobody can tell.
+        """
+        if image.built is None or (image.built and image.languages is None):
+            return None
+        if not image.built:
+            return []
+
+        env = envfile.read(self.profile.env_file)
+        reasons = []
+
+        if image.languages != langs.enabled_keys(env):
+            reasons.append("languages")
+        if not packages.same(image.packages or [], self.own_packages()):
+            reasons.append("packages")
+        if image.dockerfile != dockerfile.digest(self.profile.image_dir):
+            reasons.append("dockerfile")
+
+        return reasons
 
     def rebuild(self) -> Result:
         """
@@ -994,12 +1165,9 @@ class Ops:
             lang["inImage"] = None if image.languages is None else lang["key"] in image.languages
 
         # A rebuild is due when an image exists and was built with other
-        # languages; with no image yet, the first start builds it.
-        rebuild_needed: Optional[bool] = False
-        if image.built is None or (image.built and image.languages is None):
-            rebuild_needed = None
-        elif image.built:
-            rebuild_needed = image.languages != enabled
+        # languages, packages or Dockerfile steps; with no image yet, the
+        # first start builds it.
+        reasons = self._rebuild_reasons(image)
 
         return {
             "profile": self.profile.name,
@@ -1011,8 +1179,11 @@ class Ops:
             "mounts": [asdict(mount) for mount in override.get_mounts(document)],
             "langs": languages,
             "extensions": langs.extension_sources(enabled, self._extras()),
-            "image": {"built": image.built, "languages": image.languages},
-            "rebuildNeeded": rebuild_needed,
+            "packages": self.own_packages(),
+            "dockerfile": {"path": str(self.profile.dockerfile), "exists": self.profile.dockerfile.is_file()},
+            "image": asdict(image),
+            "rebuildNeeded": None if reasons is None else bool(reasons),
+            "rebuildReasons": reasons,
             "docker": self.compose.docker_enabled(),
         }
 
@@ -1075,7 +1246,7 @@ class Ops:
 
     def destroy(self) -> Result:
         """
-        Remove the profile's containers, volumes and image, then its directory.
+        Remove the profile's containers, volumes and images, then its directory.
 
         The directory goes only once the containers and volumes are gone: a
         teardown that fails leaves the files needed to look and try again.
@@ -1092,12 +1263,17 @@ class Ops:
             message = f"docker compose down failed, so profiles/{name} is kept"
             raise ComposeError(f"{message}: {detail}" if detail else message)
 
-        image = self.compose.run_docker("image", "rm", f"hardcode-vscode:{self.profile.vscode_tag}")
+        # Its image, then HardCode's that its own Dockerfile steps were built
+        # on, when they ever were.
+        images = [f"hardcode-vscode:{self.profile.vscode_tag}", f"{BASE_IMAGE}:{self.profile.vscode_tag}"]
+        removals = [(image, self.compose.run_docker("image", "rm", image)) for image in images]
         profiles.remove(self.root, name)
 
-        note = ""
-        if image.returncode != 0 and "No such image" not in (image.stderr or ""):
-            detail = (image.stderr or image.stdout or "").strip()
-            note = f" (image hardcode-vscode:{self.profile.vscode_tag} not removed: {detail})"
+        notes = []
+        for image, removal in removals:
+            if removal.returncode != 0 and "No such image" not in (removal.stderr or ""):
+                detail = (removal.stderr or removal.stdout or "").strip()
+                notes.append(f"image {image} not removed: {detail}")
 
+        note = f" ({'; '.join(notes)})" if notes else ""
         return Result(name, f"profile '{name}' removed{note}")

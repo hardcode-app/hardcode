@@ -19,7 +19,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Optional
 
-from . import bounded, envfile, stack
+from . import bounded, dockerfile, envfile, stack
 from .profiles import Profile
 
 Runner = Callable[..., subprocess.CompletedProcess]
@@ -175,6 +175,10 @@ class Compose:
         absolute, with forward slashes, which Compose accepts on every
         platform; the stack is the project directory, where compose.yaml's
         build contexts are.
+
+        A profile with Dockerfile steps of its own gets the stack's
+        compose.image.yaml after compose.yaml, which builds them on
+        HardCode's image; its override still comes last.
         """
         stack_dir = stack.current()
 
@@ -190,6 +194,8 @@ class Compose:
             "-f",
             (stack_dir / "compose.yaml").as_posix(),
         ]
+        if self.profile.dockerfile.is_file():
+            command += ["-f", (stack_dir / stack.IMAGE_STEPS).as_posix()]
         if self.profile.override_file.exists():
             command += ["-f", self.profile.override_file.as_posix()]
 
@@ -208,9 +214,11 @@ class Compose:
     def environment(self) -> dict[str, str]:
         """
         The environment Compose runs with: compose.yaml reads the project's
-        name, the profile's folder and the images' tags from it.
+        name, the profile's folder and the images' tags from it, and
+        compose.image.yaml the hash of the profile's own Dockerfile steps,
+        when it has any.
         """
-        return {
+        environment = {
             **os.environ,
             "HARDCODE_PROJECT": self.profile.project_name,
             "HARDCODE_PROFILE_DIR": self.profile.dir.as_posix(),
@@ -222,6 +230,11 @@ class Compose:
             # so it only exists in the project while it is switched on.
             "COMPOSE_PROFILES": "docker" if self.docker_enabled() else "",
         }
+
+        if self.profile.dockerfile.is_file():
+            environment["HARDCODE_DOCKERFILE_DIGEST"] = dockerfile.digest(self.profile.image_dir)
+
+        return environment
 
     def run(
         self,

@@ -63,6 +63,7 @@ def render() -> harness.Output:
         "profiles[1].suspended=true",
         f"profiles[1].languages={{{','.join(TEAM_A_LANGUAGES)}}}",
         "profiles[1].extensions={eamodio.gitlens}",
+        "profiles[1].packages={jq,postgresql-client}",
     ]
     allowlist = ROOT / "template" / "allowlist.txt"
 
@@ -139,7 +140,8 @@ def check_rendered_objects(suite: Suite, documents: list[dict]) -> None:
         "a profile carries its other settings",
         team_a.get("suspended") is True
         and team_a.get("vscodeHost") == "a.example.com"
-        and team_a.get("extensions") == ["eamodio.gitlens"],
+        and team_a.get("extensions") == ["eamodio.gitlens"]
+        and team_a.get("packages") == ["jq", "postgresql-client"],
         json.dumps(team_a, indent=2),
     )
     check_profile_allowlists(suite, team_a)

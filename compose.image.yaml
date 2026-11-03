@@ -1,0 +1,41 @@
+# A profile's own Dockerfile steps, built on HardCode's VS Code image.
+#
+# `hardcode` merges this file over compose.yaml, before the profile's
+# compose.override.yaml, when the profile has image/Dockerfile:
+#   docker compose ... -f compose.yaml -f compose.image.yaml -f <profile>/compose.override.yaml
+# Without that file it isn't used, and nothing here changes anything.
+#
+# The profile's Dockerfile starts FROM hardcode. Compose builds HardCode's
+# image first, as the vscode-base service below, and hands it to the
+# profile's build under that name (an additional context naming another
+# service: Compose orders the two builds itself, so `hardcode rebuild`,
+# `hardcode build`, and `up` with no image yet all build both). The folder
+# image/ is the build context, with the files the Dockerfile copies.
+#
+# These steps run on this computer's Docker, with its network: not in the
+# sandbox, and not through the allowlist. Nothing mounts the profile's
+# folder into a container (cli/tests check), so nothing in the sandbox can
+# write the steps a rebuild runs.
+
+services:
+  # HardCode's VS Code image, built as compose.yaml's vscode service builds
+  # it (the same build arguments), under a name of its own. A build only,
+  # never a container: no replicas.
+  vscode-base:
+    extends:
+      file: compose.yaml
+      service: vscode
+    image: hardcode-vscode-base:${HARDCODE_VSCODE_TAG:?run docker compose through hardcode}
+    scale: 0
+
+  # The profile's image: its own steps on top of HardCode's. The labels it
+  # inherits say which languages, tools and packages are in it; this one
+  # says which steps (a hash of image/, which hardcode works out), so that
+  # a changed file means a rebuild is due.
+  vscode:
+    build:
+      context: ${HARDCODE_PROFILE_DIR:?run docker compose through hardcode}/image
+      additional_contexts:
+        hardcode: service:vscode-base
+      labels:
+        io.github.hardcode-app.dockerfile: ${HARDCODE_DOCKERFILE_DIGEST:?run docker compose through hardcode}

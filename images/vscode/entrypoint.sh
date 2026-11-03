@@ -136,6 +136,27 @@ if [ -n "${HTTPS_PROXY:-${HTTP_PROXY:-}}" ]; then
 fi
 
 # ---------------------------------------------------------------------------
+# The profile's own Ubuntu packages, on Kubernetes. The image is shared
+# there, not built per profile, so the operator hands the list over
+# (HARDCODE_PACKAGES, space-separated) and they are installed at every
+# start, through the proxy apt was just given (the Ubuntu archive is in
+# every profile's allowlist): it costs start-up time. On Compose the
+# profile's image has them, and the variable isn't set. A failure is
+# logged, and VS Code starts without them.
+# ---------------------------------------------------------------------------
+
+read -ra wanted_packages <<<"${HARDCODE_PACKAGES:-}"
+if [ "${#wanted_packages[@]}" -gt 0 ]; then
+  log "installing the profile's Ubuntu packages: ${wanted_packages[*]}"
+
+  if hardcode-install-packages "${wanted_packages[@]}"; then
+    log "installed the profile's Ubuntu packages"
+  else
+    log "WARNING: couldn't install the profile's Ubuntu packages (see above); VS Code starts without them"
+  fi
+fi
+
+# ---------------------------------------------------------------------------
 # Codex CLI: a first configuration, only written when there is none.
 #
 # - Its own sandbox is bubblewrap, which needs user namespaces; this

@@ -24,6 +24,11 @@ The VS Code image's start-up scripts, run for real without the 12 GB image.
   fake_marketplace_curl.py).
 - The build image's runner, images/build/run.sh: the caps it starts the
   container with, against a fake ``docker`` (tests/fixtures/fake_docker.py).
+- The profile's own Ubuntu packages, which the entrypoint installs on
+  Kubernetes (hardcode-install-packages): names checked before apt runs,
+  apt as root, and apt's own message for a package the archive doesn't
+  have. Against a fake sudo and apt-get (tests/fixtures/fake_sudo.py and
+  fake_apt.py).
 
 Every container is memory-capped.
 """
@@ -47,6 +52,7 @@ SSH_PROXY_CONFIG = VSCODE / "ssh-proxy-config.sh"
 SSH_KEY = VSCODE / "ssh-key.sh"
 GITHUB = VSCODE / "github.sh"
 GH_WRAPPER = VSCODE / "gh.sh"
+INSTALL_PACKAGES = VSCODE / "install-packages.sh"
 FIXTURES = ROOT / "tests" / "fixtures"
 
 # The fake Marketplace: what each extension needs. One pulls in a
@@ -710,6 +716,70 @@ def check_build_runner_cpus(suite: Suite, scratch: Path) -> None:
         suite.check(f"run.sh's CPU cap, {name}", got == expected, f"wanted {expected}, got {got}")
 
 
+def check_package_install(suite: Suite, scratch: Path) -> None:
+    """
+    hardcode-install-packages, which the entrypoint runs on Kubernetes for
+    the profile's own Ubuntu packages, against a fake sudo and apt-get:
+    every name is checked before apt runs, then the archive's lists are
+    read and the packages installed, as root and without recommends; a
+    package the archive doesn't have fails with apt's own message.
+    """
+    bin_dir = scratch / "apt-bin"
+    bin_dir.mkdir()
+    for name, source in (
+        ("hardcode-install-packages", INSTALL_PACKAGES),
+        ("sudo", FIXTURES / "fake_sudo.py"),
+        ("apt-get", FIXTURES / "fake_apt.py"),
+    ):
+        shutil.copyfile(source, bin_dir / name)
+        (bin_dir / name).chmod(0o755)
+
+    log = scratch / "apt-calls.jsonl"
+    environment = {
+        **os.environ,
+        "PATH": f"{bin_dir}:{os.environ['PATH']}",
+        "FAKE_APT_LOG": str(log),
+        "FAKE_APT_MISSING": "no-such-package",
+    }
+
+    def install(*names: str) -> harness.Output:
+        log.write_text("", encoding="utf-8")
+        return harness.run(["hardcode-install-packages", *names], env=environment)
+
+    def calls() -> list[dict]:
+        return [json.loads(line) for line in log.read_text(encoding="utf-8").splitlines() if line]
+
+    done = install("jq", "postgresql-client")
+    wanted = [["update", "-q"], ["install", "-y", "-q", "--no-install-recommends", "jq", "postgresql-client"]]
+    suite.check(
+        "the packages are installed after the archive's lists are read",
+        done.ok and [call["args"] for call in calls()] == wanted,
+        f"exit {done.code}\n{done.text}\n{calls()}",
+    )
+    suite.check(
+        "...as root, with nobody asked anything",
+        all(call["sudo"] and call["frontend"] == "noninteractive" for call in calls()),
+        str(calls()),
+    )
+
+    refused = install("jq", "jq;rm -rf ~")
+    suite.check(
+        "a name that isn't a package's is refused before apt runs",
+        not refused.ok and "not an Ubuntu package name: jq;rm -rf ~" in refused.text and calls() == [],
+        f"exit {refused.code}\n{refused.text}\n{calls()}",
+    )
+
+    missing = install("jq", "no-such-package")
+    suite.check(
+        "a package the archive doesn't have fails, with apt's own message",
+        not missing.ok and "E: Unable to locate package no-such-package" in missing.text,
+        f"exit {missing.code}\n{missing.text}",
+    )
+
+    usage = install()
+    suite.check("usage is checked", not usage.ok and "usage:" in usage.text, usage.text)
+
+
 def run_checks(suite: Suite) -> None:
     with harness.scratch_directory("hc-images-") as scratch, Docker() as docker:
         suite.section("ssh proxy configuration")
@@ -732,6 +802,9 @@ def run_checks(suite: Suite) -> None:
 
         suite.section("the build image's runner")
         check_build_runner_cpus(suite, scratch)
+
+        suite.section("the profile's own Ubuntu packages, installed at start on Kubernetes")
+        check_package_install(suite, scratch)
 
 
 if __name__ == "__main__":

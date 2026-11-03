@@ -124,6 +124,10 @@ A switch changes three things, at different times, as the banner says:
 Before the first start there is no image yet: it is built with the chosen
 languages and tools at the first **▶ Start**.
 
+**Ubuntu packages**, below the tools, adds packages of your own to the
+image: type a name and click **Add**; **✕** removes one. The next
+rebuild installs them, and **Rebuild image** appears until then.
+
 ## Extensions
 
 ![Extensions](images/app-extensions.png)
@@ -234,6 +238,21 @@ both containers (VS Code reloads).
 A writable mount is a way out of the sandbox: anything inside, Claude
 included, can change files that your computer later runs. Read
 [Share folders carefully](staying-safe.md#share-folders-carefully) first.
+
+## Image
+
+![Image](images/app-image.png)
+
+Your own Dockerfile steps, built on top of HardCode's image, for what a
+package can't do. A new profile has none: the editor starts with an
+example to begin from. **Save** keeps your steps, and **Save & rebuild**
+also builds the image, in the Console. Below the editor is HardCode's own
+Dockerfile, which your steps build on.
+
+The steps run on your computer's Docker, with your computer's internet
+connection, not through the sandbox's allowlist: only add steps you
+trust. [Your own packages and steps](vscode-image.md#your-own-packages-and-steps)
+has an example.
 
 ## Changing every profile at once
 

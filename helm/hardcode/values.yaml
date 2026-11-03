@@ -136,11 +136,14 @@ profileDefaults:
 # operator adds the entries HardCode provides to the profile's languages.
 # languages: empty means profileDefaults.languages.
 # extensions: VS Code extensions of the profile's own (publisher.name).
+# packages: Ubuntu packages of the profile's own, which the VS Code container
+# installs as it starts (the image is shared here): each start takes longer.
 profiles: []
 #  - name: default
 #    allowlist: ""
 #    languages: [python, node, build_essentials, docker, claude_cli]
 #    extensions: []
+#    packages: []
 #    image: ""
 #    vscodeHost: ""
 #    suspended: false

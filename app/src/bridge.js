@@ -116,8 +116,10 @@
   /**
    * The profile's state, as the page wants it. `langs` is the catalogue with
    * the profile's choice and what its image has; `extensions` every VS Code
-   * extension and where it comes from; `image` and `rebuildNeeded` whether
-   * the image was built with the profile's languages.
+   * extension and where it comes from; `packages` its own Ubuntu packages
+   * and `dockerfile` its own Dockerfile steps ({path, exists}); `image`,
+   * `rebuildNeeded` and `rebuildReasons` whether the image was built with
+   * the profile's languages, packages and steps, and what differs.
    */
   async function refresh() {
     state = await cli(['show']);
@@ -134,8 +136,11 @@
       mounts: state.mounts,
       langs: state.langs,
       extensions: state.extensions,
+      packages: state.packages,
+      dockerfile: state.dockerfile,
       image: state.image,
       rebuildNeeded: state.rebuildNeeded,
+      rebuildReasons: state.rebuildReasons,
       docker: state.docker,
       busy: null,
     };
@@ -356,6 +361,28 @@
 
     async 'extensions:remove'(id, scope) {
       return withResults(await cli(['extension', 'remove', '--', id], scoped(scope)));
+    },
+
+    // The profile's own Ubuntu packages. The image installs them, so they
+    // arrive with its next rebuild (langs:apply), which is due until then.
+    async 'packages:add'(names, scope) {
+      return withResults(await cli(['package', 'add', '--', ...names], scoped(scope)));
+    },
+
+    async 'packages:remove'(name, scope) {
+      return withResults(await cli(['package', 'remove', '--', name], scoped(scope)));
+    },
+
+    // The profile's own Dockerfile steps: {path, folder, exists, dockerfile,
+    // starter, digest, base (HardCode's Dockerfile), basePath, image,
+    // rebuildNeeded, rebuildReasons}.
+    async 'image:get'() {
+      return cli(['image']);
+    },
+
+    // Write the profile's own Dockerfile steps; the next rebuild (langs:apply) builds them.
+    async 'image:save'(text) {
+      return withResults(await cli(['image', 'save', '--', text]));
     },
 
     // How far the running VS Code container has got with the profile's

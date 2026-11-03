@@ -6,7 +6,8 @@ Each profile is a separate environment with its own ``.env`` (only what
 differs from compose.yaml's defaults), ``allowlist.txt`` and
 ``compose.override.yaml``, and its own containers, volumes, port and image.
 Two more files are written from those for the containers: the allowlist the
-proxy is given, and the VS Code extension list. A new profile starts from
+proxy is given, and the VS Code extension list. Its own Dockerfile steps, if
+it has any, are in ``image/`` (see ``dockerfile``). A new profile starts from
 the stack's template (see ``stack``), or as a copy of another.
 """
 
@@ -23,7 +24,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Iterable, Iterator, Optional
 
-from . import allowlist, envfile, langs, override, stack, yamlio
+from . import allowlist, dockerfile, envfile, langs, override, stack, yamlio
 
 # A DNS label of up to 32 characters, because the name ends up in container
 # and resource names. The admin and the CRD also want a leading letter
@@ -101,6 +102,23 @@ class Profile:
         written from the profile's languages and its own extensions.
         """
         return self.dir / "vscode-extensions.txt"
+
+    @property
+    def image_dir(self) -> Path:
+        """
+        The folder of the profile's own Dockerfile steps, and the context
+        they are built in: the Dockerfile, with the files it copies beside
+        it. Never mounted into a container: a rebuild runs what is in it.
+        """
+        return self.dir / dockerfile.FOLDER
+
+    @property
+    def dockerfile(self) -> Path:
+        """
+        The profile's own Dockerfile steps, built on HardCode's image; the
+        profile has none while it doesn't exist.
+        """
+        return self.image_dir / dockerfile.FILE
 
     @property
     def project_name(self) -> str:
@@ -310,6 +328,9 @@ def create(
     profile asks for. A copy keeps its source's unless *languages* are
     given, and its source's own allowlist entries and the provided ones it
     switches off.
+
+    A copy also gets its source's ``image/`` folder, its own Dockerfile
+    steps, when it has one; a profile from the template has none.
     """
     if not valid_name(name):
         raise ProfileError(f"'{name}' is not a valid profile name ({NAME_RULE})")
@@ -345,6 +366,12 @@ def create(
 
     # .env can hold a fixed VS Code token.
     (target / ".env").chmod(0o600)
+
+    # Its own Dockerfile steps: a copy gets its source's. A profile without
+    # any builds HardCode's image alone; the app and `hardcode image` offer
+    # the starter until the first steps are saved.
+    if origin is not None and (origin / dockerfile.FOLDER).is_dir():
+        shutil.copytree(origin / dockerfile.FOLDER, target / dockerfile.FOLDER)
 
     if origin is not None:
         _drop_forwards(target / "compose.override.yaml")

@@ -19,6 +19,9 @@ spec:
   {{- with .extensions }}
   extensions: {{ toYaml . | nindent 4 }}
   {{- end }}
+  {{- with .packages }}
+  packages: {{ toYaml . | nindent 4 }}
+  {{- end }}
   {{- with .image }}
   image: {{ . | quote }}
   {{- end }}

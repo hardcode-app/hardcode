@@ -29,7 +29,9 @@
 #     --env-file <profile>/.env -f compose.yaml -f <profile>/compose.override.yaml <args>
 # (COMPOSE_PROFILES is empty when the profile's .env says ENABLE_DOCKER=false;
 # outside the default home, the project and the VS Code image's tag carry a
-# short id of the home, so two homes' profiles of one name stay apart.)
+# short id of the home, so two homes' profiles of one name stay apart. A
+# profile with Dockerfile steps of its own, image/Dockerfile, gets
+# -f compose.image.yaml after compose.yaml, and HARDCODE_DOCKERFILE_DIGEST.)
 
 name: ${HARDCODE_PROJECT:?run docker compose through hardcode (hardcode compose <args>), which names the profile}
 
@@ -238,12 +240,15 @@ services:
     pids_limit: ${DOCKER_PIDS:-2048}
     restart: unless-stopped
 
-  # One image per profile, so profiles can carry different toolchains.
+  # One image per profile, so profiles can carry different toolchains (and
+  # packages, and Dockerfile steps of their own: compose.image.yaml).
   vscode:
     build:
       context: ./images/vscode
       args:
         <<: *languages
+        # The profile's own Ubuntu packages, space-separated (hardcode package add).
+        VSCODE_PACKAGES: ${VSCODE_PACKAGES:-}
         USERNAME: ${DEV_USER:-dev}
         USER_UID: ${DEV_UID:-1000}
         USER_GID: ${DEV_GID:-1000}

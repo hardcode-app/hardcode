@@ -315,7 +315,7 @@ class CliTests(CliTestCase):
         self.assertIn("isn't forwarded", err)
 
     def test_mount_and_unmount(self):
-        source = self.root / "src"
+        source = self.root.parent / "src"  # beside the home: never one in it
         source.mkdir()
 
         code, out, _ = self.run_cli("mount", str(source), "work", "--ro")

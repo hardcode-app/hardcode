@@ -8,7 +8,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from hardcode_cli import bounded, compose, envfile, profiles, stack
+from hardcode_cli import bounded, compose, dockerfile, envfile, profiles, stack
 from hardcode_cli.compose import Compose, ComposeError, Service
 from hardcode_cli.ops import STATUS_BYTES, Ops
 
@@ -83,6 +83,8 @@ class ComposeTests(HomeTestCase):
         project = self.make()
         folder = (self.root / "profiles" / "default").as_posix()
 
+        # A new profile has no Dockerfile steps of its own: compose.yaml,
+        # then the profile's override.
         self.assertEqual(
             project.argv("up", "-d"),
             [
@@ -100,6 +102,20 @@ class ComposeTests(HomeTestCase):
                 f"{folder}/compose.override.yaml",
                 "up",
                 "-d",
+            ],
+        )
+        self.assertNotIn("HARDCODE_DOCKERFILE_DIGEST", project.environment())
+
+        # With steps of its own, the stack's file that builds them comes after
+        # compose.yaml, before the profile's override.
+        dockerfile.save(project.profile.image_dir, "FROM hardcode\n")
+        files = [part for part in project.argv("ps") if part.endswith(".yaml")]
+        self.assertEqual(
+            files,
+            [
+                f"{self.stack.as_posix()}/compose.yaml",
+                f"{self.stack.as_posix()}/compose.image.yaml",
+                f"{folder}/compose.override.yaml",
             ],
         )
 

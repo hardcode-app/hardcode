@@ -292,9 +292,113 @@ def check_forwards(suite: Suite, home: Home) -> None:
     suite.expect_failure("unforward of an unknown port fails", hc("unforward", "4444"), r"isn't forwarded")
 
 
+def check_image_steps(suite: Suite, home: Home) -> None:
+    """
+    A profile's own Dockerfile steps, as the real ``docker compose config``
+    resolves them: HardCode's image built under a name of its own, the
+    profile's built on it from its folder, and that folder never mounted
+    into a container. Without the file, none of it.
+    """
+    hc = home.hardcode
+    profile_dir = home.root / "profiles" / "default"
+    folder = profile_dir / "image"
+
+    suite.section("the profile's own Dockerfile steps")
+    suite.check("a new profile has none", not folder.exists())
+    suite.expect(
+        "...and builds HardCode's image alone",
+        hc("compose", "config", "--services"),
+        r"^vscode$",
+    )
+    suite.check("...with no base to build", "vscode-base" not in hc("compose", "config", "--services").text.split())
+
+    starter = hc("image", "save", "--", "FROM hardcode\nUSER root\nUSER dev\n")
+    suite.expect("image save writes the first steps", starter, r"^saved .*Dockerfile")
+    suite.expect("image says where it is", hc("image"), rf"Dockerfile steps: {re.escape(str(folder / 'Dockerfile'))}")
+
+    config = hc("compose", "config")
+    suite.expect("compose config validates", config)
+    suite.expect(
+        "HardCode's image is built under a name of its own",
+        config,
+        rf"image: hardcode-vscode-base:{home.id}-default$",
+    )
+    suite.expect("...and the profile's steps on it, from their folder", config, rf"context: {re.escape(str(folder))}$")
+    suite.expect("...as FROM hardcode", config, r"^\s+hardcode: service:vscode-base$")
+    suite.expect(
+        "...labelled with the folder's hash",
+        config,
+        r"io\.github\.hardcode-app\.dockerfile: \"?[0-9a-f]{12}\"?$",
+    )
+    suite.check(
+        "the base is built, never run",
+        "vscode-base" in hc("compose", "config", "--services").text.split()
+        and re.search(r"^  vscode-base:\n(    .*\n)*?    scale: 0$", config.text, re.MULTILINE) is not None,
+        config.text,
+    )
+
+    # Every bind mount from the profile's folder is one file of the two
+    # compose.yaml hands over; none is the folder, holds it, or is the steps'.
+    sources = re.findall(r"^\s+source: (/.*)$", config.text, re.MULTILINE)
+    from_profile = sorted({Path(source).name for source in sources if Path(source).is_relative_to(profile_dir)})
+    holding = [source for source in sources if profile_dir.is_relative_to(Path(source))]
+    suite.check(
+        "no container mounts the profile's folder, or its Dockerfile steps",
+        from_profile == ["proxy-allowlist.txt", "vscode-extensions.txt"] and holding == [],
+        "\n".join(sources),
+    )
+
+    def label(text: str) -> str:
+        """
+        The hash of the steps in a resolved config's label; "" without one.
+        """
+        found = re.search(r"dockerfile: \"?([0-9a-f]{12})\"?$", text, re.MULTILINE)
+        return found.group(1) if found else ""
+
+    saved = hc("image", "save", "--", "FROM hardcode\nUSER root\nRUN apt-install jq\nUSER dev\n")
+    suite.expect("image save writes the steps", saved, r"^saved .*Dockerfile")
+    moved = label(hc("compose", "config").text)
+    suite.check("...and the hash moves", moved not in ("", label(config.text)), moved)
+
+    (folder / "Dockerfile").unlink()
+    without = hc("compose", "config")
+    suite.check(
+        "without the file, the image is HardCode's alone",
+        "vscode-base" not in without.text and "context: " + str(folder) not in without.text,
+        without.text,
+    )
+    suite.expect("compose config still validates", hc("compose", "config", "--quiet"))
+
+
+def check_packages(suite: Suite, home: Home) -> None:
+    """
+    A profile's own Ubuntu packages: in its .env, and a build arg of the
+    VS Code image as the real ``docker compose config`` resolves it.
+    """
+    hc = home.hardcode
+
+    suite.section("Ubuntu packages")
+    suite.expect("package add", hc("package", "add", "jq", "postgresql-client"), r"added packages jq postgresql-client")
+    suite.expect(
+        ".env has them",
+        Output(0, home.profile_file("default", ".env")),
+        r"^VSCODE_PACKAGES=jq postgresql-client$",
+    )
+    suite.expect("the image is built with them", hc("compose", "config"), r"^\s+VSCODE_PACKAGES: jq postgresql-client$")
+    suite.expect("packages lists them", hc("packages"), r"^jq\npostgresql-client$")
+    suite.expect_failure("a name that isn't one", hc("package", "add", "Not_One"), r"not an Ubuntu package name")
+    suite.expect("package remove", hc("package", "remove", "jq", "postgresql-client"), r"removed packages")
+    suite.check(
+        "none left is unset",
+        re.search(r"^VSCODE_PACKAGES=", home.profile_file("default", ".env"), re.MULTILINE) is None,
+    )
+
+
 def check_mounts(suite: Suite, home: Home) -> None:
     hc = home.hardcode
-    source = home.root / "src"
+
+    # Beside the home, not in it: a folder in HardCode's home is never mounted.
+    source = home.root.parent / "src"
     source.mkdir()
 
     suite.section("mounts")
@@ -321,6 +425,16 @@ def check_mounts(suite: Suite, home: Home) -> None:
 
     suite.expect_failure("mount duplicate", hc("mount", str(source), "work"), r"already mounted")
     suite.expect_failure("mount of a missing folder", hc("mount", "/nonexistent-xyz", "x"), r"not a folder")
+    suite.expect_failure(
+        "no mount of a folder that holds HardCode's home, whose Dockerfile steps run here",
+        hc("mount", str(home.root.parent), "x"),
+        r"holds HardCode's home .* or is in it",
+    )
+    suite.expect_failure(
+        "...or of one in it",
+        hc("mount", str(home.root / "profiles" / "default" / "image"), "x"),
+        r"holds HardCode's home .* or is in it",
+    )
 
     suite.expect("mount --all", hc("--all", "mount", str(source), "tools", "--ro"), rf"\[{NODE}\] mounted")
     suite.check(
@@ -472,6 +586,7 @@ def check_wheel(suite: Suite) -> None:
             names = set(wheel.namelist())
         carried = [
             "hardcode_cli/stack/compose.yaml",
+            "hardcode_cli/stack/compose.image.yaml",
             "hardcode_cli/stack/images/squid/squid.conf",
             "hardcode_cli/stack/images/vscode/Dockerfile",
             "hardcode_cli/stack/template/.env",
@@ -519,6 +634,8 @@ def run_checks(suite: Suite) -> None:
         check_mounts(suite, home)
         check_docker_daemon(suite, home)
         check_languages(suite, home)
+        check_packages(suite, home)
+        check_image_steps(suite, home)
         check_removal(suite, home)
 
     check_binary(suite)

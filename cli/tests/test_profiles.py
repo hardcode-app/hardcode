@@ -8,7 +8,7 @@ import sys
 import unittest
 from pathlib import Path
 
-from hardcode_cli import envfile, override, profiles, yamlio
+from hardcode_cli import dockerfile, envfile, override, profiles, yamlio
 from hardcode_cli.profiles import Profile, ProfileError
 
 from .helpers import REPO, HomeTestCase
@@ -33,6 +33,8 @@ class NamingTests(unittest.TestCase):
         self.assertEqual(profile.allowlist_file, Path("/r/profiles/x/allowlist.txt"))
         self.assertEqual(profile.proxy_allowlist_file, Path("/r/profiles/x/proxy-allowlist.txt"))
         self.assertEqual(profile.override_file, Path("/r/profiles/x/compose.override.yaml"))
+        self.assertEqual(profile.image_dir, Path("/r/profiles/x/image"))
+        self.assertEqual(profile.dockerfile, Path("/r/profiles/x/image/Dockerfile"))
         self.assertEqual(profile.project_name, "hardcode-x")
         self.assertEqual(profile.vscode_tag, "x")
 
@@ -408,6 +410,46 @@ class ProfileTests(HomeTestCase):
         copy = self.copy_of("default")
 
         self.assertTrue(copy.override_file.exists())
+
+    # -- the profile's own Dockerfile steps -------------------------------------
+
+    def test_a_new_profile_has_no_steps_of_its_own(self):
+        # It builds HardCode's image alone until steps are saved.
+        self.make("default")
+        profile = self.profile("default")
+
+        self.assertFalse(profile.image_dir.exists())
+        self.assertFalse((self.stack / "template" / "image").exists(), "it isn't the template's to copy")
+
+    def test_a_copy_gets_its_sources_steps_and_the_files_beside_them(self):
+        self.make("default")
+        source = self.profile("default")
+        dockerfile.save(source.image_dir, "FROM hardcode\nCOPY tool.sh /usr/local/bin/tool\n")
+        (source.image_dir / "tool.sh").write_text("echo tool\n", encoding="utf-8")
+
+        copy = self.copy_of("default")
+
+        self.assertEqual(copy.dockerfile.read_text(encoding="utf-8"), source.dockerfile.read_text(encoding="utf-8"))
+        self.assertEqual((copy.image_dir / "tool.sh").read_text(encoding="utf-8"), "echo tool\n")
+        self.assertEqual(dockerfile.digest(copy.image_dir), dockerfile.digest(source.image_dir))
+
+    def test_a_copy_of_a_profile_without_steps_has_none(self):
+        self.make("default")
+
+        copy = self.copy_of("default")
+
+        self.assertFalse(copy.image_dir.exists())
+
+    def test_removing_a_profile_takes_its_steps_with_it(self):
+        self.make("x")
+        image_dir = self.profile("x").image_dir
+        dockerfile.save(image_dir, "FROM hardcode\nCOPY tool.sh /usr/local/bin/tool\n")
+        (image_dir / "tool.sh").write_text("echo tool\n", encoding="utf-8")
+
+        profiles.remove(self.root, "x")
+
+        self.assertFalse(profiles.exists(self.root, "x"))
+        self.assertFalse(image_dir.exists())
 
     def test_create_errors(self):
         with self.assertRaisesRegex(ProfileError, "not a valid"):

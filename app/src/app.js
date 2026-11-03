@@ -11,7 +11,9 @@
  * allowlist entries, brings VS Code extensions and puts its toolchain or CLI
  * in the image. So the Languages / Tools view comes right after the
  * Overview, a new profile starts with choosing them, and the Extensions and
- * Allowlist views say what came from which language.
+ * Allowlist views say what came from which language. The image has the
+ * profile's own Ubuntu packages too (the Languages / Tools view's last card)
+ * and its own Dockerfile steps (the Image view), built on HardCode's.
  *
  * The extensions aren't in the image: a running VS Code container installs
  * and removes them in the background, within seconds of a change. The page
@@ -43,6 +45,10 @@ const state = {
   extensionStatusError: '', // why the VS Code container couldn't be asked, when it couldn't
   extensionWatchUntil: 0, // until when (Date.now()) the status is read often, after a change to the extensions
   extensionDraft: '', // what is typed in the Extensions view's form
+  packageDraft: '', // what is typed in the Ubuntu packages card's form
+  imageSteps: null, // the profile's own Dockerfile steps, from image:get; null until it answers
+  imageStepsError: '', // why image:get couldn't answer, when it couldn't
+  imageDraft: null, // the Image view's editor, once edited and not yet saved; null: what the file says
   pickRequest: 0, // the new-profile dialog's last language lookup; answers to older ones are dropped
   firstProfile: false, // the new-profile dialog is making the home's first profile, and can't be dismissed
   catalogue: null, // every language and tool, before the first profile (state.data has them after)
@@ -64,6 +70,7 @@ const state = {
 const TITLES = {
   overview: 'Overview',
   langs: 'Languages / Tools',
+  image: 'Image',
   extensions: 'Extensions',
   allowlist: 'Allowlist',
   blocked: 'Blocked traffic',
@@ -90,6 +97,12 @@ const ALLOWLIST_OUTCOME = { applied: 'proxy reloaded', waiting: 'applies when th
 const EXTENSION_ADDED = { applied: 'installing in the background', waiting: 'applies when the sandbox starts' };
 const EXTENSION_REMOVED = { applied: 'removing in the background', waiting: 'applies when the sandbox starts' };
 const DOCKER_OUTCOME = { applied: 'containers recreated', waiting: 'applies when the sandbox starts' };
+// The profile's own packages change nothing that runs: the image has them after its next rebuild.
+const PACKAGE_OUTCOME = { applied: '', waiting: '' };
+
+// Debian's rule for a package's name, which the CLI checks too (cli/hardcode_cli/packages.py):
+// lower-case letters, digits, +, - and ., at least two characters, starting with a letter or digit.
+const PACKAGE_NAME = /^[a-z0-9][a-z0-9+.-]+$/;
 
 // One-shot containers that exit when their work is done; not worth a status row.
 const SETUP_SERVICES = ['allowlist', 'pki'];
@@ -610,6 +623,34 @@ async function fetchExtensionStatus() {
   }
 }
 
+/**
+ * Read the profile's own Dockerfile steps (where they are, their text, the
+ * starter, HardCode's Dockerfile) for the Image view, which asks when it
+ * opens and after a save. Not being able to read them is said on the view.
+ */
+async function fetchImageSteps() {
+  const epoch = state.epoch;
+
+  let steps = null;
+  let problem = '';
+  try {
+    steps = await api.invoke('image:get');
+  } catch (error) {
+    problem = errorText(error);
+  }
+
+  // Asked for the profile shown before a switch.
+  if (epoch !== state.epoch) {
+    return;
+  }
+
+  state.imageSteps = steps;
+  state.imageStepsError = problem;
+  if (state.view === 'image') {
+    renderKeepingFocus();
+  }
+}
+
 // ---------------------------------------------------------------------------
 // VS Code's URL
 // ---------------------------------------------------------------------------
@@ -622,8 +663,9 @@ function forgetVscodeUrl() {
 
 /**
  * Forget what belonged to the profile shown until now: its URL, status,
- * blocked traffic and how its extensions are doing. Replies still on their
- * way for it are dropped.
+ * blocked traffic, how its extensions are doing, and what its forms and
+ * the Image view's editor held. Replies still on their way for it are
+ * dropped.
  */
 function forgetProfile() {
   state.epoch += 1;
@@ -635,6 +677,10 @@ function forgetProfile() {
   state.extensionStatusAsked = false;
   state.extensionStatusError = '';
   state.extensionWatchUntil = 0;
+  state.packageDraft = '';
+  state.imageSteps = null;
+  state.imageStepsError = '';
+  state.imageDraft = null;
 }
 
 /** What the URL box says while it has no URL to show. */
@@ -863,7 +909,7 @@ function render() {
     button.classList.toggle('active', button.dataset.view === state.view);
   });
 
-  const views = { overview, langs, extensions, allowlist, blocked, forwards, mounts };
+  const views = { overview, langs, image: imageView, extensions, allowlist, blocked, forwards, mounts };
   $('#view').innerHTML = views[state.view]();
   bind();
 }
@@ -901,7 +947,8 @@ function showView(view) {
 
 /**
  * Ask for what the view on the page shows beyond the profile's state: the
- * blocked traffic, how the VS Code container's extensions are doing.
+ * blocked traffic, how the VS Code container's extensions are doing, the
+ * profile's own Dockerfile steps.
  */
 function fetchForView() {
   if (state.view === 'blocked') {
@@ -914,6 +961,10 @@ function fetchForView() {
 
   if (state.view === 'extensions') {
     fetchExtensionStatus();
+  }
+
+  if (state.view === 'image') {
+    fetchImageSteps();
   }
 }
 
@@ -1141,22 +1192,34 @@ function otherCounts() {
       <div class="card"><div class="muted small">Host folders mounted</div><div class="stat">${esc(data.mounts.length)}</div><div class="muted small">${esc(mountList)}</div></div>`;
 }
 
-// -- the image's languages and tools -------------------------------------------
+// -- the image's languages, tools, packages and Dockerfile steps ------------------
 
 /**
- * How the image differs from the profile's languages and tools: "Java not
- * in it yet; Go still in it". Empty when it doesn't, or that can't be told.
+ * How the image differs from the profile: "Java and jq not in it yet; Go
+ * still in it; your Dockerfile steps changed". Empty when it doesn't, or
+ * that can't be told.
  */
 function imageDifference() {
-  const missing = state.data.langs.filter((lang) => lang.enabled && lang.inImage === false);
-  const extra = state.data.langs.filter((lang) => !lang.enabled && lang.inImage === true);
+  const data = state.data;
+  const missing = data.langs.filter((lang) => lang.enabled && lang.inImage === false).map((lang) => lang.name);
+  const extra = data.langs.filter((lang) => !lang.enabled && lang.inImage === true).map((lang) => lang.name);
+
+  // The profile's own packages, when the image says which it has.
+  const built = data.image.built === true && data.image.packages ? data.image.packages : null;
+  if (built) {
+    missing.push(...data.packages.filter((name) => !built.includes(name)));
+    extra.push(...built.filter((name) => !data.packages.includes(name)));
+  }
 
   const parts = [];
   if (missing.length) {
-    parts.push(`${joinNames(missing.map((lang) => lang.name))} not in it yet`);
+    parts.push(`${joinNames(missing)} not in it yet`);
   }
   if (extra.length) {
-    parts.push(`${joinNames(extra.map((lang) => lang.name))} still in it`);
+    parts.push(`${joinNames(extra)} still in it`);
+  }
+  if ((data.rebuildReasons || []).includes('dockerfile')) {
+    parts.push('your Dockerfile steps changed');
   }
 
   return parts.join('; ');
@@ -1176,9 +1239,10 @@ function imageNote() {
 }
 
 /**
- * The warning that the image was built with other languages or tools than
- * the profile's, with the button that rebuilds it; nothing when it wasn't.
- * *action* is the button's: this profile's rebuild, or the scope's.
+ * The warning that the image was built with other languages, tools,
+ * packages or Dockerfile steps than the profile's, with the button that
+ * rebuilds it; nothing when it wasn't. *action* is the button's: this
+ * profile's rebuild, or the scope's.
  */
 function rebuildCallout(action) {
   if (!state.data.rebuildNeeded) {
@@ -1187,7 +1251,7 @@ function rebuildCallout(action) {
 
   const busy = state.running ? 'disabled' : '';
   const label = action === 'apply-langs' && state.scope === 'all' ? 'Rebuild all images' : 'Rebuild image';
-  const text = `The image was built with other languages or tools: ${imageDifference()}. Rebuilding it installs their toolchains and CLIs and recreates the VS Code container (several minutes).`;
+  const text = `The image isn't what the profile says: ${imageDifference()}. Rebuilding it installs what is missing and recreates the VS Code container (several minutes).`;
 
   return `<div class="callout row"><span>${esc(text)}</span><button class="btn small primary" data-act="${action}" ${busy}>${esc(label)}</button></div>`;
 }
@@ -1212,7 +1276,8 @@ function imageBadge(lang) {
 /**
  * The Languages / Tools view: what the profile is built around. A card per
  * language, then per tool, each with its switch, its toolchain or CLI, the
- * allowlist entries it opens and the extensions it brings.
+ * allowlist entries it opens and the extensions it brings; then the
+ * profile's own Ubuntu packages.
  */
 function langs() {
   const data = state.data;
@@ -1244,7 +1309,8 @@ function langs() {
     <h3 class="group-title">Languages</h3>
     <div class="lang-grid">${languages.map(langCard).join('')}</div>
     <h3 class="group-title">Tools</h3>
-    <div class="lang-grid">${tools.map(langCard).join('')}</div>`;
+    <div class="lang-grid">${tools.map(langCard).join('')}</div>
+    ${packagesCard()}`;
 }
 
 /** One language's or tool's card: its switch, its toolchain, what it opens and what it brings. */
@@ -1278,6 +1344,83 @@ function domainTag(lang, domain) {
     return `<span class="tag off" title="${esc(domain)} (switched off in the allowlist)">${esc(domain)}</span>`;
   }
   return `<span class="tag" title="${esc(domain)}">${esc(domain)}</span>`;
+}
+
+/**
+ * The Ubuntu packages card: the profile's own packages, each with its ✕,
+ * and the box that adds more (several at once, separated by spaces). The
+ * image installs them, so a change marks it as needing a rebuild, with the
+ * view's Rebuild button, as a language switch does.
+ */
+function packagesCard() {
+  const all = state.scope === 'all';
+  const chips = state.data.packages.map(packageChip).join('');
+  const none = '<span class="muted small">None yet.</span>';
+
+  return `
+    <div class="card" id="packages-card" style="margin-top:14px">
+      <div class="card-head"><h2>Ubuntu packages</h2><span class="muted small">this profile's own, in VSCODE_PACKAGES in its .env</span></div>
+      <p class="muted small">Installed in the image from Ubuntu 26.04's archive, beside what the languages and tools bring: they arrive with the next image rebuild. A name the archive doesn't have fails the rebuild, and the console says so.</p>
+      <div class="tags">${chips || none}</div>
+      <div class="form-row">
+        <div class="field grow"><label>Package</label><input type="text" class="mono" id="pkg-name" placeholder="its name in Ubuntu's archive: postgresql-client" value="${esc(state.packageDraft)}"></div>
+        <button class="btn primary" data-act="add-package">Add${all ? ' to all' : ''}</button>
+      </div>
+      <div class="form-error" id="pkg-error"></div>
+    </div>`;
+}
+
+/** One of the profile's own packages, with the ✕ that removes it. */
+function packageChip(name) {
+  const everywhere = state.scope === 'all' ? ' from every profile' : '';
+  const removeTitle = `Remove${everywhere}; the image loses it at its next rebuild`;
+
+  return (
+    `<span class="package-chip">${esc(name)}` +
+    `<button class="btn ghost small icon" data-remove-package="${esc(name)}" title="${esc(removeTitle)}">✕</button></span>`
+  );
+}
+
+// -- the Image: the profile's own Dockerfile steps ---------------------------------
+
+/**
+ * The Image view: the profile's own Dockerfile steps in a plain editor,
+ * with Save and Save & rebuild (the rebuild streams to the console), and
+ * HardCode's Dockerfile they are built on, to read. The steps run on this
+ * computer's Docker, which the view says first. A profile without the file
+ * gets the starter in the editor, written when it is saved.
+ */
+function imageView() {
+  const steps = state.imageSteps;
+  if (!steps) {
+    const why = state.imageStepsError
+      ? `The Dockerfile steps couldn't be read: ${state.imageStepsError}`
+      : 'Reading the Dockerfile steps…';
+    return `<div class="empty">${esc(why)}</div>`;
+  }
+
+  const busy = state.running ? 'disabled' : '';
+  const saved = steps.exists ? steps.dockerfile : steps.starter;
+  const text = state.imageDraft === null ? saved : state.imageDraft;
+  const where = steps.exists ? steps.path : `${steps.path} (not there yet: Save writes it)`;
+
+  return `
+    <div class="callout">These steps run on your computer's Docker, with your computer's network, not the sandbox's allowlist.</div>
+    ${rebuildCallout('rebuild-image')}
+    <div class="card">
+      <div class="card-head"><h2>Your Dockerfile steps</h2><span class="muted small mono">${esc(where)}</span></div>
+      <p class="muted small">Built on HardCode's image, <span class="mono">FROM hardcode</span>, which has the profile's languages, tools and packages. The files they COPY go in the same folder. Without this file the image is HardCode's as it is.</p>
+      <textarea id="img-dockerfile" class="dockerfile-editor" spellcheck="false" wrap="off">${esc(text)}</textarea>
+      <div class="form-error" id="img-error"></div>
+      <div class="row-buttons">
+        <button class="btn" data-act="save-image" ${busy}>Save</button>
+        <button class="btn primary" data-act="save-image-rebuild" ${busy} title="Save, rebuild the VS Code image with these steps, and recreate the VS Code container">Save &amp; rebuild</button>
+      </div>
+    </div>
+    <div class="card" style="margin-top:14px">
+      <div class="card-head"><h2>HardCode's Dockerfile</h2><span class="muted small">what yours builds on; read-only</span></div>
+      <pre class="dockerfile-view" id="img-base">${esc(steps.base)}</pre>
+    </div>`;
 }
 
 // -- Extensions -----------------------------------------------------------------
@@ -2075,6 +2218,40 @@ function bindExtensions() {
   });
 }
 
+/** The Ubuntu packages card's form and ✕ buttons, on the Languages / Tools view. */
+function bindPackages() {
+  const input = $('#pkg-name');
+  if (input) {
+    input.oninput = () => {
+      state.packageDraft = input.value;
+    };
+    input.onkeydown = (event) => {
+      if (event.key === 'Enter') {
+        actions['add-package']();
+      }
+    };
+  }
+
+  each('[data-remove-package]', (button) => {
+    button.onclick = async () => {
+      const name = button.dataset.removePackage;
+      state.data = await change('packages:remove', name, state.scope);
+      render();
+      reportOutcome(PACKAGE_OUTCOME, `Removed ${name} · gone from the image at its next rebuild`);
+    };
+  });
+}
+
+/** The Image view's editor: what is typed in it is kept until it is saved. */
+function bindImage() {
+  const editor = $('#img-dockerfile');
+  if (editor) {
+    editor.oninput = () => {
+      state.imageDraft = editor.value;
+    };
+  }
+}
+
 /** The Overview's Docker daemon switch, Copy button and container rows. */
 function bindOverview() {
   each('[data-docker]', (toggle) => {
@@ -2131,6 +2308,8 @@ function bind() {
   bindBlocked();
   bindForwardsAndMounts();
   bindLanguages();
+  bindPackages();
+  bindImage();
   bindExtensions();
   bindOverview();
 }
@@ -2144,6 +2323,26 @@ async function rebuildImage(scope) {
   state.data = await start('rebuild vscode', 'langs:apply', scope);
   render();
   toast(scope === 'all' ? 'Every image rebuilt' : 'Image rebuilt', 'ok');
+}
+
+/**
+ * Save what the Image view's editor holds as the profile's Dockerfile
+ * steps; whether it was saved. A refusal is said under the editor.
+ */
+async function saveImageSteps() {
+  const text = $('#img-dockerfile').value;
+
+  try {
+    state.data = await api.invoke('image:save', text);
+  } catch (error) {
+    $('#img-error').textContent = errorText(error);
+    return false;
+  }
+
+  state.imageDraft = null;
+  await fetchImageSteps();
+  toast('Dockerfile steps saved · built at the next image rebuild', 'ok');
+  return true;
 }
 
 const actions = {
@@ -2277,6 +2476,42 @@ const actions = {
 
     if (changeApplied()) {
       watchExtensions();
+    }
+  },
+
+  async 'add-package'() {
+    const names = $('#pkg-name').value.trim().split(/\s+/).filter(Boolean);
+
+    // Checked here first, with the CLI's rule, so that a name that isn't
+    // one is said next to the form at once; the CLI checks again.
+    const bad = names.find((name) => !PACKAGE_NAME.test(name));
+    if (!names.length || bad) {
+      $('#pkg-error').textContent = bad
+        ? `'${bad}' is not an Ubuntu package name: lower-case letters, digits, +, - and ., at least two characters`
+        : "Type a package's name, as Ubuntu's archive has it";
+      return;
+    }
+
+    try {
+      state.data = await api.invoke('packages:add', names, state.scope);
+    } catch (error) {
+      $('#pkg-error').textContent = errorText(error);
+      return;
+    }
+
+    state.packageDraft = '';
+    render();
+    reportOutcome(PACKAGE_OUTCOME, `Added ${names.join(' ')} · installed at the next image rebuild`);
+  },
+
+  async 'save-image'() {
+    await saveImageSteps();
+  },
+
+  // Save, then rebuild the profile's image with the steps, streamed to the console.
+  async 'save-image-rebuild'() {
+    if (await saveImageSteps()) {
+      await rebuildImage('profile');
     }
   },
 
@@ -2527,8 +2762,8 @@ $('#btn-home').onclick = () => call('home:open');
 
 // ---------------------------------------------------------------------------
 // Smoke mode (`--smoke`, for CI and tests/app.py): render every view once,
-// check what each must show, try the language and extension channels
-// against the real CLI, report what went wrong, and exit
+// check what each must show, try the language, extension, package and
+// image channels against the real CLI, report what went wrong, and exit
 // ---------------------------------------------------------------------------
 
 /** Wait until *condition* holds, for at most *milliseconds*; whether it did. */
@@ -2547,8 +2782,8 @@ async function waitUntil(condition, milliseconds) {
 
 /**
  * What a view must show once it is open: the Languages / Tools view its
- * name and a card for every language and tool, the Extensions view its
- * groups and its form.
+ * name, a card for every language and tool and the Ubuntu packages card
+ * with its form, the Extensions view its groups and its form.
  */
 function checkView(view, errors) {
   if (view === 'langs') {
@@ -2560,6 +2795,10 @@ function checkView(view, errors) {
     const cards = $('#view').querySelectorAll('.lang-card').length;
     if (cards !== state.data.langs.length) {
       errors.push(`the Languages / Tools view shows ${cards} cards for ${state.data.langs.length} languages and tools`);
+    }
+
+    if (!$('#packages-card') || !$('#pkg-name')) {
+      errors.push('the Languages / Tools view has no Ubuntu packages card with its form');
     }
   }
 
@@ -2689,6 +2928,72 @@ async function checkAllowlistAdd(errors) {
   }
   if ($('tr.adding')) {
     errors.push('the allowlist entry added is still marked as being added');
+  }
+}
+
+/**
+ * The Ubuntu packages card, through the bridge and the CLI for real: a
+ * name that isn't one is refused next to the form without a call; one
+ * that is shows as a chip once the CLI wrote it, marked for the rebuild
+ * in the profile's state; its ✕ takes it away again.
+ */
+async function checkPackages(errors) {
+  showView('langs');
+  await sleep(200);
+
+  $('#pkg-name').value = 'Not_A_Package';
+  await actions['add-package']();
+  if (!$('#pkg-error').textContent.includes('not an Ubuntu package name') || state.data.packages.length) {
+    errors.push(`a bad package name: "${$('#pkg-error').textContent}", packages ${JSON.stringify(state.data.packages)}`);
+  }
+
+  $('#pkg-name').value = 'smoke-package';
+  await actions['add-package']();
+  const chip = $('#packages-card [data-remove-package="smoke-package"]');
+  if (!chip || state.data.packages.join(' ') !== 'smoke-package') {
+    errors.push(`packages:add smoke-package: ${$('#pkg-error').textContent || JSON.stringify(state.data.packages)}`);
+    return;
+  }
+
+  await chip.onclick();
+  if (state.data.packages.length || $('#packages-card [data-remove-package]')) {
+    errors.push(`packages:remove smoke-package left ${JSON.stringify(state.data.packages)}`);
+  }
+}
+
+/**
+ * The Image view, through the bridge and the CLI for real: the warning
+ * that the steps run on this computer, the profile's Dockerfile in the
+ * editor (a new profile's is the starter, FROM hardcode), HardCode's to
+ * read, and a Save that writes it back.
+ */
+async function checkImage(errors) {
+  showView('image');
+  if (!(await waitUntil(() => state.imageSteps || state.imageStepsError, 15000))) {
+    errors.push('image:get never answered');
+    return;
+  }
+  if (state.imageStepsError) {
+    errors.push(`image:get: ${state.imageStepsError}`);
+    return;
+  }
+
+  const warning = $('#view .callout');
+  if (!warning || !warning.textContent.includes("your computer's Docker")) {
+    errors.push('the Image view does not say that the steps run on your computer');
+  }
+
+  const editor = $('#img-dockerfile');
+  if (!editor || !/^FROM hardcode$/m.test(editor.value)) {
+    errors.push(`the Image view's editor holds: ${editor ? editor.value.slice(0, 80) : 'no editor'}`);
+    return;
+  }
+  if (!$('#img-base') || !/^FROM ubuntu/m.test($('#img-base').textContent)) {
+    errors.push("the Image view does not show HardCode's Dockerfile");
+  }
+
+  if (!(await saveImageSteps()) || !state.imageSteps.exists || state.imageSteps.dockerfile !== editor.value) {
+    errors.push(`image:save: ${$('#img-error') ? $('#img-error').textContent : 'the view went away'}`);
   }
 }
 
@@ -2855,6 +3160,8 @@ async function smoke() {
   await checkExtensionStatus(errors);
   await checkLanguageChannels(errors);
   await checkLan(errors);
+  await checkPackages(errors);
+  await checkImage(errors);
   await checkAllowlistAdd(errors);
   await checkNewProfile(errors);
   checkVersion(errors);

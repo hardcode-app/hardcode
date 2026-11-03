@@ -117,6 +117,7 @@ declare -A SHOTS=(
   [app-blocked]="$APP?view=blocked"
   [app-forwards]="$APP?view=forwards"
   [app-mounts]="$APP?view=mounts"
+  [app-image]="$APP?view=image"
   [app-new-profile]="$APP?view=new-profile"
   [app-console]="$APP?view=console"
   [app-logs]="$APP?view=logs"

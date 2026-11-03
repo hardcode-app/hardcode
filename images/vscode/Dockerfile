@@ -17,6 +17,8 @@
 #
 # Each language is its own section and can be skipped with a build arg, e.g.
 #   docker build --build-arg INSTALL_JAVA=false ...
+# A profile's own Ubuntu packages are one more (VSCODE_PACKAGES), and its
+# own Dockerfile steps are built on top of this image (compose.image.yaml).
 # VS Code extensions aren't in the image: the VS Code container installs the
 # profile's list in the background while it runs (hardcode-sync-extensions),
 # so switching a language brings its extensions without a rebuild.
@@ -338,6 +340,29 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
  && rm /tmp/code.deb
 
 # ---------------------------------------------------------------------------
+# The profile's own Ubuntu packages (VSCODE_PACKAGES, space-separated:
+# hardcode package add, the app's Languages / Tools), from the archive.
+# After the languages, the tools and VS Code, and declared only here, so
+# that a change of the list rebuilds what comes after it and nothing
+# before. Every name is checked with Debian's rule first; one the archive
+# doesn't have fails the build with apt's own message. An empty list
+# installs nothing.
+# ---------------------------------------------------------------------------
+ARG VSCODE_PACKAGES=""
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    --mount=type=cache,target=/var/lib/apt,sharing=locked \
+    read -ra packages <<<"${VSCODE_PACKAGES}" \
+ && for package in "${packages[@]}"; do \
+      if ! [[ "${package}" =~ ^[a-z0-9][a-z0-9+.-]+$ ]]; then \
+        echo "not an Ubuntu package name: ${package}" >&2; \
+        exit 1; \
+      fi; \
+    done \
+ && if [ "${#packages[@]}" -gt 0 ]; then \
+      apt-install "${packages[@]}"; \
+    fi
+
+# ---------------------------------------------------------------------------
 # VS Code extensions are installed at runtime, from the profile's list
 # ---------------------------------------------------------------------------
 COPY --chmod=0755 verify-extensions.sh /usr/local/bin/hardcode-verify-extensions
@@ -348,6 +373,9 @@ COPY --chmod=0755 ssh-key.sh /usr/local/bin/hardcode-ssh-key
 # comes before the archive's gh on the PATH, and calls it.
 COPY --chmod=0755 github.sh /usr/local/bin/hardcode-github
 COPY --chmod=0755 gh.sh /usr/local/bin/gh
+# On Kubernetes, where the image is shared, the entrypoint installs the
+# profile's own Ubuntu packages with it as the VS Code container starts.
+COPY --chmod=0755 install-packages.sh /usr/local/bin/hardcode-install-packages
 
 # ---------------------------------------------------------------------------
 # Everything below is installed into the user's home. On first start Docker
@@ -386,3 +414,5 @@ ENTRYPOINT ["/usr/bin/tini", "--", "/usr/local/bin/hardcode-entrypoint"]
 # them with the profile's, to say when a rebuild is due. Last, so that a
 # change of language doesn't throw away the cache of every layer above.
 LABEL io.github.hardcode-app.languages="python=${INSTALL_PYTHON} node=${INSTALL_NODE} java=${INSTALL_JAVA} android=${INSTALL_ANDROID} dotnet=${INSTALL_DOTNET} go=${INSTALL_GO} rust=${INSTALL_RUST} cpp=${INSTALL_CPP} ruby=${INSTALL_RUBY} perl=${INSTALL_PERL} build_essentials=${INSTALL_BUILD_ESSENTIALS} docker=${INSTALL_DOCKER} kubernetes=${INSTALL_KUBERNETES} claude_cli=${INSTALL_CLAUDE_CLI} codex_cli=${INSTALL_CODEX_CLI}"
+# ... and the profile's own Ubuntu packages, which it compares in the same way.
+LABEL io.github.hardcode-app.packages="${VSCODE_PACKAGES}"

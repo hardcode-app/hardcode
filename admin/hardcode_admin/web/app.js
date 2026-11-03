@@ -56,6 +56,10 @@ const TAB_TITLES = {
   settings: 'Settings',
 };
 
+// Debian's rule for a package's name, which the API checks too (hardcode_cli/packages.py):
+// lower-case letters, digits, +, - and ., at least two characters, starting with a letter or digit.
+const PACKAGE_NAME = /^[a-z0-9][a-z0-9+.-]+$/;
+
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
@@ -351,7 +355,7 @@ function languageCard(lang) {
 
 /**
  * The languages / tools tab: what the profile is built around, languages
- * first and then the tools, each switchable.
+ * first and then the tools, each switchable; then its own Ubuntu packages.
  */
 function languagesTab(profile) {
   const languages = profile.languages.filter((lang) => lang.kind === 'language');
@@ -368,7 +372,33 @@ function languagesTab(profile) {
       <div class="group-head"><h2>Languages</h2><span class="muted small">${count(languages)}</span></div>
       <div class="language-grid">${languages.map(languageCard).join('')}</div>
       <div class="group-head"><h2>Tools</h2><span class="muted small">${count(tools)}</span></div>
-      <div class="language-grid">${tools.map(languageCard).join('')}</div>`;
+      <div class="language-grid">${tools.map(languageCard).join('')}</div>
+      ${packagesCard(profile)}`;
+}
+
+/**
+ * The Ubuntu packages card: the profile's own packages, each with its ✕,
+ * and the box that adds more (several at once, separated by spaces). The
+ * image is shared on Kubernetes, so the VS Code container installs them as
+ * it starts: a change restarts it, and every start takes longer for them.
+ */
+function packagesCard(profile) {
+  const chips = profile.packages
+    .map(
+      (name) =>
+        `<span class="package-chip">${esc(name)}` +
+        `<button class="btn ghost small icon" data-pkg-remove="${esc(name)}" title="Remove; the VS Code container restarts without it">✕</button></span>`,
+    )
+    .join('');
+  const none = '<span class="muted small">None yet.</span>';
+
+  return `<div class="card" id="packages-card" style="margin-top:14px"><h2>Ubuntu packages</h2>
+      <p class="muted small" style="margin-top:0">This profile's own, from Ubuntu 26.04's archive. The image is shared on Kubernetes, so the VS Code container installs them through the proxy as it starts: a change restarts it, and every start takes longer for them. When one can't be installed, none are, and the container's log says why.</p>
+      <div class="value-chips">${chips || none}</div>
+      <div class="form-row">
+        <div class="field grow"><label>Package</label><input type="text" class="mono" id="pk-name" placeholder="its name in Ubuntu's archive: postgresql-client"></div>
+        <button class="btn primary" data-act="pkg-add">Add</button></div>
+      <div class="form-error" id="pk-error"></div></div>`;
 }
 
 /**
@@ -1023,6 +1053,17 @@ async function editExtensions(op, id) {
   toast(message, answer.changed ? 'ok' : '');
 }
 
+/**
+ * One edit of the open profile's own Ubuntu packages; the answer says what
+ * happened, and that the VS Code container restarts for a change.
+ */
+async function editPackages(op, names) {
+  const answer = await api('POST', profilePath('/packages'), { op, names });
+  await openProfile(state.profile.name);
+
+  toast(answer.message, answer.changed ? 'ok' : '');
+}
+
 async function reloadUsers() {
   state.users = await call('GET', '/api/users');
   render();
@@ -1056,6 +1097,26 @@ const actions = {
       await editExtensions('add', id);
     } catch (error) {
       $('#ex-error').textContent = error.message;
+    }
+  },
+
+  async 'pkg-add'() {
+    const names = $('#pk-name').value.trim().split(/\s+/).filter(Boolean);
+
+    // Checked here first, with the API's rule, so that a name that isn't
+    // one is said next to the form at once.
+    const bad = names.find((name) => !PACKAGE_NAME.test(name));
+    if (!names.length || bad) {
+      $('#pk-error').textContent = bad
+        ? `'${bad}' is not an Ubuntu package name: lower-case letters, digits, +, - and ., at least two characters`
+        : "Type a package's name, as Ubuntu's archive has it";
+      return;
+    }
+
+    try {
+      await editPackages('add', names);
+    } catch (error) {
+      $('#pk-error').textContent = error.message;
     }
   },
 
@@ -1198,7 +1259,7 @@ async function editAllowlist(op, entry, flag) {
   await openProfile(state.profile.name);
 }
 
-/** The language switches and the extension form and buttons of a profile's view. */
+/** The language switches, the package form and ✕ buttons, and the extension form and buttons of a profile's view. */
 function bindLanguagesAndExtensions() {
   each('[data-lang]', (toggle) => {
     toggle.onchange = async () => {
@@ -1225,6 +1286,25 @@ function bindLanguagesAndExtensions() {
     button.onclick = async () => {
       try {
         await editExtensions('remove', button.dataset.extRemove);
+      } catch (error) {
+        toast(error.message, 'error');
+      }
+    };
+  });
+
+  const packageName = $('#pk-name');
+  if (packageName) {
+    packageName.onkeydown = (event) => {
+      if (event.key === 'Enter') {
+        actions['pkg-add']();
+      }
+    };
+  }
+
+  each('[data-pkg-remove]', (button) => {
+    button.onclick = async () => {
+      try {
+        await editPackages('remove', [button.dataset.pkgRemove]);
       } catch (error) {
         toast(error.message, 'error');
       }

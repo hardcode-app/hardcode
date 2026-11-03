@@ -1168,3 +1168,39 @@ td.actions {
   word-break: break-all;
   user-select: text;
 }
+/* One of the profile's own Ubuntu packages, with its ✕. */
+.package-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  font-family: var(--mono);
+  font-size: 12px;
+  padding: 1px 2px 1px 9px;
+  border-radius: 6px;
+  background: var(--bg-2);
+  border: 1px solid var(--border);
+}
+
+/* The Image view: the profile's own Dockerfile, to edit, and HardCode's, to read. */
+.dockerfile-editor {
+  width: 100%;
+  min-height: 320px;
+  font: 12.5px/1.5 var(--mono);
+  resize: vertical;
+  white-space: pre;
+  user-select: text;
+}
+
+.dockerfile-view {
+  margin: 0;
+  max-height: 420px;
+  overflow: auto;
+  padding: 10px 12px;
+  font: 12px/1.5 var(--mono);
+  color: #b6c2d6;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  white-space: pre;
+  user-select: text;
+}

@@ -187,6 +187,20 @@ languages while the chart's `profileDefaults.languages` is empty.
   look-alike choice off a profile's list; it doesn't stop code inside the
   sandbox from installing extensions itself.
 
+### The image
+
+- **A profile's files stay out of every sandbox.** No container mounts
+  the profile's folder; the proxy and the VS Code container get two
+  files from it, read-only. `hardcode mount` refuses a folder that is,
+  holds or is inside HardCode's home. This matters most for a profile's
+  own Dockerfile steps (`image/`): whoever can change them runs code on
+  your computer at the next rebuild.
+- **The image is built outside the sandbox.** Its packages and your own
+  Dockerfile steps are built by your computer's Docker, with your
+  computer's network, not through the allowlist. On Kubernetes, a
+  profile's packages are installed by its VS Code container at start,
+  through its proxy, from the Ubuntu archive every profile allows.
+
 ### Your computer's resources
 
 - **Nothing can eat the host.** Every container has a hard memory limit:

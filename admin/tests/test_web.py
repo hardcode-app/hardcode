@@ -18,12 +18,13 @@ from hardcode_admin.web import (
     ACCOUNT_CODE_ATTEMPTS,
     MAX_CODE_ATTEMPTS,
     MAX_EXTENSIONS,
+    MAX_PACKAGES,
     SecretStore,
     create_app,
     extension_status_from_log,
     qr_data_url,
 )
-from hardcode_cli import langs
+from hardcode_cli import langs, packages
 
 from .helpers import FakeK8s, MemoryStore
 
@@ -125,6 +126,12 @@ class WebTests(unittest.TestCase):
         One edit of a profile's own extensions.
         """
         return self.client.post(f"/api/profiles/{name}/extensions", json={"op": op, "id": extension_id})
+
+    def packages(self, name, op, *names):
+        """
+        One edit of a profile's own Ubuntu packages.
+        """
+        return self.client.post(f"/api/profiles/{name}/packages", json={"op": op, "names": list(names)})
 
     # -- signing in ------------------------------------------------------------
 
@@ -911,6 +918,51 @@ class WebTests(unittest.TestCase):
         self.assertEqual(response.status_code, 400)
         self.assertIn(f"at most {MAX_EXTENSIONS} extensions", response.json["error"])
 
+    def test_packages(self):
+        self.sign_in()
+        self.client.post("/api/profiles", json={"name": "team-a"})
+        self.assertEqual(self.client.get("/api/profiles/team-a").json["packages"], [])
+
+        response = self.packages("team-a", "add", "jq", "postgresql-client", "jq")
+        self.assertEqual(response.json["changed"], True)
+        self.assertTrue(response.json["message"].startswith("added packages jq postgresql-client; the VS Code"))
+        self.assertEqual(self.stored_spec("team-a")["packages"], ["jq", "postgresql-client"])
+        self.assertEqual(self.client.get("/api/profiles/team-a").json["packages"], ["jq", "postgresql-client"])
+
+        response = self.packages("team-a", "add", "jq")
+        self.assertEqual(response.json, {"changed": False, "message": "already added: jq"})
+
+        response = self.packages("team-a", "remove", "tree")
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("not one of this profile's packages: tree", response.json["error"])
+
+        self.assertEqual(self.packages("team-a", "remove", "jq").json["changed"], True)
+        self.assertEqual(self.stored_spec("team-a")["packages"], ["postgresql-client"])
+        self.assertEqual(self.packages("team-a", "remove", "postgresql-client").json["changed"], True)
+        self.assertNotIn("packages", self.stored_spec("team-a"), "none of its own left")
+
+    def test_packages_are_checked(self):
+        self.sign_in()
+        self.client.post("/api/profiles", json={"name": "team-a"})
+
+        for names in (["Not_A_Package"], ["jq; rm -rf /"], ["-jq"]):
+            response = self.packages("team-a", "add", *names)
+            self.assertEqual(response.status_code, 400, names)
+            self.assertIn("is not an Ubuntu package name", response.json["error"])
+
+        self.assertEqual(self.packages("team-a", "add").status_code, 400, "no names")
+        response = self.client.post("/api/profiles/team-a/packages", json={"op": "add", "names": "jq"})
+        self.assertEqual(response.status_code, 400, "a list, not a string")
+        self.assertEqual(self.packages("team-a", "bogus", "jq").status_code, 400)
+        self.assertEqual(self.packages("nobody", "add", "jq").status_code, 404)
+        self.assertNotIn("packages", self.stored_spec("team-a"), "nothing was written")
+
+        many = [f"package-{number}" for number in range(MAX_PACKAGES)]
+        self.k8s.merge_patch(f"{PROFILE_PATH}/team-a", {"spec": {"packages": many}})
+        response = self.packages("team-a", "add", "jq")
+        self.assertEqual(response.status_code, 400)
+        self.assertIn(f"at most {MAX_PACKAGES} packages", response.json["error"])
+
     def test_racing_extension_edits_both_survive(self):
         self.sign_in()
         self.client.post("/api/profiles", json={"name": "team-a"})
@@ -958,13 +1010,15 @@ class WebTests(unittest.TestCase):
         self.assertIsNone(self.client.get("/api/profiles/team-a").json["extensionStatus"])
 
     @unittest.skipUnless(yaml, "needs PyYAML")
-    def test_the_crd_knows_the_languages_and_extensions(self):
+    def test_the_crd_knows_the_languages_extensions_and_packages(self):
         crd = yaml.safe_load(CRD.read_text(encoding="utf-8"))
         spec = crd["spec"]["versions"][0]["schema"]["openAPIV3Schema"]["properties"]["spec"]["properties"]
 
         self.assertEqual(spec["languages"]["items"]["enum"], list(langs.LANGS), "the catalogue's keys, in its order")
         self.assertEqual(spec["extensions"]["items"]["pattern"], langs.EXTENSION_ID.pattern)
         self.assertEqual(spec["extensions"]["maxItems"], MAX_EXTENSIONS)
+        self.assertEqual(spec["packages"]["items"]["pattern"], packages.PACKAGE_NAME.pattern, "Debian's rule")
+        self.assertEqual(spec["packages"]["maxItems"], MAX_PACKAGES)
 
     @unittest.skipUnless(yaml, "needs PyYAML")
     def test_the_crd_is_the_group_the_operator_uses(self):
@@ -1013,6 +1067,15 @@ class WebTests(unittest.TestCase):
         for path in ("/app.js", "/admin.css", "/base.css", "/icon.png"):
             with self.client.get(path) as response:
                 self.assertEqual(response.status_code, 200, path)
+
+    def test_the_page_checks_package_names_as_the_api_does(self):
+        # The Languages tab's Ubuntu packages card says at once that a name
+        # isn't one, by the rule the API (and the CRD) refuse it with.
+        with self.client.get("/app.js") as response:
+            script = response.get_data(as_text=True)
+
+        self.assertIn(f"const PACKAGE_NAME = /{packages.PACKAGE_NAME.pattern}/;", script)
+        self.assertIn("api('POST', profilePath('/packages'), { op, names })", script)
 
     def test_qr_and_secret_store(self):
         url = qr_data_url("otpauth://totp/x")

@@ -91,6 +91,11 @@ container actually has. The default image has them all, so a language
 switched off still has its compiler there, just not its registries or its
 extensions.
 
+**Ubuntu packages**, below the tools, adds packages of the profile's
+own: the VS Code container installs them each time it starts, which
+makes starting slower, and a change restarts it. For more than packages,
+give the profile an image of its own under **Settings**.
+
 The list sent is made from the profile as it is at the moment of the
 switch, so another admin's switch meanwhile isn't undone, and a concurrent
 allowlist edit is kept (the write is redone on top of it, as single

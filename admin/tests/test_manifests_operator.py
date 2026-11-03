@@ -94,6 +94,18 @@ class EffectiveSpecTests(unittest.TestCase):
             ["eamodio.gitlens"],
         )
 
+    def test_packages(self):
+        def packages(spec):
+            return manifests.effective_spec(profile("p", spec), chart_defaults())["packages"]
+
+        self.assertEqual(packages({}), [])
+        self.assertEqual(packages({"packages": ["jq", "postgresql-client", "jq"]}), ["jq", "postgresql-client"])
+        self.assertEqual(
+            packages({"packages": ["jq", "Bad_Name", "x; rm -rf /", 7]}),
+            ["jq"],
+            "only package names, as the CRD has it, ever reach the container",
+        )
+
     def test_every_container_keeps_a_memory_limit(self):
         spec = manifests.effective_spec(profile("p"), chart_defaults({"resources": None, "dockerResources": None}))
         self.assertEqual(spec["resources"], manifests.VSCODE_RESOURCES)
@@ -431,6 +443,27 @@ class RenderTests(unittest.TestCase):
                 f"{change}: the pod template is the same, so the VS Code container keeps running",
             )
             self.assertNotEqual(after_list, before_list, f"{change}: the change goes into its extension list")
+
+    def test_the_vscode_container_installs_the_packages_as_it_starts(self):
+        def template(spec):
+            return find(manifests.render(profile("p", spec), chart_defaults(), self.CTX), "StatefulSet")["spec"][
+                "template"
+            ]
+
+        # None: no variable, and the pod is as it always was.
+        without = template({"languages": ["python"]})
+        self.assertNotIn("HARDCODE_PACKAGES", env_of(without["spec"]["containers"][0]))
+
+        # The image is shared: the entrypoint installs them at every start,
+        # so a change rolls the pod.
+        with_packages = template({"languages": ["python"], "packages": ["jq", "postgresql-client"]})
+        vscode = with_packages["spec"]["containers"][0]
+        self.assertEqual(env_of(vscode)["HARDCODE_PACKAGES"], "jq postgresql-client")
+        self.assertNotEqual(with_packages, without)
+
+        # The sidecar has nothing to install.
+        docker = with_packages["spec"]["containers"][1]
+        self.assertNotIn("HARDCODE_PACKAGES", env_of(docker))
 
 
 @unittest.skipUnless(shutil.which("openssl"), "needs openssl")

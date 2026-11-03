@@ -93,6 +93,23 @@ spec:
                   items:
                     type: string
                     pattern: '^[a-z0-9][a-z0-9-]*\.[a-z0-9][a-z0-9-]*$'
+                # The pattern is hardcode_cli.packages.PACKAGE_NAME (Debian's
+                # rule) and maxItems the admin's MAX_PACKAGES; the admin's
+                # tests check both.
+                packages:
+                  type: array
+                  x-kubernetes-list-type: set
+                  maxItems: 200
+                  description: >-
+                    Ubuntu packages of the profile's own, from the archive. The image is
+                    shared on Kubernetes, so the VS Code container installs them as it
+                    starts (HARDCODE_PACKAGES, through the proxy): every start takes
+                    longer for them, and a change restarts the VS Code container's pod.
+                    When one can't be installed (the archive has no such package), none
+                    are: the container's log says why, and VS Code starts without them.
+                  items:
+                    type: string
+                    pattern: '^[a-z0-9][a-z0-9+.-]+$'
                 image:
                   type: string
                   description: The VS Code image (defaults to the operator's profileDefaults.image).

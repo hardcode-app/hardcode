@@ -81,7 +81,7 @@ command's options.
 | Option | Meaning |
 |---|---|
 | `-p NAME`, `--profile NAME` | The profile to act on, before or after the command. Default: `$HARDCODE_PROFILE`, else `default`. |
-| `--all` | Act on every profile. Accepted by `allow`, `deny`, `allowlist` (`enable`, `disable`, `remove`), `reload`, `mount`, `unmount`, `enable`, `disable`, `rebuild`, `docker`, `extension`, `lan add`, `lan remove` and `token`. |
+| `--all` | Act on every profile. Accepted by `allow`, `deny`, `allowlist` (`enable`, `disable`, `remove`), `reload`, `mount`, `unmount`, `enable`, `disable`, `rebuild`, `docker`, `extension`, `lan add`, `lan remove`, `package add`, `package remove` and `token`. |
 | `--json` | Machine-readable output ([below](#--json-output)); what the desktop app uses. |
 | `--config DIR` | The folder the profiles are kept in (the home). Default: `$HARDCODE_CONFIG`, else `~/.config/hardcode` on Linux (`$XDG_CONFIG_HOME/hardcode`), `~/Library/Application Support/HardCode` on macOS, `%LOCALAPPDATA%\HardCode` on Windows. |
 | `--version` | The command's version: `hardcode 0.1.0`, or `hardcode 0.1.0 (dev, 2c419ae)` for a development build, with the commit it was built from. |
@@ -143,6 +143,10 @@ are open, and which VS Code extensions the sandbox gets.
 | `rebuild` | Rebuild the VS Code image with the profile's languages and tools, and recreate the container if it runs. Gives the proxy its allowlist too, as `up` does. |
 | `extensions` | Every VS Code extension the sandbox gets, and where it comes from: every VS Code container, a language or tool, or the profile's own. While the sandbox runs, which are still installing, refused (a publisher without a verified domain) or to be tried again. |
 | `extension add\|remove <publisher.name>` | Add or remove one of the profile's own extensions (`VSCODE_EXTENSIONS` in `.env`). A running sandbox installs or removes it within seconds, without a restart. One a language or tool already brings isn't added twice; a language's own goes when the language is switched off, and the one every sandbox has can't be removed. Only publishers with a verified domain are installed. |
+| `packages` | The profile's own Ubuntu packages, and whether a rebuild is due to install them. |
+| `package add\|remove <name>…` | Add or remove Ubuntu packages of the profile's own (`VSCODE_PACKAGES` in `.env`). The next `rebuild` installs them. |
+| `image` | Where the profile's own Dockerfile steps are (`profiles/NAME/image/Dockerfile`), whether it has any, and whether a rebuild is due. |
+| `image save -- <text>` | Write the profile's own Dockerfile steps. The next `rebuild` builds them on HardCode's image. |
 
 Languages: `python node java android dotnet go rust cpp ruby perl`; tools:
 `build_essentials docker kubernetes claude_cli codex_cli`. Short names
@@ -177,7 +181,7 @@ force is then unknown until `hardcode logs allowlist squid` says why.
 |---|---|
 | `forward <port> [vscode\|docker] [target]` | Publish `localhost:<port>` (on `VSCODE_BIND`) to port `target` (the same port by default) in the VS Code container, or with `docker` in the Docker daemon's container (for a container's `docker run -p` port). Refused: the VS Code port, 8000, a port another profile uses (every profile holding it is named), and `docker` on a profile without the Docker daemon. Another profile's damaged `compose.override.yaml` is a warning (its forwards can't be counted), not a stop. Recreates the gateway if the profile runs; if the gateway can't start with the forward (the port is taken on this machine), the forward is undone, the gateway started again as it was, and the error gives Compose's reason. |
 | `unforward <port>` | Remove a forward. |
-| `mount <local> <remote> [--ro]` | Share a folder of this machine with the VS Code container and the Docker daemon, at the same path in both. `<local>` must exist. `<remote>` is absolute, or relative to the home folder (`git` is `/home/dev/git`). A folder under your home folder is written as `${HOME}/…`. Recreates both containers if the profile runs, undoing the mount if they can't start with it. |
+| `mount <local> <remote> [--ro]` | Share a folder of this machine with the VS Code container and the Docker daemon, at the same path in both. `<local>` must exist. `<remote>` is absolute, or relative to the home folder (`git` is `/home/dev/git`). A folder under your home folder is written as `${HOME}/…`. Recreates both containers if the profile runs, undoing the mount if they can't start with it. A folder that is, holds or is inside HardCode's home is refused, so that a profile's files stay out of every sandbox. |
 | `unmount <remote>` | Remove a mount from both. A mount written by hand as `/home/${DEV_USER:-dev}/git` is the one `unmount git` names. |
 
 ### The Docker daemon, and the whole profile
@@ -219,8 +223,10 @@ Queries print their own objects:
 |---|---|
 | `profiles` / `status` | `{"home": "<folder>", "version": "<as --version says it>", "profiles": [{"name", "port", "subnet", "state", "running"}]}` |
 | `ps` | `{"services": [{"service", "state", "status", "health"}], "docker": true, "error": "", "extensions": {"state", "installed", "total"}}` (`docker: false` when the Docker CLI isn't found; `error` says why Compose couldn't list the containers, such as a daemon that isn't running, and is empty when it could; `extensions` is how far the running VS Code container's extensions have got, `state` `installing` or `done`, and `null` when it isn't running) |
-| `show` | `{"profile", "env": {…}, "vscodePort", "allowlist": [entries], "forwards": [{port, host, target}], "mounts": [{local, remote, mode}], "langs": [languages], "extensions": [extensions], "image": {"built", "languages"}, "rebuildNeeded", "docker": bool, "profiles": [{name, port}]}` (`image.built` is `false` with no image and `null` when Docker can't say; `image.languages` is `[]` with no image, the image's languages and tools when it has the label, `null` when nobody can tell; `rebuildNeeded` is `null` when nobody can tell) |
+| `show` | `{"profile", "env": {…}, "vscodePort", "allowlist": [entries], "forwards": [{port, host, target}], "mounts": [{local, remote, mode}], "langs": [languages], "extensions": [extensions], "lan": [pins], "packages": [names], "dockerfile": {"path", "exists"}, "image": {"built", "languages", "packages", "dockerfile"}, "rebuildNeeded", "rebuildReasons", "docker": bool, "profiles": [{name, port}]}` (`image.built` is `false` with no image and `null` when Docker can't say; `image.languages` is `[]` with no image, the image's languages and tools when it has the label, `null` when nobody can tell; `rebuildNeeded` is `null` when nobody can tell) |
 | `languages` | `{"languages": [languages], "rebuildNeeded": bool}` |
+| `packages` | `{"packages": [names], "image": [names the image was built with], "rebuildNeeded", "rebuildReasons"}` |
+| `image` | `{"path", "exists", "dockerfile", "starter", "base", "rebuildNeeded", "rebuildReasons", …}` |
 | `extensions` | `{"extensions": [extensions], "refused": [ids], "status": {"state", "total", "installed", "pending": [ids], "refused": [ids], "failed": [ids], "updated"}}` (`status` is what the running VS Code container's extension sync last wrote; `null` when it isn't running) |
 | `allowlist` | `{"allowlist": [entries]}`, the same list `show` has |
 | `lan` | `{"lan": [pins]}`: each one's `name`, `address`, what it `resolves` to now, and its `state` |

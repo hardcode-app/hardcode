@@ -1,7 +1,8 @@
 """
 The stack: what HardCode runs every profile with.
 
-``compose.yaml``, the build contexts of the images it builds (squid, the
+``compose.yaml`` (and ``compose.image.yaml``, for a profile with Dockerfile
+steps of its own), the build contexts of the images it builds (squid, the
 gateway, the Docker daemon, the VS Code container) and the template a new profile's allowlist
 and override start from. It belongs to the HardCode that is running, never
 to the user: a newer HardCode brings its own, and a profile keeps only what
@@ -31,7 +32,20 @@ from typing import Iterable, Optional
 from . import home
 
 # The stack's files and folders, relative to the checkout (and to a copy).
-PARTS = ("compose.yaml", "images/squid", "images/gateway", "images/docker", "images/vscode", "template")
+# compose.image.yaml is merged over compose.yaml for a profile with
+# Dockerfile steps of its own (see ``dockerfile``).
+PARTS = (
+    "compose.yaml",
+    "compose.image.yaml",
+    "images/squid",
+    "images/gateway",
+    "images/docker",
+    "images/vscode",
+    "template",
+)
+
+# The file of PARTS a profile's own Dockerfile steps are built with.
+IMAGE_STEPS = "compose.image.yaml"
 
 # The copy that ships inside the package.
 BUNDLED = Path(__file__).resolve().parent / "stack"

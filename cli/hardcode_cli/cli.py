@@ -18,7 +18,21 @@ from dataclasses import asdict
 from pathlib import Path
 from typing import Callable, Optional
 
-from . import allowlist, bounded, envfile, home, lan, langs, override, profiles, stack, version_text, yamlio
+from . import (
+    allowlist,
+    bounded,
+    dockerfile,
+    envfile,
+    home,
+    lan,
+    langs,
+    override,
+    packages,
+    profiles,
+    stack,
+    version_text,
+    yamlio,
+)
 from .compose import Compose, ComposeError, Runner, docker_executable, docker_subnets
 from .ops import Ops, Result
 
@@ -34,6 +48,8 @@ hardcode [-p NAME | --all] [--json] [--config DIR] <command> [args]
   enable <lang>... · disable <lang>...  [--no-build]  (--all)          rebuild  (--all)  rebuild the VS Code image
   extensions              the VS Code extensions, and where each comes from
   extension add|remove <publisher.name>  (--all)
+  packages                the profile's own Ubuntu packages          package add|remove <name>...  (--all)
+  image [save -- <text>]  its own Dockerfile steps (FROM hardcode), and whether a rebuild is due
   token rotate  (--all)   a new VS Code token: every copy of the old one stops working
   allowlist               every entry: the profile's own, then those HardCode provides
   allow <entry> [rw|ssh]  allow a site (--all: every profile)        deny <entry> [ssh]
@@ -60,6 +76,7 @@ ALL_CAPABLE = {
     "rebuild",
     "docker",
     "extension",
+    "package",
     "token",
 }
 
@@ -71,6 +88,8 @@ USER_ERRORS = (
     allowlist.AllowlistError,
     override.OverrideError,
     langs.LangError,
+    packages.PackageError,
+    dockerfile.DockerfileError,
     ComposeError,
     yamlio.YamlError,
 )
@@ -567,8 +586,101 @@ def cmd_languages(app: App, args: argparse.Namespace) -> int:
         app.out(f"{mark}  {lang['key']:<17} {lang['name']:<24} {opens}, {brings}")
 
     if state["rebuildNeeded"]:
-        app.out(f"\nthe image was built with other languages: hardcode -p {args.profile} rebuild")
+        app.out("\n" + _image_words(state, args.profile))
 
+    return 0
+
+
+# What each reason for a rebuild says (see Ops._rebuild_reasons).
+REBUILD_REASONS = {
+    "languages": "the languages or tools changed",
+    "packages": "the Ubuntu packages changed",
+    "dockerfile": "the Dockerfile steps changed",
+}
+
+
+def _image_words(state: dict, profile: str) -> str:
+    """
+    Whether the profile's image has what the profile says, in words, with
+    the command that rebuilds it when it hasn't. *state* has the profile's
+    ``image``, ``rebuildNeeded`` and ``rebuildReasons``, as ``Ops.state``
+    and ``Ops.image_steps`` give them.
+    """
+    if state["image"]["built"] is False:
+        return "no image yet: the first start builds it"
+    if state["rebuildNeeded"] is None:
+        return f"whether the image is up to date can't be told: hardcode -p {profile} rebuild builds it again"
+    if not state["rebuildNeeded"]:
+        return "the image is up to date"
+
+    why = "; ".join(REBUILD_REASONS[reason] for reason in state["rebuildReasons"])
+    return f"a rebuild is due ({why}): hardcode -p {profile} rebuild"
+
+
+def cmd_packages(app: App, args: argparse.Namespace) -> int:
+    """
+    The profile's own Ubuntu packages, and whether its image has them.
+    """
+    state = app.ops(args.profile).state()
+
+    if app.json_output:
+        payload = {
+            "packages": state["packages"],
+            "image": state["image"]["packages"],
+            "rebuildNeeded": state["rebuildNeeded"],
+            "rebuildReasons": state["rebuildReasons"],
+        }
+        app.out(json.dumps(payload, indent=2))
+        return 0
+
+    if not state["packages"]:
+        app.out("no Ubuntu packages of its own: hardcode package add NAME... adds some")
+
+    for name in state["packages"]:
+        app.out(name)
+
+    if state["rebuildNeeded"]:
+        app.out("\n" + _image_words(state, args.profile))
+
+    return 0
+
+
+def cmd_package(app: App, args: argparse.Namespace) -> int:
+    """
+    package add and package remove: one or more names, which the image
+    installs (or loses) at its next rebuild.
+    """
+    if args.action == "add":
+        return _for_each(app, args, lambda ops: ops.add_packages(args.names))
+
+    return _for_each(app, args, lambda ops: ops.remove_packages(args.names))
+
+
+def cmd_image(app: App, args: argparse.Namespace) -> int:
+    """
+    The profile's own Dockerfile steps: where they are, and whether a
+    rebuild is due. With ``save``, write them: the app's Image page does,
+    and on the command line the file is edited as it is.
+    """
+    if args.action == "save":
+        if args.text is None:
+            raise CommandError("image save needs the Dockerfile's text: hardcode image save -- TEXT")
+
+        return _for_each(app, args, lambda ops: ops.save_image_steps(args.text))
+
+    steps = app.ops(args.profile).image_steps()
+
+    if app.json_output:
+        app.out(json.dumps(steps, indent=2))
+        return 0
+
+    if steps["exists"]:
+        app.out(f"Dockerfile steps: {steps['path']}")
+        app.out(f"built FROM hardcode (HardCode's image); the files they COPY go in {steps['folder']}")
+    else:
+        app.out(f"Dockerfile steps: none: write them in {steps['path']}, starting FROM hardcode")
+
+    app.out(_image_words(steps, args.profile))
     return 0
 
 
@@ -807,10 +919,13 @@ def cmd_show(app: App, args: argparse.Namespace) -> int:
     ]
     languages = [lang["key"] for lang in state["langs"] if lang["enabled"]]
     extensions = [row["id"] for row in state["extensions"] if row["enabled"]]
-    rebuild = "  (the image has others: hardcode rebuild)" if state["rebuildNeeded"] else ""
+    steps = state["dockerfile"]["path"] if state["dockerfile"]["exists"] else "none (HardCode's image as it is)"
 
     app.out(f"profile {state['profile']}  (VS Code port {state['vscodePort']})")
-    app.out("languages: " + (", ".join(languages) or "none") + rebuild)
+    app.out("languages: " + (", ".join(languages) or "none"))
+    app.out("packages:  " + (" ".join(state["packages"]) or "none"))
+    app.out(f"dockerfile: {steps}")
+    app.out(f"image:     {_image_words(state, state['profile'])}")
     app.out(f"extensions: {len(extensions)}")
     app.out(f"allowlist: {enabled} entries enabled, {disabled} disabled")
     app.out("forwards:  " + (", ".join(forwards) or "none"))
@@ -870,7 +985,7 @@ def _shared_options(parser: argparse.ArgumentParser, suppress: bool) -> None:
         action="store_true",
         default=all_default,
         help="act on every profile (allow, deny, allowlist, lan, reload, mount, unmount, enable, disable, rebuild, "
-        "docker)",
+        "docker, extension, package, token)",
     )
     parser.add_argument("--json", action="store_true", default=json_default, help="machine-readable output")
     parser.add_argument(
@@ -1033,6 +1148,24 @@ def _add_image_commands(sub) -> None:
     extension.add_argument("id", help="publisher.name, as the Marketplace shows it")
     extension.set_defaults(func=cmd_extension)
 
+    sub.add_parser("packages", help="the profile's own Ubuntu packages").set_defaults(func=cmd_packages)
+
+    package = sub.add_parser(
+        "package",
+        help="add or remove Ubuntu packages of the profile's own (the image has them after its next rebuild)",
+    )
+    package.add_argument("action", choices=["add", "remove"])
+    package.add_argument("names", nargs="+", metavar="NAME", help="a name in Ubuntu's archive: postgresql-client")
+    package.set_defaults(func=cmd_package)
+
+    image = sub.add_parser(
+        "image",
+        help="the profile's own Dockerfile steps (FROM hardcode) and whether a rebuild is due; save writes them",
+    )
+    image.add_argument("action", nargs="?", choices=["save"])
+    image.add_argument("text", nargs="?", help="with save: the Dockerfile's text, after --")
+    image.set_defaults(func=cmd_image)
+
     docker = sub.add_parser(
         "docker", help="the Docker daemon beside the VS Code container: on, or off for a harder sandbox"
     )
@@ -1042,7 +1175,7 @@ def _add_image_commands(sub) -> None:
     rebuild = sub.add_parser("rebuild", help="rebuild the VS Code image and recreate the container")
     rebuild.set_defaults(func=cmd_rebuild)
 
-    show = sub.add_parser("show", help="the profile's allowlist, forwards, mounts and languages")
+    show = sub.add_parser("show", help="the profile's allowlist, forwards, mounts, languages, packages and image")
     show.set_defaults(func=cmd_show)
 
 

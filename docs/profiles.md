@@ -156,13 +156,14 @@ profiles/
     .env                     what differs from the default settings: port, network, languages, your own
     allowlist.txt            its own allowlist entries, and the provided ones it switches off
     compose.override.yaml    its shared folders and port forwards, and any other Compose changes of yours
+    image/Dockerfile         its own Dockerfile steps, when it has any, with the files they copy beside it
     proxy-allowlist.txt      what the proxy is given: allowlist.txt with HardCode's entries (written by hardcode)
     proxy-allowlist.applied  a digest of what the running proxy last loaded (written by hardcode)
     vscode-extensions.txt    the VS Code extensions the sandbox keeps installed (written by hardcode)
     .lock                    held while a command changes the profile
 ```
 
-The first three are yours, to edit by hand as well as through the app and
+The first four are yours, to edit by hand as well as through the app and
 the command. The rest are written by HardCode: don't edit them. If
 `.env` or `allowlist.txt` goes missing, the next command restores it; a
 restored `.env` gets a port and network of its own, as a new profile does,
@@ -233,6 +234,7 @@ Every setting a profile's `.env` can hold, with its default:
 |---|---|---|
 | `INSTALL_<LANG>` | off | The profile's languages and tools ([the list](vscode-image.md#languages-and-tools)): what the image installs, which allowlist entries HardCode provides, which extensions VS Code gets. Exactly `true` is on; anything else (unset, `True`, `yes`) is off, so a language a newer HardCode adds stays off in the profiles you have. `hardcode enable` and `disable` write these. |
 | `VSCODE_EXTENSIONS` | empty | VS Code extensions of the profile's own, beside its languages' (`publisher.name`, comma-separated). Only from publishers whose domain the Marketplace has verified. `hardcode extension add` and `remove` write it. |
+| `VSCODE_PACKAGES` | empty | Ubuntu packages of the profile's own, separated by spaces. A rebuild installs them. `hardcode package add` and `remove` write it. |
 | `VSCODE_BIND` | `127.0.0.1` | The address VS Code (and every port forward) is published on. Keep it local unless you put HTTPS and a sign-in in front. |
 | `VSCODE_PORT` | `11111` | VS Code's port on your computer. Each profile needs its own; a new profile gets the lowest free one from 11111. `hardcode port <number>` (or *change* on the app's Overview) moves it. |
 | `VSCODE_CONNECTION_TOKEN` | empty | A fixed token for VS Code. Empty: one is generated at the first start and kept in the home folder. |
