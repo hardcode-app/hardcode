@@ -89,9 +89,12 @@ code {
   font-size: 12.5px;
 }
 
+/* One row, the window's height: a view taller than the window scrolls on
+   its own, and the console and the sidebar's foot stay where they are. */
 .app {
   display: grid;
   grid-template-columns: 232px 1fr;
+  grid-template-rows: minmax(0, 1fr);
   height: 100vh;
 }
 
@@ -103,6 +106,7 @@ code {
   flex-direction: column;
   padding: 18px 14px;
   gap: 18px;
+  overflow-y: auto;
 }
 
 .brand {
