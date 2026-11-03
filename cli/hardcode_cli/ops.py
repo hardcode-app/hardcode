@@ -164,11 +164,13 @@ class Ops:
         sleep: Callable[[float], None] = time.sleep,
         warn: Callable[[str], None] = _print_warning,
         resolve: lan.Resolver = lan.resolve,
+        this_computer: lan.ThisComputer = lan.is_this_computer,
     ):
         self.root = root
         self.profile = profile
         self.warn = warn
         self.resolve = resolve
+        self.this_computer = this_computer
         self.compose = Compose(profile, runner=runner, docker=docker, sleep=sleep)
 
     # -- helpers --------------------------------------------------------------
@@ -337,9 +339,22 @@ class Ops:
             return False, message, None
 
         path.write_text(after, encoding="utf-8")
-        profiles.write_proxy_allowlist(self.profile)
+        self._write_proxy_allowlist()
 
         return True, message, self.reload_allowlist()
+
+    def _write_proxy_allowlist(self) -> tuple[str, str]:
+        """
+        Write the allowlist the proxy is given (``profiles.write_proxy_allowlist``):
+        its text before and after. A pin written by hand to one of this
+        computer's own addresses is left out, and said so, as a name that
+        moved is.
+        """
+        return profiles.write_proxy_allowlist(
+            self.profile,
+            this_computer=self.this_computer,
+            warn=lambda line: self.warn(f"on your network: {line}"),
+        )
 
     def allow(
         self,
@@ -358,18 +373,22 @@ class Ops:
         when *confirm* (asked with the name and the address) says yes, and
         in the same change. Otherwise the message says how, and the result's
         ``data["lan"]`` names the name and the address, for the app to ask.
+
+        An address no name may reach (this computer's, or one in the
+        sandbox's own network) is never offered, nor asked about: the
+        message says why the proxy refuses the name there.
         """
         # Only a valid entry's name is looked up: a refused one never leaves.
         valid = allowlist.validate(allowlist.canonical(entry, flag), flag) is None
         name = allowlist.pin_name(entry, flag) if valid else None
 
-        offer = self._lan_offer(name)
+        offer, refused = self._lan_offer(name)
         pin = offer is not None and (lan_ok or (confirm is not None and confirm(*offer)))
 
         def edit(text: str) -> tuple[str, str]:
             after, message = allowlist.allow(text, entry, flag, self._languages())
             if pin:
-                after, pinned = allowlist.add_pin(after, offer[0], offer[1], self._internal_ranges())
+                after, pinned = allowlist.add_pin(after, offer[0], offer[1], self._internal_ranges(), self._devnet())
                 message = f"{message}; {pinned}"
             return after, message
 
@@ -384,6 +403,8 @@ class Ops:
                     f"{message}; {name} resolves to {address}, on your network, where the proxy refuses it: "
                     f"hardcode lan add {name} {address} lets it reach that address"
                 )
+        elif refused:
+            message = f"{message}; {refused}"
         elif lan_ok:
             message = f"{message}; {self._why_no_offer(name, entry)}"
 
@@ -429,28 +450,63 @@ class Ops:
 
     def _internal_ranges(self) -> list[str]:
         """
-        The profile's internal ranges: ``EGRESS_INTERNAL_RANGES``, else the
-        proxy's default ones.
+        The profile's internal ranges (``profiles.internal_ranges``).
         """
-        return lan.internal_ranges(envfile.read(self.profile.env_file).get("EGRESS_INTERNAL_RANGES", ""))
+        return profiles.internal_ranges(self.profile)
+
+    def _devnet(self) -> list[str]:
+        """
+        The sandbox's own network (``profiles.devnet``): no name may be
+        pinned into it.
+        """
+        return profiles.devnet(self.profile)
 
     def pins(self) -> list[allowlist.Pin]:
         """
         The names the profile lets reach your network, as its allowlist has them.
         """
         text = self.profile.allowlist_file.read_text(encoding="utf-8")
-        return allowlist.pins(text, self._internal_ranges())
+        return allowlist.pins(text, self._internal_ranges(), self._devnet())
 
-    def _lan_offer(self, name: Optional[str]) -> Optional[tuple[str, str]]:
+    def _pinnable(self, addresses: list[str]) -> Optional[str]:
         """
-        *name* and the address on your network it resolves to, when it
-        resolves to one and isn't on your network yet; ``None`` otherwise.
+        The first of *addresses* a name may be pinned to in this profile, on
+        this computer (``lan.pinnable``); ``None`` when there is none.
+        """
+        return lan.pinnable(addresses, self._internal_ranges(), self._devnet(), self.this_computer)
+
+    def _refused_inside(self, name: str, addresses: list[str]) -> str:
+        """
+        When none of *addresses* (what *name* resolves to) may be pinned but
+        one is inside the profile's internal ranges, where the proxy refuses
+        the name: what it resolves to there, and why it can't be pinned
+        (``lan.refusal``). ``""`` otherwise.
+        """
+        inside = [address for address in addresses if lan.in_ranges(address, self._internal_ranges())]
+        if not inside:
+            return ""
+
+        address = lan.canonical_address(inside[0])
+        why = lan.refusal(address, self._internal_ranges(), self._devnet(), self.this_computer)
+        return f"{name} resolves to {address}, and {why}"
+
+    def _lan_offer(self, name: Optional[str]) -> tuple[Optional[tuple[str, str]], str]:
+        """
+        What allowing *name* offers on your network, when it isn't on it
+        yet: *name* and the address there it resolves to and may be pinned
+        to, or ``None``; and when there is none but it resolves inside the
+        profile's internal ranges, why not (``_refused_inside``), else ``""``.
         """
         if not name or any(pin.name == name for pin in self.pins()):
-            return None
+            return None, ""
 
-        address = lan.pinnable(self.resolve(name), self._internal_ranges())
-        return (name, address) if address else None
+        resolves = self.resolve(name)
+
+        address = self._pinnable(resolves)
+        if address:
+            return (name, address), ""
+
+        return None, self._refused_inside(name, resolves)
 
     def _why_no_offer(self, name: Optional[str], entry: str) -> str:
         """
@@ -468,7 +524,11 @@ class Ops:
         The names on your network, each looked up again: its pin
         (``Pin.as_dict``), what it resolves to now (``resolves``), and its
         ``state``: ``ok`` while that includes its address, ``moved`` when it
-        resolves only elsewhere, ``unresolved`` when it doesn't resolve here.
+        resolves only elsewhere, ``unresolved`` when it doesn't resolve here,
+        and ``this-computer`` for a pin (written by hand) to one of this
+        computer's addresses, which the proxy is never given.
+        A moved name's ``moveTo`` is the address it could be moved to: one
+        it may be pinned to, ``""`` when it resolves to none.
 
         A pin never follows its name: a name that moves looks the same as
         one someone pointed somewhere else.
@@ -481,8 +541,11 @@ class Ops:
             state = "ok" if pin.address in resolves else "moved"
             if not resolves:
                 state = "unresolved"
+            if not pin.problem and self.this_computer(pin.address):
+                state = "this-computer"
 
-            states.append({**pin.as_dict(), "resolves": resolves, "state": state})
+            move_to = (self._pinnable(resolves) or "") if state == "moved" else ""
+            states.append({**pin.as_dict(), "resolves": resolves, "state": state, "moveTo": move_to})
 
         return states
 
@@ -497,10 +560,18 @@ class Ops:
                 continue
 
             now = ", ".join(item["resolves"])
-            lines.append(
-                f"{item['name']} now resolves to {now}, not {item['address']}: it still reaches only "
-                f"{item['address']}; if the move is right, hardcode lan add {item['name']} {item['resolves'][0]}"
+            line = (
+                f"{item['name']} now resolves to {now}, not {item['address']}: it still reaches only {item['address']}"
             )
+
+            # Only an address a name may be pinned to is offered.
+            if item["moveTo"]:
+                line = f"{line}; if the move is right, hardcode lan add {item['name']} {item['moveTo']}"
+            else:
+                refused = self._refused_inside(item["name"], item["resolves"])
+                line = f"{line}; {refused}" if refused else line
+
+            lines.append(line)
 
         return lines
 
@@ -509,19 +580,32 @@ class Ops:
         Let *entry*'s name (its host, without a path or a port) reach
         *address* on your network; without an address, the one on your
         network it resolves to. A name on your network already is moved.
+
+        This computer's own addresses are refused, as are the sandbox's own
+        network's (the profile's ``DEVNET_SUBNET``): HardCode never lets a
+        sandbox reach either.
         """
         name = _pinned_name(entry)
 
         if not address:
-            address = lan.pinnable(self.resolve(name), self._internal_ranges()) or ""
+            resolves = self.resolve(name)
+            address = self._pinnable(resolves) or ""
+
+            refused = "" if address else self._refused_inside(name, resolves)
+            if refused:
+                raise allowlist.AllowlistError(refused)
         if not address:
             raise allowlist.AllowlistError(
                 f"{name} doesn't resolve to an address on your network from here; "
                 f"name the address: hardcode lan add {name} ADDRESS"
             )
 
+        problem = lan.refusal(address, self._internal_ranges(), self._devnet(), self.this_computer)
+        if problem:
+            raise allowlist.AllowlistError(problem)
+
         changed, message, applied = self._edit_allowlist(
-            lambda text: allowlist.add_pin(text, name, address, self._internal_ranges()),
+            lambda text: allowlist.add_pin(text, name, address, self._internal_ranges(), self._devnet()),
         )
 
         if changed and not allowlist.entry_ports(self.allowlist_entries(), name):
@@ -542,19 +626,23 @@ class Ops:
         """
         What *entry*'s name resolves to from here, and whether it could reach
         your network: ``name``, ``resolves``, ``address`` (the one on your
-        network it would be pinned to, or ``""``) and ``pinned`` (the address
-        it is pinned to already, or ``""``).
+        network it would be pinned to, or ``""``), ``pinned`` (the address
+        it is pinned to already, or ``""``) and ``refused`` (when it resolves
+        inside but to no address it may be pinned to, such as this
+        computer's, why; ``""`` otherwise).
         """
         name = _pinned_name(entry)
 
         resolves = self.resolve(name)
         pinned = next((pin.address for pin in self.pins() if pin.name == name), "")
+        address = self._pinnable(resolves) or ""
 
         return {
             "name": name,
             "resolves": resolves,
-            "address": lan.pinnable(resolves, self._internal_ranges()) or "",
+            "address": address,
             "pinned": pinned,
+            "refused": "" if address else self._refused_inside(name, resolves),
         }
 
     def update_proxy_allowlist(self) -> list[str]:
@@ -565,7 +653,7 @@ class Ops:
         before. A newer HardCode's provided entries arrive this way, at the
         next start or reload. The running proxy isn't touched.
         """
-        before, after = profiles.write_proxy_allowlist(self.profile)
+        before, after = self._write_proxy_allowlist()
         if not before:
             return []
 

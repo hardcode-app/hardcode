@@ -499,7 +499,7 @@ class ProvidedEditTests(unittest.TestCase):
 class GithubRepositoryTests(unittest.TestCase):
     """
     ``github:OWNER/REPO``: one GitHub repository's two entries at once, as
-    allow and deny take it.
+    allow, deny and remove take it.
     """
 
     def test_it_stands_for_gits_address_and_the_api(self):
@@ -527,6 +527,28 @@ class GithubRepositoryTests(unittest.TestCase):
         off, message = allowlist.switch(text, "github:me/app", False, False, [])
         self.assertEqual(message, "disabled github.com/me/app.git; disabled api.github.com/repos/me/app")
         self.assertFalse([item for item in allowlist.parse(off) if item.enabled])
+
+    def test_removing_deletes_both(self):
+        text, _ = allowlist.allow("", "github:me/app", "rw", [])
+        text, _ = allowlist.allow(text, "pypi.org", "", [])
+
+        removed, message = allowlist.delete(text, "github:Me/App", False, [])
+
+        self.assertEqual(message, "removed github.com/me/app.git; removed api.github.com/repos/me/app")
+        self.assertEqual([item.entry for item in allowlist.parse(removed)], ["pypi.org"])
+        self.assertNotIn("github.com/me/app", removed)
+
+        again, message = allowlist.delete(removed, "github:me/app", False, [])
+        self.assertEqual(again, removed)
+        self.assertEqual(
+            message,
+            "'github.com/me/app.git' is not in the allowlist; 'api.github.com/repos/me/app' is not in the allowlist",
+        )
+
+        with self.assertRaisesRegex(AllowlistError, "over HTTPS"):
+            allowlist.delete(text, "github:me/app", True, [])
+        with self.assertRaisesRegex(AllowlistError, "one repository, as OWNER/REPO"):
+            allowlist.delete(text, "github:me", False, [])
 
     def test_only_one_repository_over_https(self):
         for bad in ("github:me", "github:me/app/more", "github:-me/app", "github:me/..", "github:me/.git", "github:"):
@@ -587,9 +609,34 @@ lan registry.example.com fd00::10
         self.assertIn("isn't on your network", narrowed[0].problem)
         self.assertEqual(narrowed[1].problem, "")
 
+    def test_the_profiles_own_ranges_and_devnet_decide_not_the_defaults(self):
+        text = "lan old.example.com 172.31.253.7\nlan doc.example.com 203.0.113.5\nlan box.example.com 172.31.250.9\n"
+
+        found = allowlist.pins(text, ["172.16.0.0/12", "203.0.113.0/24"], ["172.31.250.0/24"])
+
+        self.assertEqual(
+            [(pin.name, pin.problem) for pin in found],
+            [
+                ("old.example.com", ""),
+                ("doc.example.com", ""),
+                (
+                    "box.example.com",
+                    "172.31.250.9 is in the sandbox's own network (172.31.250.0/24): "
+                    "HardCode never lets a sandbox reach it",
+                ),
+            ],
+        )
+        self.assertIn("sandbox's own network (172.31.253.0/24)", allowlist.pins(text)[0].problem, "by default")
+
+        with self.assertRaisesRegex(AllowlistError, "sandbox's own network"):
+            allowlist.add_pin("", "box.example.com", "172.31.250.9", None, ["172.31.250.0/24"])
+        added, _ = allowlist.add_pin("", "old.example.com", "172.31.253.7", None, ["172.31.250.0/24"])
+        self.assertIn("lan old.example.com 172.31.253.7", added)
+
     def test_a_name_pinned_twice_or_badly_is_a_problem(self):
         text = (
             "lan a.example.com 10.0.0.1\nlan a.example.com 10.0.0.2\nlan b.example.com\nlan .c.example.com 10.0.0.3\n"
+            "lan d.example.com 10.0.0.4 extra  # a comment\n"
         )
         problems = [pin.problem for pin in allowlist.pins(text)]
 
@@ -597,6 +644,7 @@ lan registry.example.com fd00::10
         self.assertIn("already on your network", problems[1])
         self.assertIn("give its address too", problems[2])
         self.assertIn("only an exact name", problems[3])
+        self.assertEqual(problems[4], "write it as: lan <name> <address>")
 
     def test_add_pin_makes_its_section_and_moves_a_name_in_place(self):
         added, message = allowlist.add_pin("example.com\n", "gitlab.example.com", "192.168.71.200")

@@ -1743,7 +1743,10 @@ function allowlistRows(entries) {
 
 /**
  * A name on your network's state, in words: invalid (the proxy won't start
- * with it), still checking, ok, or that it now resolves elsewhere.
+ * with it), still checking, left out (it's this computer), ok, or that it
+ * now resolves elsewhere, with the
+ * address it could move to (`moved`), when the CLI found one it may reach:
+ * never this computer's, nor one in the sandbox's own network.
  */
 function lanStatus(pin, checked) {
   if (pin.problem) {
@@ -1753,10 +1756,13 @@ function lanStatus(pin, checked) {
     return { text: 'checking…', moved: '' };
   }
   if (checked.state === 'moved') {
-    return { text: `now resolves to ${checked.resolves.join(', ')}`, moved: checked.resolves[0] };
+    return { text: `now resolves to ${checked.resolves.join(', ')}`, moved: checked.moveTo || '' };
   }
   if (checked.state === 'unresolved') {
     return { text: "ok (doesn't resolve from here)", moved: '' };
+  }
+  if (checked.state === 'this-computer') {
+    return { text: 'left out: this computer, which a sandbox never reaches', moved: '' };
   }
   return { text: 'ok', moved: '' };
 }
@@ -2125,6 +2131,9 @@ function bindBlocked() {
         toast(`${name} is already on your network, at ${found.pinned}`);
       } else if (found.address) {
         await lanOffer(name, found.address);
+      } else if (found.refused) {
+        // This computer, or the sandbox's own network: refused, never asked.
+        toast(found.refused, 'error');
       } else {
         toast(`${name} doesn't resolve to an address on your network from here`, 'error');
       }

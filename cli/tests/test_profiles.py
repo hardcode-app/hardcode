@@ -8,7 +8,7 @@ import sys
 import unittest
 from pathlib import Path
 
-from hardcode_cli import dockerfile, envfile, override, profiles, yamlio
+from hardcode_cli import allowlist, dockerfile, envfile, override, profiles, yamlio
 from hardcode_cli.profiles import Profile, ProfileError
 
 from .helpers import REPO, HomeTestCase
@@ -114,6 +114,41 @@ class ProfileTests(HomeTestCase):
         self.assertIn("\nhand.example\n", after)
         if os.name != "nt":
             self.assertEqual(default.proxy_allowlist_file.stat().st_mode & 0o777, 0o644)
+
+    def test_a_pin_to_this_computer_never_reaches_the_proxy(self):
+        self.make("default")
+        default = self.profile("default")
+        default.allowlist_file.write_text(
+            default.allowlist_file.read_text(encoding="utf-8")
+            + "nas.example.com\nlan nas.example.com 192.168.1.5\n"
+            + "lan gitlab.example.com 192.168.71.200\nlan bad.example.com 127.0.0.1\n",
+            encoding="utf-8",
+        )
+        tested, warned = [], []
+
+        def this_computer(address):
+            tested.append(address)
+            return address in ("192.168.1.5", "127.0.0.1")
+
+        for _ in range(2):
+            _, after = profiles.write_proxy_allowlist(default, this_computer=this_computer, warn=warned.append)
+
+        given = [item for item in allowlist.parse(after) if item.lan_line]
+        self.assertEqual(
+            [(item.entry, item.address) for item in given],
+            [("gitlab.example.com", "192.168.71.200"), ("bad.example.com", "127.0.0.1")],
+        )
+        self.assertIn("\nnas.example.com\n", after, "the name's entry stays")
+
+        # Said at every write; and a pin the proxy refuses anyway isn't tested.
+        self.assertEqual(
+            warned,
+            ["allowlist.txt pins nas.example.com to 192.168.1.5, which is this computer: left out"] * 2,
+        )
+        self.assertNotIn("127.0.0.1", tested)
+        self.assertIn(
+            "lan nas.example.com 192.168.1.5", default.allowlist_file.read_text(encoding="utf-8"), "kept there"
+        )
 
     def test_a_restored_env_gets_a_port_and_subnet_of_its_own(self):
         self.make("default")

@@ -42,6 +42,10 @@ const state = {
   prefill: '', // the allowlist form's entry, from Blocked traffic
   prefillFlag: '', // and its access: ssh for a refused SSH tunnel
   lanPrefill: { name: '', address: '' }, // the On your network form, from Blocked traffic or a moved name
+  // The On your network card's last Check: the profile it was for, and each
+  // name's {address, resolves, state} then. The ten-second refresh never
+  // looks names up, so this is kept apart from the profile it replaces.
+  lanChecks: { profile: '', pins: {} },
   // The ten-second refresh's interval, while signed in.
   poller: null,
 };
@@ -571,26 +575,66 @@ function allowlistTab(profile) {
 }
 
 /**
+ * A pin as the last Check found it: its state and what its name resolved
+ * to, when that Check was for this profile and the pin still has the
+ * address it had then; "unchecked" otherwise, as the profile gives it.
+ */
+function checkedPin(profileName, pin) {
+  const checked = state.lanChecks.profile === profileName ? state.lanChecks.pins[pin.name] : null;
+  if (!checked || checked.address !== pin.address) {
+    return pin;
+  }
+
+  return { ...pin, resolves: checked.resolves, state: checked.state };
+}
+
+/** A pin's state on the On your network card, in words. */
+function lanStatus(pin) {
+  if (pin.problem) {
+    return `invalid: ${pin.problem}`;
+  }
+  if (pin.ignored) {
+    return `ignored: ${pin.ignored}`;
+  }
+  if (pin.state === 'unchecked') {
+    return 'not checked';
+  }
+  if (pin.state === 'moved') {
+    return `now resolves to ${pin.resolves.join(', ')}`;
+  }
+  if (pin.state === 'unresolved') {
+    return "ok (doesn't resolve from the admin)";
+  }
+  return 'ok';
+}
+
+/**
+ * Why the operator takes none of this profile's pins, when it doesn't: the
+ * chart doesn't switch them on, or doesn't list the cluster's own ranges.
+ */
+function lanOff(view) {
+  if (!view.off) {
+    return '';
+  }
+  if (!view.enabled) {
+    return '<div class="callout">This cluster doesn\'t let names reach its network: the operator ignores these until the chart sets <code>profileDefaults.lan.enabled</code>.</div>';
+  }
+  return `<div class="callout">The operator ignores these: ${esc(view.off)}, so that no name can reach the cluster's own API server, pods or nodes.</div>`;
+}
+
+/**
  * The On your network card of the allowlist tab: the names this profile
  * lets reach an address on the network, each with its state, and a form to
  * add one. The admin's pod usually can't see that network, so the address
- * is typed, never looked up. When the chart doesn't take pins, it says so.
+ * is typed, never looked up; the names are looked up only on Check. When
+ * the operator takes no pins, it says why.
  */
 function lanCard(profile) {
   const view = profile.lan;
 
   const rows = view.pins
-    .map((pin) => {
-      let status = 'ok';
-      if (pin.problem) {
-        status = `invalid: ${pin.problem}`;
-      } else if (pin.ignored) {
-        status = `ignored: ${pin.ignored}`;
-      } else if (pin.state === 'moved') {
-        status = `now resolves to ${pin.resolves.join(', ')}`;
-      } else if (pin.state === 'unresolved') {
-        status = "ok (doesn't resolve from the admin)";
-      }
+    .map((listed) => {
+      const pin = checkedPin(profile.name, listed);
 
       // A name that moved keeps its address: the move is filled into the
       // form, for someone to look at and save, never followed.
@@ -601,16 +645,17 @@ function lanCard(profile) {
 
       return (
         `<tr><td class="entry mono">${esc(pin.name)}</td><td class="mono">${esc(pin.address)}</td>` +
-        `<td class="muted small">${esc(status)}</td>` +
+        `<td class="muted small">${esc(lanStatus(pin))}</td>` +
         `<td class="actions">${move}<button class="btn ghost small icon" data-lan-remove="${esc(pin.name)}" title="Remove">✕</button></td></tr>`
       );
     })
     .join('');
 
-  const off = view.enabled
-    ? ''
-    : '<div class="callout">This cluster doesn\'t let names reach its network: the operator ignores these until the chart sets <code>profileDefaults.lan.enabled</code>.</div>';
+  const off = lanOff(view);
   const empty = '<tr><td colspan="4" class="empty">No name of this profile reaches your network.</td></tr>';
+  const check = view.pins.length
+    ? '<button class="btn small" data-act="lan-check" title="Look the names up from the admin, as they resolve now">Check</button>'
+    : '';
 
   return `<div class="card" id="lan-card" style="margin-bottom:14px"><h2>On your network</h2>${off}
       <p class="muted small">The proxy refuses names that point inside your own network. A name listed here may reach the address shown, and nothing else on your network.</p>
@@ -619,7 +664,7 @@ function lanCard(profile) {
         <div class="field"><label>Address</label><input type="text" class="mono" id="lan-address" placeholder="192.168.71.200" value="${esc(state.lanPrefill.address)}"></div>
         <button class="btn" data-act="lan-add">Let it reach that address</button></div>
       <div class="form-error" id="lan-error"></div>
-      <table><thead><tr><th>Name</th><th>Address</th><th>State</th><th></th></tr></thead><tbody>${rows || empty}</tbody></table></div>`;
+      <table><thead><tr><th>Name</th><th>Address</th><th>State</th><th class="actions">${check}</th></tr></thead><tbody>${rows || empty}</tbody></table></div>`;
 }
 
 // Why the proxy refused, when it said, as Blocked traffic shows it.
@@ -1152,6 +1197,24 @@ const actions = {
     state.lanPrefill = { name: '', address: '' };
     await openProfile(state.profile.name);
     toast(answer.message, 'ok');
+  },
+
+  // Look the open profile's names on the network up, which the refresh
+  // never does: the answer fills in each pin's state, and stays until the
+  // next Check or another profile.
+  async 'lan-check'() {
+    const name = state.profile.name;
+    const checked = await call('POST', profilePath('/lan/check'), {});
+
+    const pins = {};
+    for (const pin of checked.pins) {
+      pins[pin.name] = { address: pin.address, resolves: pin.resolves, state: pin.state };
+    }
+    state.lanChecks = { profile: name, pins };
+
+    if (state.view === 'profile' && state.profile && state.profile.name === name) {
+      render();
+    }
   },
 
   async 'refresh-blocked'() {

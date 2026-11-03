@@ -470,7 +470,8 @@ class RenderTests(unittest.TestCase):
 class LanTests(unittest.TestCase):
     """
     Names on the network (a profile's lan lines): off unless the chart says
-    so, and then one egress rule each, to that one address.
+    so and lists the cluster's own ranges, and then one egress rule each, to
+    that one address.
     """
 
     CTX = RenderTests.CTX
@@ -503,6 +504,47 @@ lan pods.example.com 10.244.1.5
         self.assertEqual(len(self.squid_egress(objects)), 2, "the internet and the cluster's DNS, nothing more")
         self.assertNotIn("lan ", self.proxy_allowlist(objects))
         self.assertFalse(manifests.lan_settings(chart_defaults())["enabled"])
+
+    def test_without_the_clusters_ranges_every_pin_is_ignored_as_when_off(self):
+        objects = self.render({"enabled": True, "clusterRanges": []})
+
+        self.assertEqual(len(self.squid_egress(objects)), 2, "no pin gets a way out")
+        self.assertNotIn("\nlan ", self.proxy_allowlist(objects))
+
+        spec = manifests.effective_spec(
+            profile("p", {"allowlist": self.ALLOWLIST}),
+            chart_defaults({"lan": {"enabled": True}}),
+        )
+        self.assertEqual({pin["ignored"] for pin in spec["lan"]["pins"]}, {manifests.LAN_NO_CLUSTER_RANGES})
+        self.assertEqual(manifests.lan_off(spec["lan"]), manifests.LAN_NO_CLUSTER_RANGES)
+        self.assertIn("profileDefaults.lan.clusterRanges first", manifests.LAN_NO_CLUSTER_RANGES)
+
+    def test_the_renderer_gets_the_clusters_ranges_and_no_devnet(self):
+        objects = self.render({"enabled": True, "clusterRanges": ["10.244.0.0/16", "10.96.0.0/12"]})
+        squid = find(objects, "Deployment", "p-squid")["spec"]["template"]["spec"]
+        env = env_of(squid["initContainers"][0])
+
+        self.assertEqual(env["CLUSTER_RANGES"], "10.244.0.0/16 10.96.0.0/12")
+        self.assertEqual(env["DEVNET_SUBNET"], "", "a cluster has no devnet: not Compose's default either")
+
+        # A pin into Compose's default devnet is no problem on a cluster.
+        pins = manifests.effective_pins(
+            "lan box.example.com 172.31.253.7\n",
+            "",
+            {"enabled": True, "clusterRanges": ["10.244.0.0/16"]},
+        )
+        self.assertEqual([(pin["problem"], pin["ignored"]) for pin in pins], [("", "")])
+
+    def test_the_operator_never_tests_for_this_computer(self):
+        # The bind test (a socket bound to the address) would test the
+        # operator's own pod, not anyone's computer: it is the command's.
+        allowlist = self.ALLOWLIST + "lan nas.example.com 192.168.1.5\n"
+
+        with mock.patch("socket.socket", side_effect=AssertionError("a bind test")) as tested:
+            objects = self.render({"enabled": True, "clusterRanges": ["10.244.0.0/16"]}, allowlist)
+
+        tested.assert_not_called()
+        self.assertIn("\nlan nas.example.com 192.168.1.5\n", self.proxy_allowlist(objects))
 
     def test_a_profile_cant_switch_it_on(self):
         spec = manifests.effective_spec(
@@ -554,7 +596,7 @@ lan pods.example.com 10.244.1.5
                     "internalRanges": "10.0.0.0/8",
                 },
             ),
-            chart_defaults({"lan": {"enabled": True}}),
+            chart_defaults({"lan": {"enabled": True, "clusterRanges": ["10.244.0.0/16"]}}),
             self.CTX,
         )
 

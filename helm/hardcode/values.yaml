@@ -115,8 +115,11 @@ profileDefaults:
   # egress rule for squid to that address alone (/32 or /128), on the port
   # of the name's ssh entry, or 80 and 443. The operator can't read the
   # cluster's own pod and service ranges with its permissions: list them in
-  # clusterRanges, and it refuses pins into them. Only the chart decides;
-  # a profile can't switch this on.
+  # clusterRanges (e.g. [10.244.0.0/16, 10.96.0.0/12]). It ignores pins into
+  # them, and squid refuses every request into them; until they are listed,
+  # it ignores every pin, as when this is off, since a pin could otherwise
+  # reach the API server, a pod or a node. Only the chart decides; a profile
+  # can't switch this on.
   lan:
     enabled: false
     clusterRanges: []

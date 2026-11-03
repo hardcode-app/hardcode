@@ -43,7 +43,7 @@ DEFAULTS = {
     "ingressClassName": "nginx",
     "ingressTLSSecret": "wildcard-code-tls",
     # The cluster takes names on your network, as the chart can say.
-    "lan": {"enabled": True, "clusterRanges": []},
+    "lan": {"enabled": True, "clusterRanges": ["10.244.0.0/16", "10.96.0.0/12"]},
 }
 
 TOKEN = "k3Zb7Qp1xJ9vL2mN8rT4wY6aC0eF5gH"

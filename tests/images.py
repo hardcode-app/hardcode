@@ -216,7 +216,9 @@ def check_github(suite: Suite, scratch: Path) -> None:
     suite.check("only its owner can read it, or its folders", modes == ("0o600", "0o700", "0o700"), str(modes))
 
     link = next((line.strip() for line in first.text.splitlines() if "personal-access-tokens/new" in line), "")
-    filled = all(part in link for part in ("target_name=me", "expires_in=30", "contents=write", "workflows=write"))
+    filled = all(part in link for part in ("target_name=me", "expires_in=30", "contents=write", "pull_requests=write"))
+    # Nothing that reaches the repository's CI, which runs with its secrets.
+    filled = filled and "actions=" not in link and "workflows=" not in link
     suite.check("the link fills GitHub's form in", filled, link)
     suite.check(
         "the check says it's ready, and when the token expires",

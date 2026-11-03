@@ -21,9 +21,13 @@
 #
 # A "lan" line pins an exact name (no wildcard, path or port) to one IPv4 or
 # IPv6 address inside INTERNAL_RANGES, never a loopback, link-local,
-# multicast or 0.0.0.0/8 one (refused_ranges, below), and a name only once.
-# Squid then resolves that name to that address alone, from its hosts file,
-# without asking DNS.
+# multicast or 0.0.0.0/8 one (refused_ranges, below), never one in Docker
+# Desktop's own network (docker_desktop_subnet), never one in the
+# sandbox's own network (DEVNET_SUBNET, and on Kubernetes CLUSTER_RANGES),
+# and a name only once. Squid then resolves that name to that address alone,
+# from its hosts file, without asking DNS. Squid itself refuses every address
+# of the networks it is attached to as well, pinned or not: only it can see
+# them (its entrypoint finds them with squid-own-networks).
 #
 # The same grammar lives in cli/hardcode_cli/allowlist.py, and the rules for a
 # lan line's address in cli/hardcode_cli/lan.py; both are run over
@@ -38,6 +42,8 @@
 #   /out/squid/ssh.conf       squid rules for the ssh entries (included by squid.conf)
 #   /out/squid/pins.conf      the "pinned" ACL, from the lan lines (included by squid.conf)
 #   /out/squid/pins.hosts     the pinned names' addresses, hosts-file style
+#   /out/squid/sandbox.txt    the sandbox's own network, which nothing may reach
+#                             (DEVNET_SUBNET and CLUSTER_RANGES)
 #   /out/squid/clients.txt    who may use the proxy (CLIENT_RANGES)
 #   /out/squid/internal.txt   where an allowlisted name must never point (INTERNAL_RANGES)
 set -euo pipefail
@@ -63,6 +69,21 @@ internal_ranges="${INTERNAL_RANGES:-0.0.0.0/8 10.0.0.0/8 100.64.0.0/10 127.0.0.0
 # addresses written as IPv6, which would get round the IPv4 ones. The same
 # list is in cli/hardcode_cli/lan.py.
 refused_ranges="0.0.0.0/8 127.0.0.0/8 169.254.0.0/16 224.0.0.0/4 ::/128 ::1/128 fe80::/10 ff00::/8 ::ffff:0:0/96"
+
+# Docker Desktop's own network on macOS and Windows, its documented default
+# ("Docker subnet" in its Network settings): its DNS server and proxy are
+# there, and host.docker.internal, the way from a container to the computer
+# itself. No name may be pinned into it. The same range is in
+# cli/hardcode_cli/lan.py.
+docker_desktop_subnet="192.168.65.0/24"
+
+# The sandbox's own network, which no name may be pinned into and no request
+# may reach: Compose's devnet (DEVNET_SUBNET; unset, compose.yaml's default,
+# which cli/hardcode_cli/lan.py has too). The operator sets it empty, since
+# a cluster has no devnet, and gives the cluster's own pod and service
+# ranges instead (CLUSTER_RANGES, the chart's profileDefaults.lan.clusterRanges).
+devnet_subnet="${DEVNET_SUBNET-172.31.253.0/24}"
+cluster_ranges="${CLUSTER_RANGES:-}"
 
 die() {
   echo "allowlist: $*" >&2
@@ -198,6 +219,16 @@ add_pin() {
     ! in_range "$bits" "$range" \
       || die "line $number: $address can't be pinned: loopback, link-local, multicast and 0.0.0.0/8 addresses never can"
   done
+  ! in_range "$bits" "$docker_desktop_subnet" \
+    || die "line $number: $address is in Docker Desktop's own network ($docker_desktop_subnet), its way to this computer: HardCode never lets a sandbox reach it"
+  for range in $devnet_subnet; do
+    ! in_range "$bits" "$range" \
+      || die "line $number: $address is in the sandbox's own network ($range): HardCode never lets a sandbox reach it"
+  done
+  for range in $cluster_ranges; do
+    ! in_range "$bits" "$range" \
+      || die "line $number: $address is in the cluster's own pod or service ranges ($range): HardCode never lets a sandbox reach them"
+  done
   for range in $internal_ranges; do
     if in_range "$bits" "$range"; then
       inside=1
@@ -233,12 +264,15 @@ add_ssh_entry() {
   ssh_hosts+=("$host")
 
   # A tunnel to exactly this host and port, never to an internal address
-  # unless it is the one the host is pinned to, passed through without
-  # inspection (it isn't TLS). Refused, it is reset, and the log says why.
+  # unless it is the one the host is pinned to, and never to the sandbox's
+  # or squid's own networks (never_pin), which no pin exempts. It is passed
+  # through without inspection (it isn't TLS). Refused, it is reset, and the
+  # log says why.
   ssh_rules+=(
     "# $host:$port"
     "acl ssh_${n} dstdomain -n ${host}"
     "acl ssh_${n}_port port ${port}"
+    "http_access deny CONNECT ssh_${n} ssh_${n}_port never_pin refused_internal refuse_tunnel"
     "http_access allow CONNECT ssh_${n} ssh_${n}_port !to_internal"
     "http_access allow CONNECT ssh_${n} ssh_${n}_port pinned"
     "http_access deny CONNECT ssh_${n} ssh_${n}_port refused_internal refuse_tunnel"
@@ -432,6 +466,13 @@ print_or '^$' "${rw[@]}" > "$out/squid/urls-rw.regex.tmp"
 # The ranges are space-separated words: one per line.
 # shellcheck disable=SC2086
 printf '%s\n' $client_ranges > "$out/squid/clients.txt.tmp"
+
+# The sandbox's own network. Squid warns about an empty ACL file, so with
+# none (a cluster that names no ranges of its own), "this network"
+# (0.0.0.0/8), which nothing may reach anyway, stands in.
+sandbox=()
+for range in $devnet_subnet $cluster_ranges; do sandbox+=("$range"); done
+print_or '0.0.0.0/8' "${sandbox[@]}" > "$out/squid/sandbox.txt.tmp"
 # shellcheck disable=SC2086
 printf '%s\n' $internal_ranges > "$out/squid/internal.txt.tmp"
 
@@ -469,7 +510,7 @@ COREFILE
 } > "$out/Corefile.tmp"
 
 for file in squid/hosts.txt squid/urls-ro.regex squid/urls-rw.regex squid/ssh.conf \
-            squid/pins.conf squid/pins.hosts squid/clients.txt squid/internal.txt Corefile; do
+            squid/pins.conf squid/pins.hosts squid/sandbox.txt squid/clients.txt squid/internal.txt Corefile; do
   mv "$out/$file.tmp" "$out/$file"
 done
 

@@ -112,6 +112,8 @@ The proxy refuses names that point inside your network, even allowed
 ones. Add the name to **On your network**: when you allow it, HardCode
 asks, or use `hardcode lan add <name>`
 ([a server on your own network](allowlist.md#a-server-on-your-own-network)).
+A server on your own computer can't be added this way: a sandbox never
+reaches the computer it runs on.
 
 ### `certificate verify failed`, or `unable to get local issuer certificate`
 

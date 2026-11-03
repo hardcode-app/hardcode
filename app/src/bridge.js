@@ -278,20 +278,26 @@
     // -- names on your network: each lets one name reach one address there,
     //    which the proxy refuses otherwise. Never added without asking.
 
-    // Each name, looked up again: {name, address, problem, resolves, state},
-    // state "ok", "moved" (it resolves only elsewhere now) or "unresolved".
+    // Each name, looked up again: {name, address, problem, resolves, state,
+    // moveTo}, state "ok", "moved" (it resolves only elsewhere now) or
+    // "unresolved", and moveTo the address a moved name may move to ("" when
+    // none: never this computer's, nor one in the sandbox's own network).
     async 'lan:list'() {
       return (await cli(['lan'])).lan;
     },
 
-    // What a name resolves to from here: {name, resolves, address, pinned},
-    // address being the one on your network it could be let reach.
+    // What a name resolves to from here: {name, resolves, address, pinned,
+    // refused}, address being the one on your network it could be let reach,
+    // and refused why there is none when it resolves inside (this computer,
+    // the sandbox's own network): such an address is never offered.
     async 'lan:check'(name) {
       return cli(['lan', 'check', '--', name]);
     },
 
     // Ask whether *name* may reach *address*, and add it if so: the new
-    // state, or null when the answer is no.
+    // state, or null when the answer is no. Only an address the CLI offered
+    // is asked about, so the question never calls one it refuses "on your
+    // network".
     async 'lan:offer'(name, address, scope) {
       const confirmed = await dialog.ask(
         `${name} resolves to ${address}, on your network. Let it reach that address? Nothing else on your network opens.`,

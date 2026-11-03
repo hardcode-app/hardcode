@@ -370,9 +370,12 @@ class Docker:
         name: Optional[str] = None,
         detach: bool = False,
         network: Optional[str] = None,
+        networks: Sequence[str] = (),
         aliases: Sequence[str] = (),
         hosts: Sequence[str] = (),
         user: Optional[str] = None,
+        environment: Optional[dict[str, str]] = None,
+        capabilities: Sequence[str] = (),
         volumes: Sequence[str] = (),
         tmpfs: Sequence[str] = (),
         entrypoint: Optional[str] = None,
@@ -385,9 +388,11 @@ class Docker:
 
         *volumes* are ``-v`` values (``host:container[:ro]``), *hosts* are
         ``--add-host`` values (``name:address``), *aliases* are the names the
-        container answers to on *network*. Docker lets a container swap as
-        much again as its *memory*; *memory_swap* equal to it allows none,
-        as in a Kubernetes pod.
+        container answers to on *network*, and *networks* are more networks
+        it is attached to as it starts. *environment* is its variables, and
+        *capabilities* the ones it gets on top of Docker's (``NET_ADMIN``).
+        Docker lets a container swap as much again as its *memory*;
+        *memory_swap* equal to it allows none, as in a Kubernetes pod.
         """
         arguments = ["docker", "run", "--memory", memory]
         if memory_swap is not None:
@@ -403,15 +408,23 @@ class Docker:
             if detach:
                 self._containers.append(name)
 
+        # The aliases are on the first network, which is how Docker takes
+        # them when there are more.
         if network is not None:
             arguments += ["--network", network]
         for alias in aliases:
             arguments += ["--network-alias", alias]
+        for more in networks:
+            arguments += ["--network", f"name={more}"]
         for host in hosts:
             arguments += ["--add-host", host]
 
         if user is not None:
             arguments += ["--user", user]
+        for name, value in (environment or {}).items():
+            arguments += ["--env", f"{name}={value}"]
+        for capability in capabilities:
+            arguments += ["--cap-add", capability]
         for volume in volumes:
             arguments += ["--volume", volume]
         for mount in tmpfs:

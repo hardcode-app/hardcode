@@ -62,7 +62,7 @@ HEADER_WIDTH = len(CUSTOM_HEADER)
 # Where an entry comes from, in a full list: one of the blocks' keys, or this.
 CUSTOM = "custom"
 
-# "github:OWNER/REPO", which allow and deny take for one GitHub repository:
+# "github:OWNER/REPO", which allow, deny and remove take for one GitHub repository:
 # an owner (letters, digits, inner hyphens) and a repository name (letters,
 # digits, ".", "-", "_"), as GitHub allows them. It is never written as it
 # is: it stands for the repository's two entries (github_entries).
@@ -209,11 +209,16 @@ def _numeric_tld(host: str) -> bool:
     return host.rsplit(".", 1)[-1].isdigit()
 
 
-def pin_problem(name: str, address: str, ranges: Optional[Iterable[str]] = None) -> Optional[str]:
+def pin_problem(
+    name: str,
+    address: str,
+    ranges: Optional[Iterable[str]] = None,
+    devnet: Optional[Iterable[str]] = None,
+) -> Optional[str]:
     """
     Why *name* can't be pinned to *address* (a ``lan`` line) in a profile
-    with the internal *ranges* (the default ones when ``None``); ``None``
-    when it can.
+    with the internal *ranges* and the sandbox's own network *devnet* (the
+    default ones when ``None``); ``None`` when it can.
 
     A pin is an exact name: no wildcard, path or port, and never an address.
     """
@@ -228,7 +233,7 @@ def pin_problem(name: str, address: str, ranges: Optional[Iterable[str]] = None)
     if not address.strip():
         return f"give its address too: {LAN} {name} <address>"
 
-    return lan.address_problem(address, ranges)
+    return lan.address_problem(address, ranges, devnet)
 
 
 def pin_name(entry: str, flag: str = "") -> Optional[str]:
@@ -269,8 +274,8 @@ def parse_line(line: str) -> Optional[Entry]:
     A commented-out line counts as a disabled entry only if what follows the
     ``#`` is a valid entry; anything else is just a comment. ``off <entry>
     [ssh]`` is an ``off_line``, and ``lan <name> <address>`` a ``lan_line``,
-    checked against the default internal ranges (``pins`` checks them
-    against a profile's own).
+    checked against the default internal ranges and sandbox network
+    (``pins`` checks them against a profile's own).
     """
     body = line.lstrip()
 
@@ -860,7 +865,18 @@ def delete(text: str, entry: str, ssh: bool, enabled: Iterable[str]) -> tuple[st
 
     A provided entry can't be deleted, since it comes with its block; it can
     be switched off, which the refusal says.
+
+    ``github:OWNER/REPO`` deletes that repository's two entries.
     """
+    repository = _for_each_github_entry(
+        text,
+        entry,
+        "ssh" if ssh else "",
+        lambda now, one: delete(now, one, ssh, enabled),
+    )
+    if repository is not None:
+        return repository
+
     shown = canonical(entry) + (" (ssh)" if ssh else "")
     offered = providers(enabled, entry, ssh)
 
@@ -898,13 +914,20 @@ class Pin:
         return asdict(self)
 
 
-def pins(text: str, ranges: Optional[Iterable[str]] = None) -> list[Pin]:
+def pins(
+    text: str,
+    ranges: Optional[Iterable[str]] = None,
+    devnet: Optional[Iterable[str]] = None,
+) -> list[Pin]:
     """
-    Every ``lan`` line of *text*, checked against the internal *ranges* of
-    the profile (the default ones when ``None``). A name pinned a second
-    time is a problem, as it is for the proxy.
+    Every ``lan`` line of *text*, checked against the internal *ranges* and
+    the sandbox's own network *devnet* of the profile (the default ones when
+    ``None``). A name pinned a second time is a problem, as it is for the
+    proxy.
     """
     ranges = None if ranges is None else list(ranges)
+    devnet = None if devnet is None else list(devnet)
+    lines = _lines(text)
     found: list[Pin] = []
     seen: set[str] = set()
 
@@ -912,8 +935,13 @@ def pins(text: str, ranges: Optional[Iterable[str]] = None) -> list[Pin]:
         if not item.lan_line:
             continue
 
-        problem = pin_problem(item.entry, item.address, ranges) or ""
-        if item.invalid and not problem:
+        # The line is judged here by the profile's own ranges, not by the
+        # default ones parse_line uses (an item's "invalid"): only its words
+        # are counted again.
+        words = lines[item.line].partition("#")[0].split()
+
+        problem = pin_problem(item.entry, item.address, ranges, devnet) or ""
+        if not problem and len(words) != 3:
             problem = f"write it as: {LAN} <name> <address>"
         if not problem and item.entry in seen:
             problem = f"{item.entry} is already on your network, on another line"
@@ -924,10 +952,17 @@ def pins(text: str, ranges: Optional[Iterable[str]] = None) -> list[Pin]:
     return found
 
 
-def add_pin(text: str, name: str, address: str, ranges: Optional[Iterable[str]] = None) -> tuple[str, str]:
+def add_pin(
+    text: str,
+    name: str,
+    address: str,
+    ranges: Optional[Iterable[str]] = None,
+    devnet: Optional[Iterable[str]] = None,
+) -> tuple[str, str]:
     """
     Let *name* reach *address* on your network, in a profile with the
-    internal *ranges*: the new text, and what to say about it.
+    internal *ranges* and the sandbox's own network *devnet*: the new text,
+    and what to say about it.
 
     A name already pinned elsewhere is moved, in place, since a name is
     pinned to one address; the section is added at the end of the file
@@ -935,7 +970,7 @@ def add_pin(text: str, name: str, address: str, ranges: Optional[Iterable[str]] 
     """
     name = name.strip().lower()
 
-    problem = pin_problem(name, address, ranges)
+    problem = pin_problem(name, address, ranges, devnet)
     if problem:
         raise AllowlistError(problem)
 
@@ -943,7 +978,7 @@ def add_pin(text: str, name: str, address: str, ranges: Optional[Iterable[str]] 
     line = f"{LAN} {name} {address}"
     lines = _lines(text)
 
-    existing = [pin for pin in pins(text, ranges) if pin.name == name]
+    existing = [pin for pin in pins(text, ranges, devnet) if pin.name == name]
     if existing and existing[0].address == address and len(existing) == 1:
         return text, f"{name} already reaches {address} on your network"
 

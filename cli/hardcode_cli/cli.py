@@ -122,6 +122,7 @@ class App:
         err: Callable[[str], None] = _print_error,
         ask: Optional[Callable[[str], str]] = None,
         resolve: lan.Resolver = lan.resolve,
+        this_computer: lan.ThisComputer = lan.is_this_computer,
     ):
         self.root = root
         self.home_id = home.home_id(root)
@@ -133,6 +134,7 @@ class App:
         self.sleep = sleep
         self.ask = ask
         self.resolve = resolve
+        self.this_computer = this_computer
         self.results: list[Result] = []
 
     def profile(self, name: str) -> profiles.Profile:
@@ -147,6 +149,7 @@ class App:
             sleep=self.sleep,
             warn=self.err,
             resolve=self.resolve,
+            this_computer=self.this_computer,
         )
 
     def compose(self, name: str) -> Compose:
@@ -863,6 +866,8 @@ def _lan_state(item: dict) -> str:
         return f"now resolves to {', '.join(item['resolves'])}"
     if item["state"] == "unresolved":
         return "ok (doesn't resolve from here)"
+    if item["state"] == "this-computer":
+        return "left out: this computer, which a sandbox never reaches"
 
     return "ok"
 
@@ -876,6 +881,8 @@ def _checked(found: dict) -> str:
         return f"{name} is on your network, at {found['pinned']}"
     if found["address"]:
         return f"{name} resolves to {found['address']}, on your network: hardcode lan add {name} lets it reach it"
+    if found["refused"]:
+        return found["refused"]
     if found["resolves"]:
         return f"{name} resolves to {', '.join(found['resolves'])}, not on your network"
 
@@ -1232,6 +1239,7 @@ def main(
     terminal: Optional[bool] = None,
     env: Optional[dict[str, str]] = None,
     resolve: lan.Resolver = lan.resolve,
+    this_computer: lan.ThisComputer = lan.is_this_computer,
 ) -> int:
     """
     Run the command line in *argv* and return the exit code.
@@ -1239,7 +1247,8 @@ def main(
     The command asks a question (with *ask*, ``input`` by default) only on a
     *terminal* (by default, when its input is one), and never with
     ``--json``. *env* stands in for the environment (the home, sudo) in
-    tests, and *resolve* for this machine's name lookups.
+    tests, *resolve* for this machine's name lookups and *this_computer* for
+    its test of whether an address is its own.
     """
     parser = build_parser()
     args = parser.parse_args(argv)
@@ -1272,6 +1281,7 @@ def main(
             err=err,
             ask=(ask or _ask) if terminal and not args.json else None,
             resolve=resolve,
+            this_computer=this_computer,
         )
         return args.func(app, args)
     except (CommandError, *USER_ERRORS) as error:

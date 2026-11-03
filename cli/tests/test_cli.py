@@ -32,8 +32,10 @@ class CliTestCase(HomeTestCase):
         profiles.create(self.root, "default", languages=list(langs.LANGS))
 
         # Name lookups: a GitLab on your network, and nothing else resolves;
-        # and the questions the command asked.
+        # this computer's own addresses (none, so that nothing depends on
+        # the machine's); and the questions the command asked.
         self.resolver = FakeResolver({"gitlab.example.com": ["192.168.71.200"]})
+        self.this_computer = set()
         self.asked = []
 
     def run_cli(self, *argv, running=False, runner=None, config=None, answers=None):
@@ -56,6 +58,7 @@ class CliTestCase(HomeTestCase):
             ask=lambda question: self.asked.append(question) or replies.pop(0),
             terminal=answers is not None,
             resolve=self.resolver,
+            this_computer=lambda address: address in self.this_computer,
         )
         return code, "\n".join(out), "\n".join(err)
 
@@ -716,6 +719,23 @@ class CliTests(CliTestCase):
         self.assertIn("simulated failure", json.loads(out)["error"])
 
 
+class GithubRepositoryCliTests(CliTestCase):
+    """
+    ``github:OWNER/REPO`` on the command line: allow, deny, enable, disable
+    and remove all take it.
+    """
+
+    def test_allowlist_remove_takes_a_repository(self):
+        self.run_cli("allow", "github:me/app", "rw")
+        self.assertEqual(len(allowlist.find(self.allowlist_of("default"), "github.com/me/app.git")), 1)
+
+        code, out, _ = self.run_cli("allowlist", "remove", "github:me/app")
+
+        self.assertEqual(code, 0)
+        self.assertIn("removed github.com/me/app.git; removed api.github.com/repos/me/app", out)
+        self.assertNotIn("github.com/me/app", self.allowlist_of("default"))
+
+
 class LanCliTests(CliTestCase):
     """
     Names on your network, from the command line: asked about on a terminal,
@@ -805,6 +825,36 @@ class LanCliTests(CliTestCase):
         code, _, err = self.run_cli("lan", "remove", "registry.example.com", "fd00::10")
         self.assertEqual(code, 1)
         self.assertIn("only lan add takes an address", err)
+
+    def test_this_computer_is_refused_before_anything_is_asked(self):
+        self.this_computer = {"192.168.71.200"}
+        refused = "192.168.71.200 is this computer: HardCode never lets a sandbox reach it"
+
+        code, out, _ = self.run_cli("allow", "gitlab.example.com", answers=[])
+        self.assertEqual((code, self.asked), (0, []), "no question")
+        self.assertIn(f"gitlab.example.com resolves to 192.168.71.200, and {refused}", out)
+        self.assertNotIn("on your network", out)
+
+        code, _, err = self.run_cli("lan", "add", "gitlab.example.com", "192.168.71.200")
+        self.assertEqual((code, err), (1, f"error: {refused}"))
+
+        code, out, _ = self.run_cli("lan", "check", "gitlab.example.com")
+        self.assertEqual(out, f"gitlab.example.com resolves to 192.168.71.200, and {refused}")
+        self.assertEqual(self.pins_of(), [])
+
+    def test_a_start_leaves_out_a_hand_written_pin_to_this_computer(self):
+        self.this_computer = {"192.168.1.5"}
+        path = profiles.get(self.root, "default").allowlist_file
+        path.write_text(path.read_text(encoding="utf-8") + "lan nas.example.com 192.168.1.5\n", encoding="utf-8")
+
+        code, _, err = self.run_cli("up")
+
+        self.assertEqual(code, 0)
+        self.assertIn(
+            "on your network: allowlist.txt pins nas.example.com to 192.168.1.5, which is this computer: left out", err
+        )
+        given = profiles.get(self.root, "default").proxy_allowlist_file.read_text(encoding="utf-8")
+        self.assertNotIn("\nlan nas.example.com", given)
 
     def test_a_start_warns_about_a_name_that_moved_and_keeps_its_pin(self):
         self.run_cli("lan", "add", "gitlab.example.com", "192.168.71.199")

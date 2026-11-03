@@ -35,8 +35,12 @@
 #   lan gitlab.example.com 192.168.71.200
 # That name may then reach that address, and nothing else opens. The name
 # still needs its own entry above, and DNS can't move it elsewhere. One
-# exact name and one address on your network per line. `hardcode allow`
-# asks before adding one, and `hardcode lan` lists them.
+# exact name and one address on your network per line, never one of this
+# computer's own addresses (a line written for one is left out), one in the
+# sandbox's own network (DEVNET_SUBNET) or one in Docker Desktop's
+# (192.168.65.0/24): HardCode refuses those, and the proxy refuses every
+# address of the networks it is attached to, whatever a line says.
+# `hardcode allow` asks before adding one, and `hardcode lan` lists them.
 #
 # Apply changes:  `hardcode allow` / `hardcode deny`, `hardcode allowlist
 #                 enable|disable` or the HardCode app do it for you; after

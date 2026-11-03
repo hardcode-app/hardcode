@@ -73,8 +73,10 @@ credential() {
 }
 
 # token_link <owner> <repo>: GitHub's page for a new fine-grained token,
-# filled in by its documented URL parameters: the name, the owner, 30 days
-# and the permissions docs/github.md lists. Only the repository can't be
+# filled in by its documented URL parameters: the name, the owner, 30 days,
+# and only what pushing and pull requests need. Actions and Workflows stay
+# out: they reach the repository's CI, which runs with its secrets
+# (docs/github.md says how to add them). Only the repository can't be
 # filled in; that one is chosen on the page.
 token_link() {
   local name="hardcode: $1/$2"
@@ -85,7 +87,7 @@ token_link() {
     --arg owner "$1" \
     '"name=\($name|@uri)&description=\($description|@uri)&target_name=\($owner|@uri)"')"
 
-  echo "https://github.com/settings/personal-access-tokens/new?${query}&expires_in=30&contents=write&pull_requests=write&actions=write&workflows=write"
+  echo "https://github.com/settings/personal-access-tokens/new?${query}&expires_in=30&contents=write&pull_requests=write"
 }
 
 # save_token <file> <token>: the token in its file, readable by its owner alone.

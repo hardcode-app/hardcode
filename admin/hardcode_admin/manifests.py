@@ -277,7 +277,8 @@ def lan_settings(defaults: Optional[dict] = None) -> dict:
     network (``profileDefaults.lan.enabled``, off unless the chart says
     so), and the ranges no name may be pinned into (``.clusterRanges``):
     the cluster's own pod and service ranges, which the operator can't read
-    for itself with the namespace's permissions only.
+    for itself with the namespace's permissions only. Without them, the
+    operator takes no pin at all (``lan_off``).
 
     Only the chart decides: a profile's spec can't switch it on.
     """
@@ -294,7 +295,28 @@ def lan_settings(defaults: Optional[dict] = None) -> dict:
 
 # Why the operator ignores a pin, when it does.
 LAN_OFF = "this cluster doesn't let names reach its network (the chart's profileDefaults.lan.enabled)"
+LAN_NO_CLUSTER_RANGES = "list the cluster's pod and service ranges in profileDefaults.lan.clusterRanges first"
 LAN_CLUSTER = "inside the cluster's own pod or service ranges (the chart's profileDefaults.lan.clusterRanges)"
+
+# The sandbox's own network that pins are checked against: none, since a
+# cluster has no devnet. The operator gives the renderer an empty
+# DEVNET_SUBNET to match, and the cluster's own ranges (CLUSTER_RANGES).
+CLUSTER_DEVNET: tuple[str, ...] = ()
+
+
+def lan_off(settings: dict) -> str:
+    """
+    Why the operator takes none of a profile's pins on this cluster (with
+    the *settings* of ``lan_settings``): the chart doesn't switch them on,
+    or it doesn't list the cluster's own ranges, without which a pin could
+    reach the API server, a pod or a node. ``""`` when it takes them.
+    """
+    if not settings["enabled"]:
+        return LAN_OFF
+    if not settings["clusterRanges"]:
+        return LAN_NO_CLUSTER_RANGES
+
+    return ""
 
 
 def effective_pins(text: str, internal_ranges: str, settings: dict) -> list[dict]:
@@ -302,19 +324,18 @@ def effective_pins(text: str, internal_ranges: str, settings: dict) -> list[dict
     The names a profile's allowlist (*text*) pins to an address on the
     network, each as ``allowlist.Pin.as_dict`` with ``ignored``: why the
     operator leaves it out of the proxy's rules and the NetworkPolicy
-    (pins are off on this cluster, or the address is in the cluster's own
-    ranges), ``""`` when it doesn't. A pin with a problem of its own
-    (``problem``) is passed on, and the proxy refuses to start with it, as
-    it does with any invalid line.
+    (it takes no pins on this cluster, ``lan_off``, or the address is in
+    the cluster's own ranges), ``""`` when it doesn't. A pin with a problem
+    of its own (``problem``) is passed on, and the proxy refuses to start
+    with it, as it does with any invalid line.
     """
     ranges = lan.internal_ranges(internal_ranges)
+    off = lan_off(settings)
     found = []
 
-    for pin in allowlist.pins(text, ranges):
-        ignored = ""
-        if not settings["enabled"]:
-            ignored = LAN_OFF
-        elif not pin.problem and lan.in_ranges(pin.address, settings["clusterRanges"]):
+    for pin in allowlist.pins(text, ranges, CLUSTER_DEVNET):
+        ignored = off
+        if not ignored and not pin.problem and lan.in_ranges(pin.address, settings["clusterRanges"]):
             ignored = LAN_CLUSTER
 
         found.append({**pin.as_dict(), "ignored": ignored})
@@ -587,6 +608,11 @@ def _render_allowlist_init(build: _Build) -> dict:
             {"name": "EXTRA_ZONES", "value": build.squid_fqdn},
             {"name": "INTERNAL_RANGES", "value": spec["internalRanges"]},
             {"name": "CLIENT_RANGES", "value": spec["clientRanges"]},
+            # A cluster has no devnet (the renderer's default is Compose's);
+            # its own pod and service ranges are what no pin, and no request
+            # through the proxy, may reach.
+            {"name": "DEVNET_SUBNET", "value": " ".join(CLUSTER_DEVNET)},
+            {"name": "CLUSTER_RANGES", "value": " ".join(spec["lan"]["clusterRanges"])},
         ],
         "volumeMounts": [
             {"name": "allowlist", "mountPath": "/config", "readOnly": True},

@@ -8,6 +8,8 @@ signing out.
 """
 
 import base64
+import threading
+import time
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -1104,7 +1106,8 @@ class LanWebTests(unittest.TestCase):
     """
     A profile's On your network card: names let reach an address on the
     network, given with their address, as the admin's pod can't look them
-    up there.
+    up there. The names are looked up only on Check, never on the view the
+    page refreshes every ten seconds.
     """
 
     def setUp(self):
@@ -1113,6 +1116,13 @@ class LanWebTests(unittest.TestCase):
         self.users.add(ROOT, ROOT_PASSWORD, must_enrol=False)
         self.now = [1_700_000_000.0]
         self.looked_up = {"gitlab.example.com": ["192.168.71.200"], "moved.example.com": ["10.0.0.9"]}
+
+        # The names asked about, and those whose lookup hangs until the test
+        # lets it go (as one the cluster's DNS never answers would).
+        self.asked = []
+        self.hanging = set()
+        self.release = threading.Event()
+        self.addCleanup(self.release.set)
 
         self.client = self.signed_in({"image": "img:1", "lan": {"enabled": True, "clusterRanges": ["10.244.0.0/16"]}})
         self.assertEqual(self.client.post("/api/profiles", json={"name": "team-a"}).status_code, 201)
@@ -1128,7 +1138,7 @@ class LanWebTests(unittest.TestCase):
             cookie_secure="never",
             template_allowlist=TEMPLATE,
             clock=lambda: self.now[0],
-            resolve=lambda name: list(self.looked_up.get(name, [])),
+            resolve=self.resolve,
         )
         app.testing = True
         client = app.test_client()
@@ -1140,11 +1150,25 @@ class LanWebTests(unittest.TestCase):
 
         return client
 
+    def resolve(self, name):
+        """
+        The pod's name lookups, from ``looked_up``; one of ``hanging`` waits
+        for ``release`` first.
+        """
+        self.asked.append(name)
+        if name in self.hanging:
+            self.release.wait(10)
+
+        return list(self.looked_up.get(name, []))
+
     def lan(self, **body):
         return self.client.post("/api/profiles/team-a/lan", json=body)
 
     def card(self):
         return self.client.get("/api/profiles/team-a").json["lan"]
+
+    def check(self):
+        return self.client.post("/api/profiles/team-a/lan/check", json={})
 
     def test_add_list_move_and_remove(self):
         added = self.lan(op="add", name="GitLab.example.com", address="192.168.71.200")
@@ -1155,9 +1179,20 @@ class LanWebTests(unittest.TestCase):
         self.lan(op="add", name="moved.example.com", address="10.0.0.8")
         card = self.card()
         self.assertTrue(card["enabled"])
+        self.assertEqual(card["off"], "")
         self.assertEqual(
             [(pin["name"], pin["address"], pin["state"], pin["ignored"]) for pin in card["pins"]],
-            [("gitlab.example.com", "192.168.71.200", "ok", ""), ("moved.example.com", "10.0.0.8", "moved", "")],
+            [
+                ("gitlab.example.com", "192.168.71.200", "unchecked", ""),
+                ("moved.example.com", "10.0.0.8", "unchecked", ""),
+            ],
+        )
+
+        checked = self.check()
+        self.assertEqual(checked.status_code, 200)
+        self.assertEqual(
+            [(pin["name"], pin["state"], pin["resolves"]) for pin in checked.json["pins"]],
+            [("gitlab.example.com", "ok", ["192.168.71.200"]), ("moved.example.com", "moved", ["10.0.0.9"])],
         )
 
         moved = self.lan(op="add", name="moved.example.com", address="10.0.0.9")
@@ -1191,7 +1226,66 @@ class LanWebTests(unittest.TestCase):
         card = self.signed_in({"image": "img:1"}).get("/api/profiles/team-a").json["lan"]
 
         self.assertFalse(card["enabled"])
+        self.assertEqual(card["off"], manifests.LAN_OFF)
         self.assertEqual(card["pins"][0]["ignored"], manifests.LAN_OFF)
+
+    def test_without_the_clusters_ranges_every_pin_is_ignored(self):
+        self.lan(op="add", name="gitlab.example.com", address="192.168.71.200")
+
+        client = self.signed_in({"image": "img:1", "lan": {"enabled": True, "clusterRanges": []}})
+        card = client.get("/api/profiles/team-a").json["lan"]
+
+        self.assertTrue(card["enabled"])
+        self.assertEqual(card["off"], manifests.LAN_NO_CLUSTER_RANGES)
+        self.assertIn(
+            "list the cluster's pod and service ranges in profileDefaults.lan.clusterRanges first", card["off"]
+        )
+        self.assertEqual(card["pins"][0]["ignored"], manifests.LAN_NO_CLUSTER_RANGES)
+
+    def test_the_admin_never_tests_for_this_computer(self):
+        with mock.patch("socket.socket", side_effect=AssertionError("a bind test")) as tested:
+            self.assertEqual(self.lan(op="add", name="nas.example.com", address="192.168.1.5").status_code, 200)
+            self.card()
+            self.check()
+
+        tested.assert_not_called()
+
+    def test_the_polled_view_looks_nothing_up(self):
+        self.lan(op="add", name="gitlab.example.com", address="192.168.71.200")
+
+        for _ in range(3):
+            self.client.get("/api/profiles/team-a", headers=POLL)
+            self.client.get("/api/profiles")
+
+        self.assertEqual(self.asked, [])
+
+    def test_check_answers_by_its_deadline_whatever_a_lookup_does(self):
+        self.lan(op="add", name="gitlab.example.com", address="192.168.71.200")
+        self.lan(op="add", name="hangs.example.com", address="10.0.0.5")
+        self.looked_up["hangs.example.com"] = ["10.0.0.5"]
+        self.hanging.add("hangs.example.com")
+
+        with mock.patch.object(web, "LAN_CHECK_SECONDS", 0.3):
+            started = time.monotonic()
+            checked = self.check()
+            took = time.monotonic() - started
+
+        self.assertEqual(checked.status_code, 200)
+        self.assertLess(took, 3, "the hung lookup didn't hold the request")
+        self.assertEqual(
+            {pin["name"]: (pin["state"], pin["resolves"]) for pin in checked.json["pins"]},
+            {"gitlab.example.com": ("ok", ["192.168.71.200"]), "hangs.example.com": ("unresolved", [])},
+        )
+        self.assertEqual(sorted(self.asked), ["gitlab.example.com", "hangs.example.com"])
+
+    def test_check_is_for_admins_only_and_needs_the_page(self):
+        anonymous = self.signed_in({"image": "img:1"})
+        anonymous.post("/api/logout", json={})
+
+        self.assertEqual(anonymous.post("/api/profiles/team-a/lan/check", json={}).status_code, 401)
+        self.assertEqual(self.client.post("/api/profiles/team-a/lan/check", data="{}").status_code, 415)
+        self.assertEqual(self.client.post("/api/profiles/nobody/lan/check", json={}).status_code, 404)
+        self.assertEqual(self.asked, [])
 
 
 class ExtensionStatusTests(unittest.TestCase):

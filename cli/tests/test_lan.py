@@ -13,6 +13,7 @@ from hardcode_cli import lan
 from .helpers import REPO
 
 RENDERER = REPO / "images" / "squid" / "allowlist-render.sh"
+COMPOSE = REPO / "compose.yaml"
 
 
 class AddressTests(unittest.TestCase):
@@ -78,6 +79,87 @@ class AddressTests(unittest.TestCase):
         self.assertIsNone(lan.pinnable(["203.0.113.5", "127.0.0.1"], lan.internal_ranges()))
         self.assertEqual(lan.internal_ranges(" 10.0.0.0/8  fd00::/8 "), ["10.0.0.0/8", "fd00::/8"])
 
+    def test_the_sandboxs_own_network_never_can(self):
+        refused = lan.address_problem("172.31.253.10")
+        self.assertEqual(
+            refused,
+            "172.31.253.10 is in the sandbox's own network (172.31.253.0/24): HardCode never lets a sandbox reach it",
+        )
+        self.assertIsNone(lan.address_problem("172.31.252.10"), "next door is fine")
+
+        # A profile's own DEVNET_SUBNET decides, and a cluster has none.
+        self.assertIsNone(lan.address_problem("172.31.253.10", devnet=["172.31.250.0/24"]))
+        self.assertIn("sandbox's own network", lan.address_problem("172.31.250.9", devnet=["172.31.250.0/24"]))
+        self.assertIsNone(lan.address_problem("172.31.253.10", devnet=[]))
+
+        # ...however wide the internal ranges are.
+        self.assertIn("sandbox's own network", lan.address_problem("172.31.253.10", ["0.0.0.0/0"]))
+
+    def test_docker_desktops_network_never_can(self):
+        self.assertEqual(
+            lan.address_problem("192.168.65.254"),
+            "192.168.65.254 is in Docker Desktop's own network (192.168.65.0/24), its way to this computer: "
+            "HardCode never lets a sandbox reach it",
+        )
+        self.assertIn("Docker Desktop's own network", lan.address_problem("192.168.65.2", devnet=[]))
+        self.assertIsNone(lan.address_problem("192.168.66.1"))
+
+    def test_pinnable_skips_this_computer_and_the_sandbox(self):
+        def this_computer(address):
+            return address == "192.168.1.5"
+
+        addresses = ["192.168.1.5", "172.31.253.4", "192.168.71.200"]
+        self.assertEqual(lan.pinnable(addresses, lan.internal_ranges(), None, this_computer), "192.168.71.200")
+        self.assertIsNone(lan.pinnable(addresses[:2], lan.internal_ranges(), None, this_computer))
+
+
+class ThisComputerTests(unittest.TestCase):
+    """
+    This computer's own addresses: those a socket can be bound to here.
+    The socket is faked, so nothing depends on the machine's addresses.
+    """
+
+    def test_an_address_a_socket_binds_to_is_this_computer(self):
+        with mock.patch("socket.socket") as made:
+            self.assertTrue(lan.is_this_computer("192.168.1.5"))
+
+        made.assert_called_once_with(socket.AF_INET, socket.SOCK_STREAM)
+        probe = made.return_value.__enter__.return_value
+        probe.bind.assert_called_once_with(("192.168.1.5", 0))
+        made.return_value.__exit__.assert_called_once()
+
+    def test_one_it_cant_bind_to_isnt(self):
+        with mock.patch("socket.socket") as made:
+            made.return_value.__enter__.return_value.bind.side_effect = OSError(99, "Cannot assign requested address")
+            self.assertFalse(lan.is_this_computer("192.168.71.200"))
+
+        made.return_value.__exit__.assert_called_once()
+
+    def test_ipv6_is_bound_as_ipv6_and_text_that_isnt_an_address_never(self):
+        with mock.patch("socket.socket") as made:
+            self.assertTrue(lan.is_this_computer("FD00:0:0:0:0:0:0:10"))
+            made.assert_called_once_with(socket.AF_INET6, socket.SOCK_STREAM)
+            made.return_value.__enter__.return_value.bind.assert_called_once_with(("fd00::10", 0))
+
+            made.reset_mock()
+            self.assertFalse(lan.is_this_computer("gitlab.example.com"))
+            made.assert_not_called()
+
+    def test_loopback_is_this_computer_for_real(self):
+        self.assertTrue(lan.is_this_computer("127.0.0.1"))
+
+    def test_the_refusal_says_so_plainly(self):
+        self.assertEqual(
+            lan.this_computer_problem("192.168.1.5", lambda address: True),
+            "192.168.1.5 is this computer: HardCode never lets a sandbox reach it",
+        )
+        self.assertIsNone(lan.this_computer_problem("192.168.71.200", lambda address: False))
+
+        # The address rules come first, and this computer only when asked.
+        self.assertIn("isn't on your network", lan.refusal("8.8.8.8", lan.internal_ranges(), None, lambda a: True))
+        self.assertIsNone(lan.refusal("192.168.1.5", lan.internal_ranges()))
+        self.assertIn("is this computer", lan.refusal("192.168.1.5", lan.internal_ranges(), None, lambda a: True))
+
 
 class RendererAgreementTests(unittest.TestCase):
     """
@@ -94,6 +176,20 @@ class RendererAgreementTests(unittest.TestCase):
     def test_the_refused_ranges_are_the_renderers(self):
         found = re.search(r'^refused_ranges="([^"]*)"', self.script, re.MULTILINE)
         self.assertEqual(found.group(1).split(), list(lan.REFUSED_RANGES))
+
+    def test_docker_desktops_network_is_the_renderers(self):
+        found = re.search(r'^docker_desktop_subnet="([^"]*)"', self.script, re.MULTILINE)
+        self.assertEqual(found.group(1), lan.DOCKER_DESKTOP_SUBNET)
+
+    def test_the_default_devnet_is_the_renderers_and_composes(self):
+        found = re.search(r'devnet_subnet="\$\{DEVNET_SUBNET-([^}]*)\}"', self.script)
+        self.assertEqual(found.group(1), lan.DEFAULT_DEVNET_SUBNET)
+
+        # compose.yaml names it for the network and for the renderer: both alike.
+        compose = COMPOSE.read_text(encoding="utf-8")
+        defaults = re.findall(r"\$\{DEVNET_SUBNET:-([^}]*)\}", compose)
+        self.assertEqual(len(defaults), 2, "devnet's subnet, and the allowlist service's DEVNET_SUBNET")
+        self.assertEqual(set(defaults), {lan.DEFAULT_DEVNET_SUBNET})
 
 
 class ResolveTests(unittest.TestCase):

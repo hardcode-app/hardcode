@@ -24,7 +24,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Iterable, Iterator, Optional
 
-from . import allowlist, dockerfile, envfile, langs, override, stack, yamlio
+from . import allowlist, dockerfile, envfile, lan, langs, override, stack, yamlio
 
 # A DNS label of up to 32 characters, because the name ends up in container
 # and resource names. The admin and the CRD also want a leading letter
@@ -384,7 +384,7 @@ def create(
     if languages is not None:
         set_languages(target, languages)
 
-    write_proxy_allowlist(Profile(name, target))
+    write_proxy_allowlist(Profile(name, target), warn=warn)
     write_extension_list(Profile(name, target))
 
     chosen = langs.enabled_keys(envfile.read(target / ".env"))
@@ -568,17 +568,67 @@ def _unlock(handle) -> None:
     fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
 
 
-def write_proxy_allowlist(profile: Profile) -> tuple[str, str]:
+def internal_ranges(profile: Profile) -> list[str]:
+    """
+    The profile's internal ranges: ``EGRESS_INTERNAL_RANGES``, else the
+    proxy's default ones.
+    """
+    return lan.internal_ranges(envfile.read(profile.env_file).get("EGRESS_INTERNAL_RANGES", ""))
+
+
+def devnet(profile: Profile) -> list[str]:
+    """
+    The sandbox's own network: the profile's ``DEVNET_SUBNET``, else
+    compose.yaml's default. No name may be pinned into it.
+    """
+    return [envfile.get(profile.env_file, "DEVNET_SUBNET") or lan.DEFAULT_DEVNET_SUBNET]
+
+
+def pins_to_this_computer(
+    profile: Profile,
+    text: str,
+    this_computer: lan.ThisComputer = lan.is_this_computer,
+) -> list[allowlist.Pin]:
+    """
+    The pins of the allowlist *text* whose address is one of this computer's
+    own (*this_computer*, the bind test): written by hand, since the
+    command refuses them as they are added. Squid can't tell them from any
+    other address on your network, so only the command, which runs on
+    this computer, can keep them from it. A pin with a problem of its own
+    isn't tested: the proxy refuses to start with it anyway.
+    """
+    found = allowlist.pins(text, internal_ranges(profile), devnet(profile))
+    return [pin for pin in found if not pin.problem and this_computer(pin.address)]
+
+
+def write_proxy_allowlist(
+    profile: Profile,
+    this_computer: lan.ThisComputer = lan.is_this_computer,
+    warn: Optional[Warn] = None,
+) -> tuple[str, str]:
     """
     Write the allowlist the proxy is given, from the profile's
     ``allowlist.txt`` and its languages and tools (``allowlist.render``):
     the file's text before (``""`` when there was none) and after.
 
+    A pin to one of this computer's own addresses (``pins_to_this_computer``)
+    is left out, as the operator leaves out the pins it ignores, and *warn*
+    is told of each, every time. The operator never makes this test: on a
+    cluster it would test the operator's own pod.
+
     It is written in place, as the renderer's bind mount follows the file
     it was made with, and readable by the renderer's user.
     """
     enabled = langs.enabled_keys(envfile.read(profile.env_file))
-    text = allowlist.render(profile.allowlist_file.read_text(encoding="utf-8"), enabled)
+    own = profile.allowlist_file.read_text(encoding="utf-8")
+
+    left_out = pins_to_this_computer(profile, own, this_computer)
+    for pin in left_out:
+        if warn is not None:
+            warn(f"allowlist.txt pins {pin.name} to {pin.address}, which is this computer: left out")
+
+    reasons = {pin.name: f"{pin.address} is this computer" for pin in left_out}
+    text = allowlist.render(allowlist.ignore_pins(own, reasons), enabled)
 
     path = profile.proxy_allowlist_file
     before = path.read_text(encoding="utf-8") if path.exists() else ""

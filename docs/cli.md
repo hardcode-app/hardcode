@@ -161,12 +161,12 @@ work too: `c`, `c++`, `cxx`, `c#`, `csharp`, `net`, `.net`, `js`,
 |---|---|
 | `allowlist` | Every entry of one profile's allowlist, as the app lists them: its own from `allowlist.txt` first, then those HardCode provides, by block (every profile's, then its languages' and tools'); each on or off, with its access and note; an invalid line is marked. The names on your network follow, in a section of their own. |
 | `allow <entry> [rw\|ssh]` | Add the entry (or uncomment and re-flag an existing line), and reload a running proxy. A provided entry that already allows as much isn't added; one that was switched off is switched back on. `github:OWNER/REPO` adds the two entries one GitHub repository needs, `github.com/OWNER/REPO.git` and `api.github.com/repos/OWNER/REPO`; `deny` accepts it too ([GitHub from the sandbox](github.md)). When the entry's name points inside your network, it asks whether to let the name reach that address; `--lan` says yes without asking ([a server on your own network](allowlist.md#a-server-on-your-own-network)). |
-| `lan` | The names that may reach an address on your network, each with its state: `ok`, `moved` (the name points elsewhere now; the approved address stays) or `unresolved`. |
+| `lan` | The names that may reach an address on your network, each with its state: `ok`, `moved` (the name points elsewhere now; the approved address stays), `unresolved`, or `this-computer` (a pin written by hand to this computer, which the proxy is never given). |
 | `lan add <name> [address]` | Let one name reach one address on your network: the address given, or the one the name has now. Adding a name again moves it. |
 | `lan remove <name>` | Stop letting the name reach its address. |
-| `lan check <name>` | What the name resolves to now, and whether that is on your network. |
+| `lan check <name>` | What the name resolves to now, and whether that is on your network; it says why when an address can't be pinned (this computer, or the sandbox's own network). |
 | `deny <entry> [ssh]` | Switch an entry off: one of the profile's own is commented out (wherever it is in the file), a provided one gets an `off <entry>` line. An error if it isn't on. `ssh` means the host's SSH entry; without it, its HTTPS one. |
-| `allowlist enable\|disable\|remove <entry> [ssh]` | Comment the entry's line back in, comment it out, or delete it. A provided entry is switched on or off (its `off` line removed or added) and can't be removed: it would come back with its block. |
+| `allowlist enable\|disable\|remove <entry> [ssh]` | Comment the entry's line back in, comment it out, or delete it. A provided entry is switched on or off (its `off` line removed or added) and can't be removed: it would come back with its block. `github:OWNER/REPO` acts on both its entries. |
 | `reload` | Give a running proxy the allowlist again, after you edited `allowlist.txt` by hand, with the entries this HardCode provides; says what changed. |
 | `blocked [--since 10m\|30m\|2h\|24h]` | What the proxy and the DNS server refused, by target, most frequent first. Default: the last 30 minutes. |
 
@@ -229,7 +229,7 @@ Queries print their own objects:
 | `image` | `{"path", "exists", "dockerfile", "starter", "base", "rebuildNeeded", "rebuildReasons", …}` |
 | `extensions` | `{"extensions": [extensions], "refused": [ids], "status": {"state", "total", "installed", "pending": [ids], "refused": [ids], "failed": [ids], "updated"}}` (`status` is what the running VS Code container's extension sync last wrote; `null` when it isn't running) |
 | `allowlist` | `{"allowlist": [entries]}`, the same list `show` has |
-| `lan` | `{"lan": [pins]}`: each one's `name`, `address`, what it `resolves` to now, and its `state` |
+| `lan` | `{"lan": [pins]}`: each one's `name`, `address`, what it `resolves` to now, its `state`, and `moveTo`, the address a move would pin it to (empty when there's none it may move to) |
 | `blocked` | `{"blocked": [{"kind": "http"\|"dns", "method", "host", "url", "target", "client", "count"}]}` |
 | `logs` | `{"services": [names], "logs": "…"}`: without colours, and without the service-name prefix when one service is named |
 

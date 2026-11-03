@@ -18,10 +18,21 @@ against an origin server that normalises paths the way web servers do
   other name reaches it, an unpinned name inside is still refused (nothing
   passes through, even the first time squid looks it up), a pin with no
   entry allows nothing, and the log says why a name inside was refused
+- no pin reaches squid's own networks: the gateway of the network it goes
+  out on (the host, in Compose) or the sandbox's network, which squid finds
+  for itself as it starts; and the renderer refuses a pin into the
+  sandbox's network as the profile names it (DEVNET_SUBNET), or into
+  Docker Desktop's (192.168.65.0/24)
 - an empty allowlist renders a policy that allows nothing
 - the renderer agrees with the CLI's grammar (tests/allowlist-corpus.txt) and
   renders a last line that has no newline
 - an internal network in isolated gateway mode has no way to the host
+
+Squid is on two networks, as in Compose: the internal one its clients are
+on, the sandbox's, and one it goes out on. The origins are on that one, but
+squid reaches each at an address of its own beyond both (``OUTSIDE``),
+through a route, as it reaches the internet or your network: squid refuses
+every address of the networks it is attached to.
 
 Every container is memory-capped; nothing of your own stack is touched.
 
@@ -35,7 +46,7 @@ import json
 import os
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Union
+from typing import Optional, Sequence, Union
 
 import harness
 from harness import FIXTURES, ROOT, Docker, Suite
@@ -44,9 +55,33 @@ SQUID_IMAGE = os.environ.get("SQUID_IMAGE", "hardcode-squid:test")
 NETWORK = f"hc-proxy-test-{os.getpid()}"
 REFUSED = "403"
 
-# What the proxy allows while the requests below are sent. metadata.test is
-# pointed at a link-local address, as a cloud metadata service would be, to
-# show that an allowlisted name resolving inside is still refused.
+# The network squid goes out on, as Compose's egress is: a plain bridge,
+# whose gateway is this machine. The origins are on it too.
+EGRESS = f"{NETWORK}-egress"
+
+# Where squid reaches each origin: an address beyond its own networks,
+# which the origin has besides its address on EGRESS, and squid a route to.
+# Private, so internal to the proxy's default ranges, and in no network of
+# the suite's.
+OUTSIDE = {
+    "origin": "10.199.0.2",
+    "badcert": "10.199.0.3",
+    "inside-a": "10.199.0.10",
+    "inside-b": "10.199.0.11",
+}
+
+# What the policy's squid resolves the origins' names to, from its hosts
+# file. metadata.test is pointed at a link-local address, as a cloud
+# metadata service would be.
+POLICY_HOSTS = [
+    f"origin.test:{OUTSIDE['origin']}",
+    f"sshonly.test:{OUTSIDE['origin']}",
+    f"badcert.test:{OUTSIDE['badcert']}",
+    "metadata.test:169.254.169.254",
+]
+
+# What the proxy allows while the requests below are sent. metadata.test
+# shows that an allowlisted name resolving inside is still refused.
 ALLOWLIST = """\
 origin.test/allowed
 origin.test/upload   rw
@@ -55,7 +90,7 @@ badcert.test
 sshonly.test:22 ssh
 """
 
-# The test origin lives on a private Docker network, so for these checks only
+# The test origins' addresses are private, so for these checks only
 # loopback, link-local and shared address space count as internal.
 INTERNAL_RANGES = """\
 127.0.0.0/8
@@ -63,23 +98,44 @@ INTERNAL_RANGES = """\
 100.64.0.0/10
 """
 
-# The names on your network: two origins on the test network, which is
-# private, so internal to the proxy's default ranges. Docker's DNS answers
-# pinned.test and neighbour.test with origin A, and moved.test and
-# inside.test with origin B; the pins send pinned.test, moved.test and
-# entryless.test to origin A ({inside} is its address).
+# The names on your network: origins A and B, at their addresses beyond
+# squid's networks ({a} is A's), which are private, so internal to the
+# proxy's default ranges. Squid's hosts file says neighbour.test is A
+# (PIN_HOSTS), and Docker's DNS says moved.test and inside.test are B, at
+# its address on squid's own network; the pins send pinned.test, moved.test
+# and entryless.test to A.
+#
+# gateway.test is pinned to the gateway of the network squid goes out on
+# ({gateway}: the host, in Compose), and sandbox.test to origin D, on the
+# sandbox's network ({sandbox}), where squid's clients are: allowed and
+# pinned, neither may reach its address.
 PIN_ALLOWLIST = """\
 pinned.test
 pinned.test:22 ssh
 moved.test
 moved.test:22 ssh
 neighbour.test
+neighbour.test:22 ssh
 inside.test
 inside.test:22 ssh
-lan pinned.test {inside}
-lan moved.test {inside}
-lan entryless.test {inside}
+gateway.test
+gateway.test:22 ssh
+sandbox.test
+sandbox.test:22 ssh
+lan pinned.test {a}
+lan moved.test {a}
+lan entryless.test {a}
+lan gateway.test {gateway}
+lan sandbox.test {sandbox}
 """
+
+# What the pins' squid resolves neighbour.test to: A's address, which only
+# pinned names may reach.
+PIN_HOSTS = [f"neighbour.test:{OUTSIDE['inside-a']}"]
+
+# The renderer's devnet for the pins: one nowhere near the suite's networks,
+# so that the pin into the sandbox's network is left for squid to refuse.
+ELSEWHERE = "192.0.2.0/24"
 
 # A refusal the proxy can't reset at once: the CONNECT is answered, and the
 # tunnel reset as the client speaks. Either way nothing passes through.
@@ -203,9 +259,20 @@ PINNED = [
     Request("for its ssh tunnel too", "SSH", "moved.test:22", "200 SSH-2.0-A"),
     Request("another name for the pinned address is still refused", "GET", "http://neighbour.test/x"),
     Request("its HTTPS tunnel too", "GET", "https://neighbour.test/x", ("tunnel reset", "tls-error")),
+    Request("and its ssh tunnel", "SSH", "neighbour.test:22", TUNNEL_REFUSED),
     Request("an unpinned name inside is refused over HTTP", "GET", "http://inside.test/x"),
     Request("a pin without an entry allows nothing", "GET", "http://entryless.test/x"),
     Request("nor a tunnel", "SSH", "entryless.test:22", "reset"),
+]
+
+NEVER_PINNED = [
+    # Without the refusal these would be answered: 503 by the gateway, which
+    # serves nothing, and by origin D, which answers anything, "from D".
+    Request("a name pinned to the gateway squid goes out by is refused", "GET", "http://gateway.test/x"),
+    Request("its ssh tunnel too", "SSH", "gateway.test:22", TUNNEL_REFUSED),
+    Request("a name pinned inside the sandbox's network is refused", "GET", "http://sandbox.test/x"),
+    Request("its HTTPS tunnel too", "GET", "https://sandbox.test/x", ("tunnel reset", "tls-error")),
+    Request("and its ssh tunnel", "SSH", "sandbox.test:22", TUNNEL_REFUSED),
 ]
 
 NOTHING_ALLOWED = [
@@ -231,11 +298,21 @@ class ProxyTest:
         self.docker = docker
         self.scratch = scratch
 
+        # Each origin's address beyond squid's networks, and its address on
+        # EGRESS, which squid's route to it goes through.
+        self.routes: dict[str, str] = {}
+
     # -- the renderer --------------------------------------------------------
 
-    def render(self, allowlist_text: str, name: str) -> tuple[bool, Path, str]:
+    def render(
+        self,
+        allowlist_text: str,
+        name: str,
+        environment: Optional[dict[str, str]] = None,
+    ) -> tuple[bool, Path, str]:
         """
-        Render an allowlist the way the one-shot ``allowlist`` service does.
+        Render an allowlist the way the one-shot ``allowlist`` service does,
+        with the *environment* Compose would give it (none: the defaults).
 
         Returns whether the renderer accepted it, the directory it wrote to
         (``squid/`` and ``Corefile`` inside), and what it printed.
@@ -251,6 +328,7 @@ class ProxyTest:
             memory="128m",
             network="none",
             user=harness.current_user(),
+            environment=environment,
             volumes=[f"{allowlist}:/config/allowlist.txt:ro", f"{output_dir}:/out"],
             entrypoint="/usr/local/bin/allowlist-render",
         )
@@ -301,6 +379,34 @@ class ProxyTest:
         )
         self.suite.check("an empty allowlist renders a deny-all policy", denies_everything, log)
 
+        # The sandbox's own network, which squid refuses outright: Compose's
+        # default devnet unless the profile says, and with none at all (as
+        # on Kubernetes without the cluster's ranges) a stand-in squid won't
+        # warn about.
+        sandbox = read_lines(squid_dir / "sandbox.txt")
+        self.suite.check("the default devnet is the sandbox's network", sandbox == ["172.31.253.0/24"], str(sandbox))
+
+        environment = {"DEVNET_SUBNET": "", "CLUSTER_RANGES": "10.244.0.0/16 10.96.0.0/12"}
+        accepted, output_dir, log = self.render("", "cluster", environment)
+        sandbox = read_lines(output_dir / "squid" / "sandbox.txt")
+        self.suite.check(
+            "on a cluster, it is the cluster's own ranges",
+            accepted and sandbox == ["10.244.0.0/16", "10.96.0.0/12"],
+            f"{log}\nsandbox.txt: {sandbox}",
+        )
+
+        accepted, output_dir, log = self.render("", "nowhere", {"DEVNET_SUBNET": ""})
+        sandbox = read_lines(output_dir / "squid" / "sandbox.txt")
+        self.suite.check("and with none, a range nothing reaches anyway", sandbox == ["0.0.0.0/8"], str(sandbox))
+
+        # Docker Desktop's own network, its way to the computer, is never pinned.
+        accepted, _, log = self.render("example.com\nlan example.com 192.168.65.254\n", "docker-desktop")
+        self.suite.check(
+            "a pin into Docker Desktop's network is refused, saying so",
+            not accepted and "is in Docker Desktop's own network (192.168.65.0/24)" in log,
+            log,
+        )
+
     # -- the network ---------------------------------------------------------
 
     def check_isolated_network(self) -> None:
@@ -322,6 +428,75 @@ class ProxyTest:
         routes = self.docker.run(harness.BUILD_IMAGE, "cat", "/proc/net/route", memory="64m", network=NETWORK)
         destinations = [line.split()[1] for line in routes.text.splitlines()[1:] if line.strip()]
         self.suite.check("no default route inside", "00000000" not in destinations, routes.text)
+
+    def create_egress(self) -> str:
+        """
+        The network squid goes out on, with a gateway, as Compose's egress
+        has; returns the gateway's address.
+        """
+        created = self.docker.create_network(EGRESS)
+        if not created.ok:
+            self.suite.abort("could not create the egress test network", created.text)
+
+        ipam = self.docker.inspect_network(EGRESS)["IPAM"]["Config"]
+        gateways = [entry["Gateway"] for entry in ipam if entry.get("Gateway") and ":" not in entry["Gateway"]]
+        if not gateways:
+            self.suite.abort("the egress test network has no IPv4 gateway", json.dumps(ipam))
+
+        return gateways[0]
+
+    def address_on(self, container: str, network: str) -> str:
+        """
+        A container's address on one of its networks.
+        """
+        found = harness.run(["docker", "inspect", "--format", "{{json .NetworkSettings.Networks}}", container])
+        networks = json.loads(found.text) if found.ok else {}
+
+        address = (networks.get(network) or {}).get("IPAddress", "")
+        if not address:
+            self.suite.abort(f"could not tell {container}'s address on {network}", found.text)
+
+        return address
+
+    def in_network_of(self, container: str, *command: str) -> None:
+        """
+        Run ``ip`` with *command* in a container's network, from a helper
+        container that shares it and may change it; the container itself
+        gets no capability.
+        """
+        output = self.docker.run(
+            harness.BUILD_IMAGE,
+            "ip",
+            *command,
+            memory="64m",
+            network=f"container:{container}",
+            capabilities=["NET_ADMIN"],
+        )
+        if not output.ok:
+            self.suite.abort(f"could not run 'ip {' '.join(command)}' for {container}", output.text)
+
+    def start_origin(self, container: str, outside: str, arguments: list[str], aliases: Sequence[str] = ()) -> None:
+        """
+        Start an origin on EGRESS (answering to *aliases* there), and give it
+        its address beyond squid's networks, *outside*, which squid's routes
+        lead to (``self.routes``).
+        """
+        mounts = [f"{FIXTURES / 'proxy_origin.py'}:/origin.py:ro", f"{self.scratch / 'tls'}:/tls:ro"]
+        self.docker.run(
+            harness.BUILD_IMAGE,
+            "python3",
+            "/origin.py",
+            *arguments,
+            memory="128m",
+            name=container,
+            detach=True,
+            network=EGRESS,
+            aliases=aliases,
+            volumes=mounts,
+        )
+
+        self.in_network_of(container, "address", "add", f"{outside}/32", "dev", "eth0")
+        self.routes[outside] = self.address_on(container, EGRESS)
 
     # -- the proxy -----------------------------------------------------------
 
@@ -368,30 +543,14 @@ class ProxyTest:
 
         return tls
 
-    def start_origins(self, tls: Path) -> None:
+    def start_origins(self) -> None:
         """
         The origin (origin.test and sshonly.test) and the origin with the
-        untrusted certificate (badcert.test).
+        untrusted certificate (badcert.test), which squid's hosts file names
+        (``POLICY_HOSTS``).
         """
-        script = FIXTURES / "proxy_origin.py"
-        mounts = [f"{script}:/origin.py:ro", f"{tls}:/tls:ro"]
-
-        for name, aliases, arguments in (
-            ("origin", ["origin.test", "sshonly.test"], []),
-            ("badcert", ["badcert.test"], ["bad"]),
-        ):
-            self.docker.run(
-                harness.BUILD_IMAGE,
-                "python3",
-                "/origin.py",
-                *arguments,
-                memory="128m",
-                name=f"{NETWORK}-{name}",
-                detach=True,
-                network=NETWORK,
-                aliases=aliases,
-                volumes=mounts,
-            )
+        self.start_origin(f"{NETWORK}-origin", OUTSIDE["origin"], [])
+        self.start_origin(f"{NETWORK}-badcert", OUTSIDE["badcert"], ["bad"])
 
     def make_proxy_ca(self) -> tuple[Path, Path]:
         """
@@ -415,9 +574,12 @@ class ProxyTest:
 
         return private, public
 
-    def start_squid(self, name: str, generated: Path, ca: Path, tls: Path) -> None:
+    def start_squid(self, name: str, generated: Path, ca: Path, tls: Path, hosts: Sequence[str]) -> None:
         """
-        Start squid with a rendered policy and wait until it accepts connections.
+        Start squid with a rendered policy and the *hosts* its hosts file
+        names (``name:address``), on the sandbox's network and EGRESS, as in
+        Compose; wait until it accepts connections, and route it to every
+        origin's address beyond its networks.
         """
         self.docker.run(
             SQUID_IMAGE,
@@ -425,8 +587,9 @@ class ProxyTest:
             name=name,
             detach=True,
             network=NETWORK,
+            networks=[EGRESS],
             aliases=["squid"],
-            hosts=["metadata.test:169.254.169.254"],
+            hosts=hosts,
             volumes=[
                 f"{generated}:/etc/squid/generated:ro",
                 f"{ca}:/proxy-ca:ro",
@@ -444,37 +607,57 @@ class ProxyTest:
         if not harness.wait_until(accepts_connections, timeout=30, interval=0.5):
             self.suite.abort("squid did not come up", self.docker.logs(name))
 
-    def start_inside_origins(self, tls: Path) -> str:
-        """
-        Origins A and B, the two machines on "your network" (the test
-        network is private): their names, as Docker's DNS answers them, are
-        in PIN_ALLOWLIST's comment. Returns A's address.
-        """
-        mounts = [f"{FIXTURES / 'proxy_origin.py'}:/origin.py:ro", f"{tls}:/tls:ro"]
+        # Added after squid started, as a route to your network would be
+        # there from the start: squid takes neither for its own network.
+        for outside, through in self.routes.items():
+            self.in_network_of(name, "route", "add", f"{outside}/32", "via", through)
 
-        for name, aliases in (("A", ["pinned.test", "neighbour.test"]), ("B", ["moved.test", "inside.test"])):
-            self.docker.run(
-                harness.BUILD_IMAGE,
-                "python3",
-                "/origin.py",
-                name,
-                memory="128m",
-                name=f"{NETWORK}-inside-{name.lower()}",
-                detach=True,
-                network=NETWORK,
-                aliases=aliases,
-                volumes=mounts,
-            )
+    def start_inside_origins(self) -> str:
+        """
+        Origins A and B, the two machines on "your network", and D on the
+        sandbox's network, beside squid's clients: their names are in
+        PIN_ALLOWLIST's comment. Returns D's address.
+        """
+        self.start_origin(f"{NETWORK}-inside-a", OUTSIDE["inside-a"], ["A"])
+        self.start_origin(f"{NETWORK}-inside-b", OUTSIDE["inside-b"], ["B"], aliases=["moved.test", "inside.test"])
 
-        found = harness.run(
-            ["docker", "inspect", "--format", "{{json .NetworkSettings.Networks}}", f"{NETWORK}-inside-a"]
+        sandbox = f"{NETWORK}-sandbox"
+        self.docker.run(
+            harness.BUILD_IMAGE,
+            "python3",
+            "/origin.py",
+            "D",
+            memory="128m",
+            name=sandbox,
+            detach=True,
+            network=NETWORK,
+            volumes=[f"{FIXTURES / 'proxy_origin.py'}:/origin.py:ro", f"{self.scratch / 'tls'}:/tls:ro"],
         )
-        networks = json.loads(found.text) if found.ok else {}
-        address = (networks.get(NETWORK) or {}).get("IPAddress", "")
-        if not address:
-            self.suite.abort("could not tell origin A's address", found.text)
 
-        return address
+        return self.address_on(sandbox, NETWORK)
+
+    def check_own_networks(self, squid: str, gateway: str) -> None:
+        """
+        Squid found the networks it is attached to as it started: the
+        sandbox's and EGRESS, whose subnet holds the gateway.
+        """
+        found = harness.run(["docker", "exec", squid, "cat", "/var/spool/squid/own-networks.txt"])
+        listed = found.text.split()
+
+        subnets = []
+        for network in (NETWORK, EGRESS):
+            subnets += [entry["Subnet"] for entry in self.docker.inspect_network(network)["IPAM"]["Config"]]
+
+        self.suite.check(
+            "squid lists the networks it is attached to as its own",
+            found.ok and all(subnet in listed for subnet in subnets),
+            f"listed: {listed}; the suite's networks: {subnets}",
+        )
+        self.suite.check(
+            "and nothing twice: the gateway is inside its subnet",
+            gateway not in listed and f"{gateway}/32" not in listed and len(listed) == len(set(listed)),
+            str(listed),
+        )
 
     def check_refusal_reasons(self, squid: str) -> None:
         """
@@ -493,6 +676,11 @@ class ProxyTest:
         )
         self.suite.check("and an ssh tunnel's", reasons("inside.test") == {"internal-address"}, log)
         self.suite.check("but gives no such reason for a name with no entry", reasons("entryless.test") == {"-"}, log)
+        self.suite.check(
+            "and the same reason for a pin squid refuses",
+            reasons("gateway.test") == {"internal-address"} and reasons("sandbox.test") == {"internal-address"},
+            log,
+        )
 
     def send(self, request: Request, ca_public: Path) -> str:
         """
@@ -537,10 +725,11 @@ def run_checks(suite: Suite) -> None:
 
         suite.section("network: internal, isolated gateway")
         test.check_isolated_network()
+        gateway = test.create_egress()
 
         suite.section("the proxy against a normalising origin (HTTP and inspected HTTPS)")
         tls = test.make_certificates()
-        test.start_origins(tls)
+        test.start_origins()
 
         accepted, rendered, log = test.render(ALLOWLIST, "policy")
         suite.require("the test allowlist renders", accepted, log)
@@ -554,7 +743,7 @@ def run_checks(suite: Suite) -> None:
         (rendered / "squid" / "internal.txt").write_text(INTERNAL_RANGES, encoding="utf-8")
 
         ca_private, ca_public = test.make_proxy_ca()
-        test.start_squid(f"{NETWORK}-squid", rendered / "squid", ca_private, tls)
+        test.start_squid(f"{NETWORK}-squid", rendered / "squid", ca_private, tls, POLICY_HOSTS)
 
         test.check_requests(PLAIN_HTTP, ca_public)
         suite.note("-- the same through an inspected HTTPS tunnel")
@@ -563,19 +752,33 @@ def run_checks(suite: Suite) -> None:
 
         suite.section("names on your network")
         docker.remove(f"{NETWORK}-squid")
-        inside = test.start_inside_origins(tls)
+        sandbox = test.start_inside_origins()
+        pins = PIN_ALLOWLIST.format(a=OUTSIDE["inside-a"], gateway=gateway, sandbox=sandbox)
 
-        accepted, pinned, log = test.render(PIN_ALLOWLIST.format(inside=inside), "pins")
+        # The renderer refuses a pin into the sandbox's network as the
+        # profile names it; squid, into the networks it finds itself on.
+        devnet = docker.inspect_network(NETWORK)["IPAM"]["Config"][0]["Subnet"]
+        accepted, _, log = test.render(pins, "pins-in-devnet", {"DEVNET_SUBNET": devnet})
+        suite.check(
+            "the renderer refuses a pin inside DEVNET_SUBNET",
+            not accepted and f"{sandbox} is in the sandbox's own network ({devnet})" in log,
+            log,
+        )
+
+        accepted, pinned, log = test.render(pins, "pins", {"DEVNET_SUBNET": ELSEWHERE})
         suite.require("an allowlist with names on your network renders", accepted, log)
-        test.start_squid(f"{NETWORK}-pins", pinned / "squid", ca_private, tls)
+        test.start_squid(f"{NETWORK}-pins", pinned / "squid", ca_private, tls, PIN_HOSTS)
+        test.check_own_networks(f"{NETWORK}-pins", gateway)
 
         test.check_requests(PINNED, ca_public)
+        suite.note("-- pins into squid's own networks, allowed and pinned")
+        test.check_requests(NEVER_PINNED, ca_public)
         test.check_refusal_reasons(f"{NETWORK}-pins")
 
         suite.section("the proxy with nothing allowed")
         docker.remove(f"{NETWORK}-pins")
         empty = scratch / "empty" / "squid"
-        test.start_squid(f"{NETWORK}-deny-all", empty, ca_private, tls)
+        test.start_squid(f"{NETWORK}-deny-all", empty, ca_private, tls, POLICY_HOSTS)
         test.check_requests(NOTHING_ALLOWED, ca_public)
 
 

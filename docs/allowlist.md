@@ -122,8 +122,9 @@ approved. The app marks the row *now resolves to …*, with **Move** to
 approve the new one, and the command prints a warning.
 
 Only exact names can be added (no `.wildcard`), and only addresses inside
-your network. On Kubernetes, an administrator switches this on first
-([Kubernetes](kubernetes.md)).
+your network. Two kinds of address are never allowed, whatever the name:
+your own computer, and the sandbox's own network. On Kubernetes, an
+administrator switches this on first ([Kubernetes](kubernetes.md)).
 
 ## Stop allowing something
 

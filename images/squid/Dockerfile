@@ -17,6 +17,7 @@ COPY --chmod=0644 squid.conf /etc/squid/squid.conf
 COPY --chmod=0755 entrypoint.sh /usr/local/bin/squid-entrypoint
 COPY --chmod=0755 make-ca.sh /usr/local/bin/squid-make-ca
 COPY --chmod=0755 allowlist-render.sh /usr/local/bin/allowlist-render
+COPY --chmod=0755 own-networks.sh /usr/local/bin/squid-own-networks
 
 USER proxy
 ENTRYPOINT ["/usr/local/bin/squid-entrypoint"]

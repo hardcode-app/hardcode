@@ -98,6 +98,8 @@ services:
       UPSTREAM_DNS: ${UPSTREAM_DNS:-/etc/resolv.conf}
       CLIENT_RANGES: ${SQUID_CLIENT_RANGES:-}
       INTERNAL_RANGES: ${EGRESS_INTERNAL_RANGES:-}
+      # The sandbox's own network, devnet below: no name may be pinned into it.
+      DEVNET_SUBNET: ${DEVNET_SUBNET:-172.31.253.0/24}
     volumes:
       - ${HARDCODE_PROFILE_DIR:?run docker compose through hardcode}/proxy-allowlist.txt:/config/allowlist.txt:ro
       - egress-config:/out

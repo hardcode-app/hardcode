@@ -52,7 +52,14 @@ The link asks for these permissions, and nothing else:
 |---|---|
 | Contents: read and write | push |
 | Pull requests: read and write | open pull requests |
-| Actions: read and write | run workflows again |
+
+Two more are yours to add on the token's page, if the sandbox needs them.
+Both reach your repository's CI, which runs with the repository's
+secrets, so leave them out unless you need them:
+
+| Permission | Lets the sandbox |
+|---|---|
+| Actions: read and write | run workflows, and run them again |
 | Workflows | change files in `.github/workflows` |
 
 The token expires after 30 days. When it does, run `hardcode-github

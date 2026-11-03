@@ -3,6 +3,7 @@ Tests for the operations behind the commands (hardcode_cli.ops).
 """
 
 import os
+import re
 import sys
 import unittest
 from unittest import mock
@@ -775,9 +776,11 @@ class LanTests(HomeTestCase):
 
     GITLAB = {"gitlab.example.com": ["203.0.113.9", "192.168.71.200"]}
 
-    def ops(self, answers=None, running=False):
+    def ops(self, answers=None, running=False, this_computer=()):
         """
-        Operations on the default profile, with name lookups giving *answers*.
+        Operations on the default profile, with name lookups giving *answers*,
+        on a computer whose own addresses are *this_computer* (none, so that
+        nothing depends on the machine the tests run on).
         """
         if not profiles.exists(self.root, "default"):
             profiles.create(self.root, "default", languages=[])
@@ -791,6 +794,7 @@ class LanTests(HomeTestCase):
             docker="docker",
             sleep=lambda _: None,
             resolve=self.resolver,
+            this_computer=lambda address: address in this_computer,
         )
 
     def pins(self, ops):
@@ -910,13 +914,13 @@ class LanTests(HomeTestCase):
         ops.add_pin("moved.example.com", "10.0.0.8")
         ops.add_pin("gone.example.com", "10.0.0.7")
 
-        states = {item["name"]: (item["state"], item["resolves"]) for item in ops.lan_states()}
+        states = {item["name"]: (item["state"], item["resolves"], item["moveTo"]) for item in ops.lan_states()}
         self.assertEqual(
             states,
             {
-                "gitlab.example.com": ("ok", ["203.0.113.9", "192.168.71.200"]),
-                "moved.example.com": ("moved", ["10.0.0.9"]),
-                "gone.example.com": ("unresolved", []),
+                "gitlab.example.com": ("ok", ["203.0.113.9", "192.168.71.200"], ""),
+                "moved.example.com": ("moved", ["10.0.0.9"], "10.0.0.9"),
+                "gone.example.com": ("unresolved", [], ""),
             },
         )
 
@@ -948,11 +952,125 @@ class LanTests(HomeTestCase):
                 "resolves": ["203.0.113.9", "192.168.71.200"],
                 "address": "192.168.71.200",
                 "pinned": "",
+                "refused": "",
             },
         )
 
         ops.add_pin("gitlab.example.com")
         self.assertEqual(ops.check_name("gitlab.example.com")["pinned"], "192.168.71.200")
+
+    # -- addresses no name may reach ---------------------------------------------
+
+    NAS = {"nas.example.com": ["203.0.113.9", "192.168.1.5"]}
+    THIS_COMPUTER = "nas.example.com resolves to 192.168.1.5, and 192.168.1.5 is this computer: HardCode never lets a sandbox reach it"
+
+    def test_this_computer_is_never_offered_nor_asked_about(self):
+        ops = self.ops(self.NAS, this_computer={"192.168.1.5"})
+
+        def never(name, address):
+            raise AssertionError(f"asked about {name} at {address}")
+
+        result = ops.allow("nas.example.com", confirm=never)
+
+        self.assertEqual(result.data, {}, "nothing for the app to ask")
+        self.assertEqual(result.message, f"allowed nas.example.com; {self.THIS_COMPUTER}")
+        self.assertNotIn("on your network", result.message)
+
+        with_lan = ops.allow("nas.example.com/more", lan_ok=True, confirm=never)
+        self.assertIn(self.THIS_COMPUTER, with_lan.message)
+        self.assertEqual(self.pins(ops), [])
+
+    def test_this_computer_is_refused_when_pinned(self):
+        ops = self.ops(self.NAS, this_computer={"192.168.1.5", "172.17.0.1"})
+
+        with self.assertRaisesRegex(
+            allowlist.AllowlistError, r"^192\.168\.1\.5 is this computer: HardCode never lets a sandbox reach it$"
+        ):
+            ops.add_pin("nas.example.com", "192.168.1.5")
+        with self.assertRaisesRegex(allowlist.AllowlistError, f"^{re.escape(self.THIS_COMPUTER)}$"):
+            ops.add_pin("nas.example.com")
+
+        # Docker's default bridge gateway is one of this computer's own.
+        with self.assertRaisesRegex(allowlist.AllowlistError, r"^172\.17\.0\.1 is this computer"):
+            ops.add_pin("docker.example.com", "172.17.0.1")
+
+        self.assertEqual(self.pins(ops), [])
+        self.assertEqual(
+            ops.check_name("nas.example.com"),
+            {
+                "name": "nas.example.com",
+                "resolves": ["203.0.113.9", "192.168.1.5"],
+                "address": "",
+                "pinned": "",
+                "refused": self.THIS_COMPUTER,
+            },
+        )
+
+    def test_the_sandboxs_own_network_is_refused(self):
+        ops = self.ops({"box.example.com": ["172.31.250.7"], "old.example.com": ["172.31.253.7"]})
+        envfile.set_value(ops.profile.env_file, "DEVNET_SUBNET", "172.31.250.0/24")
+        refused = (
+            "172.31.250.7 is in the sandbox's own network (172.31.250.0/24): HardCode never lets a sandbox reach it"
+        )
+
+        result = ops.allow("box.example.com")
+        self.assertEqual(result.data, {})
+        self.assertIn(f"box.example.com resolves to 172.31.250.7, and {refused}", result.message)
+
+        with self.assertRaisesRegex(allowlist.AllowlistError, f"^{re.escape(refused)}$"):
+            ops.add_pin("box.example.com", "172.31.250.7")
+
+        # The profile's own subnet decides: compose.yaml's default isn't this one's.
+        ops.add_pin("old.example.com")
+        self.assertEqual(self.pins(ops), [("old.example.com", "172.31.253.7")])
+
+        # ...and a pin into it written by hand is shown as the proxy sees it.
+        path = ops.profile.allowlist_file
+        path.write_text(path.read_text(encoding="utf-8") + "lan box.example.com 172.31.250.7\n", encoding="utf-8")
+        self.assertEqual([pin.problem for pin in ops.pins() if pin.name == "box.example.com"], [refused])
+
+    def test_a_hand_written_pin_to_this_computer_is_left_out_and_said(self):
+        warned = []
+        ops = self.ops(self.NAS, this_computer={"192.168.1.5"})
+        ops.warn = warned.append
+        path = ops.profile.allowlist_file
+        path.write_text(path.read_text(encoding="utf-8") + "lan nas.example.com 192.168.1.5\n", encoding="utf-8")
+
+        ops.reload()
+        ops.allow("pypi.org")
+
+        line = "on your network: allowlist.txt pins nas.example.com to 192.168.1.5, which is this computer: left out"
+        self.assertEqual(warned, [line, line], "once for each write")
+        self.assertNotIn("lan nas.example.com", ops.profile.proxy_allowlist_file.read_text(encoding="utf-8"))
+
+    def test_a_pin_to_this_computer_is_listed_as_left_out(self):
+        ops = self.ops(self.NAS, this_computer={"192.168.1.5"})
+        text = ops.profile.allowlist_file.read_text(encoding="utf-8")
+        ops.profile.allowlist_file.write_text(text + "lan nas.example.com 192.168.1.5\n", encoding="utf-8")
+
+        [state] = ops.lan_states()
+
+        self.assertEqual((state["state"], state["moveTo"]), ("this-computer", ""))
+
+    def test_docker_desktops_network_is_refused(self):
+        ops = self.ops()
+
+        with self.assertRaisesRegex(allowlist.AllowlistError, r"^192\.168\.65\.254 is in Docker Desktop's own network"):
+            ops.add_pin("host.example.com", "192.168.65.254")
+
+    def test_a_name_that_moved_onto_this_computer_isnt_offered_the_move(self):
+        ops = self.ops({"nas.example.com": ["192.168.1.5"]}, this_computer={"192.168.1.5"})
+        ops.add_pin("nas.example.com", "192.168.1.4")
+
+        [state] = ops.lan_states()
+        self.assertEqual((state["state"], state["moveTo"]), ("moved", ""))
+        self.assertEqual(
+            ops.lan_warnings([state]),
+            [
+                "nas.example.com now resolves to 192.168.1.5, not 192.168.1.4: it still reaches only 192.168.1.4; "
+                + self.THIS_COMPUTER
+            ],
+        )
 
     def test_the_state_lists_the_pins_without_looking_them_up(self):
         ops = self.ops()

@@ -258,6 +258,10 @@ row of the app's Overview.
   program in a container can't reach the internet, set
   `DOCKER_JAVA_PROXY=true` in the profile's settings. (On Kubernetes, this
   isn't there yet.)
+- **Images you build here** don't keep the proxy's certificate, with one
+  exception: a `RUN` line that copies the certificate list somewhere else
+  copies the proxy's certificate with it. For an image you'll use outside
+  HardCode, put `ARG HARDCODE_PROXY_CA=off` before that line.
 - **Pushing images isn't possible**: the container registries are
   read-only on the allowlist.
 - **Testcontainers** works: `TESTCONTAINERS_HOST_OVERRIDE=docker` is set.

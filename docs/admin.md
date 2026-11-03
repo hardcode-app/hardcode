@@ -154,7 +154,8 @@ your own, a delete button; the form at the top adds one
   edits: every single-entry write names the version it read, and one that
   lost the race is applied again on top of the newer text.
 - **On your network** lists the names that may reach an address on the
-  network, with a form for a name and its address. A row marked *now
+  network, with a form for a name and its address. **Check** looks the
+  names up (a row says *not checked* until then); one marked *now
   resolves to …* has **Move…**, and **✕** removes one. The chart decides
   whether these are used at all; while it doesn't, the card says so
   ([Kubernetes](kubernetes.md)).

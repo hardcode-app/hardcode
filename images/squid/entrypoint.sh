@@ -3,7 +3,8 @@
 # one-shot "pki" service) and the rendered policy (from the one-shot
 # "allowlist" service). Without either, it refuses to start rather than run
 # with no policy or an old one. It writes squid's hosts file first, with the
-# names the policy pins to an address on your network.
+# names the policy pins to an address on your network, and the networks
+# squid is attached to, which no request may reach.
 set -euo pipefail
 
 for file in /proxy-ca/ca.pem /proxy-ca/ca.key; do
@@ -13,7 +14,7 @@ for file in /proxy-ca/ca.pem /proxy-ca/ca.key; do
   fi
 done
 
-for file in hosts.txt urls-ro.regex urls-rw.regex ssh.conf pins.conf pins.hosts clients.txt internal.txt; do
+for file in hosts.txt urls-ro.regex urls-rw.regex ssh.conf pins.conf pins.hosts sandbox.txt clients.txt internal.txt; do
   if [ ! -s "/etc/squid/generated/$file" ]; then
     echo "squid: /etc/squid/generated/$file missing; did the allowlist service run?" >&2
     exit 1
@@ -34,6 +35,17 @@ awk '
     print
   }
 ' /etc/squid/generated/pins.hosts /etc/hosts > /var/spool/squid/hosts
+
+# The networks squid is attached to (squid.conf's own_networks): each
+# interface's subnet and addresses, and each route's gateway, the host or
+# the node behind them. No request may reach them, and no pin exempts them.
+# They are found again at every start, since only squid can see them; with
+# none found, squid doesn't start.
+squid-own-networks > /var/spool/squid/own-networks.txt
+if [ ! -s /var/spool/squid/own-networks.txt ]; then
+  echo "squid: found none of the networks it is attached to in /proc/net" >&2
+  exit 1
+fi
 
 # The cache of per-host certificates squid makes while inspecting TLS.
 certificates=/var/spool/squid/ssl_db

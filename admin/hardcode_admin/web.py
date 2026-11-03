@@ -18,6 +18,8 @@ import json
 import os
 import re
 import secrets
+from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import wait as wait_for
 from pathlib import Path
 from typing import Any, Callable, Optional
 from urllib.parse import urlsplit
@@ -99,6 +101,18 @@ ACCOUNT_ATTEMPTS = 40
 
 # Read-and-reapply attempts when a profile changed under an edit.
 PATCH_RETRIES = 4
+
+# How long the On your network card's Check waits for its names' lookups,
+# all of them together. The pod resolves names with the cluster's DNS,
+# which often can't see them, and a lookup that gets no answer waits out
+# the resolver's timeout: the request answers when this is up, with the
+# names that didn't resolve in time unresolved.
+LAN_CHECK_SECONDS = 2.0
+
+# The lookups that run at once, for every Check together. One that hangs
+# holds one of these threads until the resolver gives up, never a request
+# thread, and gunicorn's request threads are few.
+LAN_CHECK_LOOKUPS = 4
 
 # What PATCH /api/profiles/<name> may change as given. It may change
 # `languages` too, which is checked apart and brings the allowlist's language
@@ -316,6 +330,7 @@ class AdminApi:
         self.sessions = sessions
         self.clock = clock
         self.resolve = resolve
+        self.lookups = ThreadPoolExecutor(max_workers=LAN_CHECK_LOOKUPS, thread_name_prefix="lan-check")
         self.namespace = k8s.namespace
 
         # Failed sign-ins: per client address and account, per account from
@@ -366,6 +381,7 @@ class AdminApi:
             ("POST", "/api/profiles/<name>/token", self.rotate_token),
             ("POST", "/api/profiles/<name>/allowlist", self.edit_allowlist),
             ("POST", "/api/profiles/<name>/lan", self.edit_lan),
+            ("POST", "/api/profiles/<name>/lan/check", self.check_lan),
             ("POST", "/api/allowlist/bulk", self.bulk_allowlist),
             ("GET", "/api/profiles/<name>/blocked", self.blocked_traffic),
             # Admins
@@ -1110,22 +1126,31 @@ class AdminApi:
         self.require("full")
         return self.respond({"changed": self.patch_allowlist(name, self.body())})
 
-    def lan_view(self, profile: dict) -> dict:
+    def lan_view(self, profile: dict, answers: Optional[dict[str, list[str]]] = None) -> dict:
         """
         A profile's names on the network, as its On your network card shows
-        them: whether this cluster takes pins at all (``enabled``), and each
-        pin (``manifests.effective_pins``) with what it resolves to from
-        here and its ``state``, as ``hardcode lan`` gives them.
+        them: whether the chart switches pins on (``enabled``), why the
+        operator takes none of them when it doesn't (``off``,
+        ``manifests.lan_off``; ``""`` when it does), and each pin
+        (``manifests.effective_pins``) with what it resolves to from here
+        (``resolves``) and its ``state``, as ``hardcode lan`` gives them.
 
-        The admin's pod resolves names with the cluster's DNS, which often
-        can't see the network the address is on: a name that doesn't
-        resolve here is ``unresolved``, not wrong.
+        Nothing is looked up here: the page asks for the view every ten
+        seconds. Without *answers* (each name's addresses, from
+        ``check_lan``) every pin is ``unchecked``. The admin's pod resolves
+        names with the cluster's DNS, which often can't see the network the
+        address is on: a name that doesn't resolve here is ``unresolved``,
+        not wrong.
         """
         spec = manifests.effective_spec(profile, self.defaults)
         pins = []
 
         for pin in spec["lan"]["pins"]:
-            resolves = self.resolve(pin["name"])
+            if answers is None:
+                pins.append({**pin, "resolves": [], "state": "unchecked"})
+                continue
+
+            resolves = answers.get(pin["name"]) or []
 
             state = "ok" if pin["address"] in resolves else "moved"
             if not resolves:
@@ -1133,7 +1158,42 @@ class AdminApi:
 
             pins.append({**pin, "resolves": resolves, "state": state})
 
-        return {"enabled": spec["lan"]["enabled"], "pins": pins}
+        return {"enabled": spec["lan"]["enabled"], "off": manifests.lan_off(spec["lan"]), "pins": pins}
+
+    def resolve_all(self, names: list[str]) -> dict[str, list[str]]:
+        """
+        What each of *names* resolves to from here, looked up side by side
+        (at most ``LAN_CHECK_LOOKUPS`` at once), waiting ``LAN_CHECK_SECONDS``
+        for all of them together. A name whose lookup hasn't finished by
+        then has no addresses: a lookup still waiting to start never does,
+        and one that hangs carries on in its own thread, not this request's.
+        """
+        lookups = {name: self.lookups.submit(self.resolve, name) for name in dict.fromkeys(names)}
+        finished, _ = wait_for(lookups.values(), timeout=LAN_CHECK_SECONDS)
+
+        answers = {}
+        for name, lookup in lookups.items():
+            if lookup in finished:
+                answers[name] = lookup.result()
+            else:
+                lookup.cancel()
+                answers[name] = []
+
+        return answers
+
+    def check_lan(self, name: str):
+        """
+        Look a profile's names on the network up from here, with a short
+        deadline for all of them together (``resolve_all``): the On your
+        network card, with every pin's state.
+        """
+        self.require("full")
+        profile = self.get_profile(name)
+
+        spec = manifests.effective_spec(profile, self.defaults)
+        answers = self.resolve_all([pin["name"] for pin in spec["lan"]["pins"]])
+
+        return self.respond(self.lan_view(profile, answers))
 
     def edit_lan(self, name: str):
         """
@@ -1168,7 +1228,13 @@ class AdminApi:
                 raise HttpError(400, f"{address} is {manifests.LAN_CLUSTER}")
 
             try:
-                updated, message = allowlist.add_pin(current, pin, address, lan.internal_ranges(spec["internalRanges"]))
+                updated, message = allowlist.add_pin(
+                    current,
+                    pin,
+                    address,
+                    lan.internal_ranges(spec["internalRanges"]),
+                    manifests.CLUSTER_DEVNET,
+                )
             except allowlist.AllowlistError as error:
                 raise HttpError(400, str(error)) from error
 

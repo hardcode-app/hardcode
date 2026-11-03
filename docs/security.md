@@ -69,6 +69,11 @@ and CoreDNS the DNS server that answers name lookups.
   checks at every start and reload whether the name still resolves
   there, and never moves a pin by itself. Over `ssh`, a pin is a whole
   tunnel to that host's port, uninspected, like any `ssh` entry.
+  The proxy also refuses, for every name, the addresses of its own
+  networks and their gateways (on Compose, a gateway is your computer)
+  and the sandbox's own network (`DEVNET_SUBNET`), so no pin reaches the
+  sandbox's containers or your computer; the command refuses a pin to any
+  address of your computer before it is written.
   `tests/proxy.py` checks all of this against the real squid.
 - **DNS can't carry data out.** A name that isn't allowed gets NXDOMAIN
   ("no such name") from CoreDNS and is logged; queries straight to
@@ -126,8 +131,11 @@ and CoreDNS the DNS server that answers name lookups.
     image, with the proxy's certificate added. The copy is removed with the
     container.
   - For a build step, it adds the certificate to the image's bundle and
-    removes it before the layer is written. If it can't remove it, the step
-    fails, so a built image never contains it.
+    removes it before the layer is written; if it can't, the step fails.
+    A `RUN` step that copies or moves the bundle elsewhere takes the
+    certificate with it, and that copy stays in the image. The
+    certificate is public and only that profile's proxy has its key, but
+    an image built this way and used elsewhere trusts that proxy.
   - It covers Java trust stores, and sets `SSL_CERT_FILE` and
     `NODE_EXTRA_CA_CERTS`.
 

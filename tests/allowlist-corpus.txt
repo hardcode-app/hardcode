@@ -71,3 +71,18 @@ bad	lan example.com not-an-address
 bad	lan example.com
 bad	lan example.com 192.168.71.200 extra
 bad	lan
+# Never inside the sandbox's own network: the default DEVNET_SUBNET,
+# 172.31.253.0/24, which is inside the internal ranges too.
+bad	lan example.com 172.31.253.10
+bad	lan example.com 172.31.253.0
+bad	lan example.com 172.31.253.255
+bad	lan example.com 172.31.253.53
+ok	lan example.com 172.31.252.255
+ok	lan example.com 172.31.254.0
+# Nor inside Docker Desktop's own network, 192.168.65.0/24 by default, its
+# way from a container to the computer (host.docker.internal).
+bad	lan example.com 192.168.65.254
+bad	lan example.com 192.168.65.2
+bad	lan example.com 192.168.65.0
+ok	lan example.com 192.168.64.255
+ok	lan example.com 192.168.66.1

@@ -19,8 +19,9 @@ ENV DEBIAN_FRONTEND=noninteractive LANG=C.UTF-8
 RUN apt-get update \
  && apt-get install -y --no-install-recommends \
       # the suites' tools; Python, venv (and its pip) to install uv, and the
-      # shared library PyInstaller bundles; the libraries are in uv.lock
-      ca-certificates curl git file jq openssl openssh-client xvfb \
+      # shared library PyInstaller bundles; the libraries are in uv.lock;
+      # iproute2's ip for tests/proxy.py, which routes squid to its origins
+      ca-certificates curl git file jq openssl openssh-client xvfb iproute2 \
       python3 python3-venv libpython3.14 \
       # the app: Rust (and rustfmt) and Tauri's libraries; patchelf and squashfs for the AppImage
       rustc cargo rustfmt build-essential pkg-config libssl-dev patchelf squashfs-tools \
