@@ -104,8 +104,18 @@ CLIENTS = {
     "temurin": ["/opt/java/openjdk/bin/java", "-XX:-UsePerfData", "/hardcode-test/Fetch.java", ORIGIN],
 }
 
-# A docker create'd container's files that aren't the image's.
-MOUNT_POINTS = {".dockerenv", "etc/hostname", "etc/hosts", "etc/resolv.conf", "etc/mtab"}
+# A docker create'd container's files that aren't the image's: its init
+# layer's mount points, made afresh for each container.
+MOUNT_POINTS = {
+    ".dockerenv",
+    "etc/hostname",
+    "etc/hosts",
+    "etc/resolv.conf",
+    "etc/mtab",
+    "dev/console",
+    "dev/pts",
+    "dev/shm",
+}
 
 
 def wrapper_constant(name: str) -> str:
@@ -613,6 +623,10 @@ def differences(base: dict, built: dict) -> list[str]:
     """
     What a build changed in its base image's files, a line each, leaving
     out the mount points docker create adds to both.
+
+    A folder is compared by its type and mode alone: its time changes
+    whenever something in it does (the mount points, made at each docker
+    create, change dev's and etc's), and what is in it is compared anyway.
     """
     changed = []
 
@@ -621,9 +635,17 @@ def differences(base: dict, built: dict) -> list[str]:
             continue
         if name not in built:
             changed.append(f"removed {name}")
-        elif name not in base:
+            continue
+        if name not in base:
             changed.append(f"added {name}")
-        elif base[name] != built[name]:
+            continue
+
+        before = base[name]
+        after = built[name]
+        if before[0] == tarfile.DIRTYPE and after[0] == tarfile.DIRTYPE:
+            before = (before[0], before[2])
+            after = (after[0], after[2])
+        if before != after:
             changed.append(f"changed {name}")
 
     return changed
@@ -718,7 +740,19 @@ def check_image_in_daemon(suite: Suite, sidecar: Sidecar, name: str, host: list[
     image = f"hc-docker-test/{name}:latest"
     client = CLIENTS[name]
 
-    ran = sidecar.docker("run", "--rm", *host, "--volume", "/context:/hardcode-test:ro", image, *client)
+    # Without the image's entrypoint, as a RUN step runs it: distroless's is
+    # python3, which would take the client's python3 for its script.
+    ran = sidecar.docker(
+        "run",
+        "--rm",
+        *host,
+        "--volume",
+        "/context:/hardcode-test:ro",
+        "--entrypoint",
+        "",
+        image,
+        *client,
+    )
     suite.check(f"{name}: docker run trusts the proxy's CA", "status 200" in ran.text, ran.text)
 
     dockerfile = (
