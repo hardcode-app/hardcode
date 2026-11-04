@@ -4,6 +4,12 @@ step with them, by server-side apply.
 
 Deleting a Profile deletes everything it owns, its volumes included, through
 owner references and the StatefulSet's retention policy.
+
+A change of a profile's allowlist restarts its proxy and DNS server, so
+changes are gathered first, as the command gathers them on one computer:
+the profile is reconciled once its allowlist has gone ``QUIET_SECONDS``
+without a change, and a change made while the last one's restart is under
+way waits for that restart to end, then as long again.
 """
 
 from __future__ import annotations
@@ -15,6 +21,8 @@ import secrets
 import subprocess
 import tempfile
 import threading
+import time
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable, Optional
@@ -33,6 +41,17 @@ HASH_ANNOTATIONS = {
     "coredns": manifests.ANNOTATION_ALLOWLIST_HASH,
     "vscode": manifests.ANNOTATION_TOKEN_HASH,
 }
+
+# How long a profile's allowlist must go without a change before its proxy
+# and DNS server are restarted with it; how often a restart under way is
+# looked at again, and how long it is waited for at most (one that takes
+# longer is stuck, and the change may be what puts it right).
+QUIET_SECONDS = 5.0
+ROLLOUT_POLL_SECONDS = 2.0
+ROLLOUT_WAIT_SECONDS = 120.0
+
+# The components an allowlist change restarts.
+POLICY_COMPONENTS = ("squid", "coredns")
 
 
 def profiles_path(namespace: str) -> str:
@@ -99,20 +118,41 @@ def _without_timestamp(status: dict) -> dict:
     return {key: value for key, value in status.items() if key != "lastReconciled"}
 
 
+@dataclass
+class _Waiting:
+    """
+    A profile's allowlist change that waits to be given to its proxy:
+    the allowlist's hash, when it last changed (or the restart it waited
+    for ended), and since when a restart under way has been waited for.
+    """
+
+    allowlist_hash: str
+    since: float
+    rollout_since: Optional[float] = None
+
+
 class Operator:
     """
     Reconciles every Profile in the client's namespace.
     """
 
-    def __init__(self, k8s: K8s, defaults: Optional[dict] = None, openssl: str = "openssl"):
+    def __init__(
+        self,
+        k8s: K8s,
+        defaults: Optional[dict] = None,
+        openssl: str = "openssl",
+        clock: Callable[[], float] = time.monotonic,
+    ):
         self.k8s = k8s
         self.defaults = defaults or {}
         self.openssl = openssl
+        self.clock = clock
         self.stop = threading.Event()
 
         self._timers: dict[str, threading.Timer] = {}
         self._lock = threading.Lock()
         self._inflight: set[str] = set()
+        self._waiting: dict[str, _Waiting] = {}
 
     # -- lifecycle -------------------------------------------------------------
 
@@ -203,7 +243,11 @@ class Operator:
         try:
             profile = self.k8s.get(f"{profiles_path(self.k8s.namespace)}/{name}")
             if profile and not profile["metadata"].get("deletionTimestamp"):
-                self.reconcile(profile)
+                hold = self.allowlist_hold(profile)
+                if hold:
+                    self.enqueue(name, hold)
+                else:
+                    self.reconcile(profile)
 
         except Exception as error:  # noqa: BLE001 - the failure is reported on the object
             log.error("profile %s: %s", name, error)
@@ -233,6 +277,98 @@ class Operator:
             self.set_status(name, status, previous=previous)
         except Exception:  # noqa: BLE001 - nothing more to do; the next resync tries again
             pass
+
+    # -- gathering allowlist changes ---------------------------------------------
+
+    def allowlist_hold(self, profile: dict) -> float:
+        """
+        How many seconds to hold off reconciling *profile*, so that its proxy
+        and DNS server are restarted once for a burst of allowlist changes;
+        0 to go ahead. Its status says what it waits for meanwhile.
+
+        It waits until the allowlist the proxy is to be given has gone
+        ``QUIET_SECONDS`` without a change, and while the restart for the
+        last change is under way, then as long again; not for a new profile,
+        whose proxy has nothing yet. The whole reconcile waits, the rest of
+        an edit made with the allowlist included: the policy and the pods
+        it is applied with stay one.
+        """
+        name = profile["metadata"]["name"]
+        namespace = profile["metadata"]["namespace"]
+        names = manifests.Names(name)
+
+        wanted = manifests.effective_spec(profile, self.defaults)["proxyAllowlist"]
+        current = self.k8s.get(f"/api/v1/namespaces/{namespace}/configmaps/{names.allowlist}")
+        given = ((current or {}).get("data") or {}).get("allowlist.txt")
+
+        if given is None or given == wanted:
+            self._waiting.pop(name, None)
+            return 0
+
+        # The wait starts again whenever the allowlist changes.
+        now = self.clock()
+        wanted_hash = allowlist_hash(wanted)
+        waiting = self._waiting.get(name)
+        if waiting is None or waiting.allowlist_hash != wanted_hash:
+            waiting = _Waiting(wanted_hash, now)
+            self._waiting[name] = waiting
+
+        # A restart for the last change, still under way: the wait starts
+        # again once it is over, or has been waited for long enough.
+        if self._restarting(profile, allowlist_hash(given)):
+            if waiting.rollout_since is None:
+                waiting.rollout_since = now
+
+            if now - waiting.rollout_since < ROLLOUT_WAIT_SECONDS:
+                waiting.since = now
+                self._say_waiting(profile, "allowlist changes wait for the proxy's restart to finish")
+                return ROLLOUT_POLL_SECONDS
+        else:
+            waiting.rollout_since = None
+
+        remaining = QUIET_SECONDS - (now - waiting.since)
+        if remaining > 0:
+            self._say_waiting(profile, "allowlist changes apply a few seconds after the last one")
+            return remaining
+
+        return 0
+
+    def _restarting(self, profile: dict, given_hash: str) -> bool:
+        """
+        Whether the profile's proxy or DNS server is being restarted with
+        the policy it was last given (*given_hash*): one of their pods is on
+        another policy, on its way out, or not ready yet.
+        """
+        namespace = profile["metadata"]["namespace"]
+        selector = f"{manifests.LABEL_PROFILE}={profile['metadata']['name']}"
+        pods = self.k8s.list(f"/api/v1/namespaces/{namespace}/pods", {"labelSelector": selector})
+
+        for pod in pods:
+            labels = pod["metadata"].get("labels") or {}
+            if labels.get(manifests.LABEL_COMPONENT) not in POLICY_COMPONENTS:
+                continue
+
+            annotations = pod["metadata"].get("annotations") or {}
+            ready = any(
+                condition.get("type") == "Ready" and condition.get("status") == "True"
+                for condition in pod.get("status", {}).get("conditions", [])
+            )
+            if annotations.get(manifests.ANNOTATION_ALLOWLIST_HASH) != given_hash:
+                return True
+            if pod["metadata"].get("deletionTimestamp") or not ready:
+                return True
+
+        return False
+
+    def _say_waiting(self, profile: dict, message: str) -> None:
+        """
+        Put what a held profile waits for in its status: Pending, as its
+        policy isn't what its spec says yet. The generation observed stays
+        the last one reconciled.
+        """
+        previous = profile.get("status") or {}
+        status = {**_without_timestamp(previous), "phase": "Pending", "message": message}
+        self.set_status(profile["metadata"]["name"], status, previous=previous)
 
     # -- reconcile -------------------------------------------------------------
 

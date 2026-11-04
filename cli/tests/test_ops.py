@@ -33,13 +33,15 @@ class OpsTests(HomeTestCase):
         """
         Operations on profile *name* (created when missing), with a fresh fake
         runner that reports the profile as running or not, and name lookups
-        that give *answers* (``{name: [address, ...]}``).
+        that give *answers* (``{name: [address, ...]}``). A proxy's
+        background reload is only noted in ``self.reloads``.
         """
         if not profiles.exists(self.root, name):
             profiles.create(self.root, name, languages=list(langs.LANGS))
 
         self.runner = FakeRunner(running=running, healthy=healthy)
         self.resolver = FakeResolver(answers)
+        self.reloads = []
         return Ops(
             self.root,
             profiles.get(self.root, name),
@@ -48,6 +50,7 @@ class OpsTests(HomeTestCase):
             sleep=lambda _: None,
             resolve=self.resolver,
             host=fake_host(),
+            start_reloader=lambda root, profile: self.reloads.append(profile.name),
         )
 
     def make_folder(self, name="src"):
@@ -78,9 +81,9 @@ class OpsTests(HomeTestCase):
         )
 
         denied = ops.deny("crates.io")
-        self.assertEqual((denied.message, denied.applied), ("denied crates.io", True))
+        self.assertEqual((denied.message, denied.applied, denied.reloading), ("denied crates.io", True, True))
         self.assertIn("\noff crates.io\n", ops.profile.allowlist_file.read_text(encoding="utf-8"))
-        self.assertIn("\n#crates.io ", ops.profile.proxy_allowlist_file.read_text(encoding="utf-8"))
+        self.assertIn("\n#crates.io ", profiles.proxy_allowlist_text(ops.profile))
         self.assertFalse(next(item for item in ops.allowlist_entries() if item.entry == "crates.io").enabled)
 
         with self.assertRaisesRegex(allowlist.AllowlistError, "comes with Rust and can't be deleted"):
@@ -89,30 +92,79 @@ class OpsTests(HomeTestCase):
         enabled = ops.set_entry_enabled("crates.io", True)
         self.assertEqual(enabled.message, "enabled crates.io")
         self.assertNotIn("off crates.io", ops.profile.allowlist_file.read_text(encoding="utf-8"))
-        self.assertEqual(len(self.runner.commands("up -d allowlist squid")), 2, "each change reloaded the proxy")
+        self.assertEqual(self.reloads, ["default", "default"], "each change goes to the proxy in the background")
+        self.assertEqual(self.runner.commands("allowlist squid"), [])
 
-    def test_allow_reloads_a_running_profile(self):
+    def test_allow_gives_a_running_proxy_the_entry_in_the_background(self):
         ops = self.ops(running=True)
+        given = ops.profile.proxy_allowlist_file.read_text(encoding="utf-8")
 
         result = ops.allow("github.com/me", "rw")
 
         self.assertEqual(result.message, "allowed github.com/me (rw)")
-        self.assertTrue(result.applied)
-        self.assertEqual(len(self.runner.commands("up -d allowlist squid")), 1)
+        self.assertEqual((result.applied, result.reloading), (True, True))
+        self.assertEqual(self.reloads, ["default"])
+        self.assertEqual(self.runner.commands("allowlist squid"), [], "nothing is recreated meanwhile")
+        self.assertEqual(
+            ops.profile.proxy_allowlist_file.read_text(encoding="utf-8"),
+            given,
+            "the proxy's file is the reload's to write",
+        )
 
-    def test_allow_reports_unhealthy_reload(self):
+    def test_an_unchanged_allowlist_reloads_nothing(self):
+        ops = self.ops(running=True)
+        ops.allow("x.org")
+        self.reloads.clear()
+
+        again = ops.allow("x.org")
+
+        self.assertEqual((again.changed, again.applied, again.reloading), (False, None, False))
+        self.assertEqual(self.reloads, [])
+
+    def test_a_stopped_profiles_edit_is_written_for_its_next_start(self):
+        ops = self.ops()
+
+        ops.allow("x.org")
+        self.assertIn("\nx.org\n", ops.profile.proxy_allowlist_file.read_text(encoding="utf-8"))
+        self.assertEqual(self.reloads, [])
+
+        # Unless a reload may be giving the proxy the file this moment: the
+        # next start writes it.
+        with profiles.containers_lock(ops.profile):
+            ops.allow("y.org")
+        self.assertNotIn("y.org", ops.profile.proxy_allowlist_file.read_text(encoding="utf-8"))
+
+    def test_reload_reports_an_unhealthy_proxy(self):
         ops = self.ops(running=True, healthy=False)
 
+        result = ops.allow("x.org")
+        self.assertTrue(result.reloading, "an edit doesn't wait for the proxy")
+
         with self.assertRaisesRegex(ComposeError, "written, but squid didn't come back healthy"):
-            ops.allow("x.org")
+            ops.reload()
         self.assertIn(
             "x.org",
             ops.profile.allowlist_file.read_text(encoding="utf-8"),
             "the edit is kept; what failed is the reload",
         )
+        self.assertFalse(profiles.proxy_allowlist_current(ops.profile), "and the proxy isn't taken to have it")
 
-        with self.assertRaisesRegex(ComposeError, "didn't come back healthy"):
-            ops.reload()
+    def test_the_proxys_state(self):
+        ops = self.ops(running=True)
+        ops.reload()
+
+        self.assertEqual(ops.proxy_state(True), {"reloading": False, "behind": False, "error": ""})
+
+        ops.allow("x.org")
+        profiles.record_proxy_reload_failure(ops.profile, "squid didn't come back healthy")
+        self.assertEqual(
+            ops.proxy_state(True),
+            {"reloading": False, "behind": True, "error": "squid didn't come back healthy"},
+        )
+        self.assertEqual(ops.proxy_state(False), {"reloading": False, "behind": False, "error": ""})
+
+        ops.reload()
+        self.assertEqual(ops.proxy_state(True), {"reloading": False, "behind": False, "error": ""})
 
     def test_allow_idempotent(self):
         ops = self.ops()
@@ -460,8 +512,9 @@ class OpsTests(HomeTestCase):
         result = ops.set_languages({"python": True, "go": False}, build=False)
 
         self.assertEqual(result.message, "python on, go off (the image is rebuilt with: hardcode rebuild)")
-        self.assertTrue(result.applied, "the proxy reloaded with the new entries")
-        self.assertEqual(len(self.runner.commands("up -d allowlist squid")), 1)
+        self.assertEqual((result.applied, result.reloading), (True, True), "the proxy is given them in the background")
+        self.assertEqual(self.reloads, ["default"])
+        self.assertEqual(self.runner.commands("allowlist squid"), [])
         self.assertEqual(self.runner.commands(" build"), [])
 
         given = ops.profile.proxy_allowlist_file.read_text(encoding="utf-8")
@@ -781,13 +834,15 @@ class LanTests(HomeTestCase):
         """
         Operations on the default profile, with name lookups giving *answers*,
         on a computer whose own addresses are *this_computer* (none, so that
-        nothing depends on the machine the tests run on).
+        nothing depends on the machine the tests run on). A proxy's
+        background reload is only noted in ``self.reloads``.
         """
         if not profiles.exists(self.root, "default"):
             profiles.create(self.root, "default", languages=[])
 
         self.runner = FakeRunner(running=running)
         self.resolver = FakeResolver(self.GITLAB if answers is None else answers)
+        self.reloads = []
         return Ops(
             self.root,
             profiles.get(self.root, "default"),
@@ -797,6 +852,7 @@ class LanTests(HomeTestCase):
             resolve=self.resolver,
             this_computer=lambda address: address in this_computer,
             host=fake_host(),
+            start_reloader=lambda root, profile: self.reloads.append(profile.name),
         )
 
     def pins(self, ops):
@@ -828,10 +884,8 @@ class LanTests(HomeTestCase):
         self.assertTrue(result.data["lan"]["pinned"])
         self.assertIn("gitlab.example.com may reach 192.168.71.200 on your network", result.message)
         self.assertEqual(self.pins(ops), [("gitlab.example.com", "192.168.71.200")])
-        self.assertEqual(len(self.runner.commands("up -d allowlist squid")), 1, "one reload for both")
-        self.assertIn(
-            "lan gitlab.example.com 192.168.71.200", ops.profile.proxy_allowlist_file.read_text(encoding="utf-8")
-        )
+        self.assertEqual(self.reloads, ["default"], "one reload for both")
+        self.assertIn("lan gitlab.example.com 192.168.71.200", profiles.proxy_allowlist_text(ops.profile))
 
     def test_a_no_pins_nothing_and_lan_ok_doesnt_ask(self):
         ops = self.ops()

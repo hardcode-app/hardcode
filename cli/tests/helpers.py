@@ -18,7 +18,7 @@ from types import SimpleNamespace
 from typing import Iterable, Optional
 from unittest import mock
 
-from hardcode_cli import devices, home, langs, stack, yamlio
+from hardcode_cli import devices, home, langs, reloader, stack, yamlio
 
 REPO = Path(__file__).resolve().parent.parent.parent
 
@@ -270,6 +270,12 @@ class HomeTestCase(unittest.TestCase):
         default = mock.patch.object(home, "default_home", return_value=self.root)
         default.start()
         self.addCleanup(default.stop)
+
+        # No test starts a real background reload of a proxy: one that would
+        # says so, rather than leave a process behind.
+        spawn = mock.patch.object(reloader, "_spawn", side_effect=AssertionError("a test started a real reloader"))
+        spawn.start()
+        self.addCleanup(spawn.stop)
 
     def tearDown(self) -> None:
         shutil.rmtree(self._tmp, ignore_errors=True)

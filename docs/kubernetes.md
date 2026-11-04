@@ -116,9 +116,13 @@ then open `http://localhost:8000/?tkn=<token>`.
 | replace VS Code's token | **New token…** on the **Access** tab | `POST /api/profiles/{name}/token` |
 | delete a sandbox and its volumes | **Delete profile** on the **Settings** tab | `kubectl delete profile <name>` |
 
-Allowlist changes are live within seconds (the operator rolls the
-profile's proxy and DNS); language and extension changes reach the running
-VS Code container within about a minute, without a restart.
+Allowlist changes are live within seconds: the operator rolls the
+profile's proxy and DNS five seconds after the profile's last change, so
+several changes in a row are one restart, and a change made while they
+are still restarting for the last one waits for that restart to end
+(two minutes at most), then five seconds more. The profile is *Pending*
+meanwhile, its message saying so. Language and extension changes reach
+the running VS Code container within about a minute, without a restart.
 
 **Upgrading HardCode** is a `helm upgrade` to the new chart version. Helm
 installs the CRD on the first install only: apply the new one with
@@ -237,7 +241,8 @@ with a digit: Compose has no such limit.)
 `status` carries `phase` (`Pending`, `Ready`, `Suspended`, `Error`; the
 admin shows `Deleting` while Kubernetes removes a deleted profile),
 `message` (what it is waiting for, such as
-`waiting for vscode (ImagePullBackOff)`), `observedGeneration`,
+`waiting for vscode (ImagePullBackOff)`, or
+`allowlist changes apply a few seconds after the last one`), `observedGeneration`,
 `dnsClusterIP`, `proxyURL`, `vscodeService`, `tokenSecret` and
 `lastReconciled`. `kubectl get profiles` (short name `hcp`) shows the
 phase, image, whether it is suspended, the DNS ClusterIP and its age.

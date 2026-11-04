@@ -139,7 +139,7 @@ are open, and which VS Code extensions the sandbox gets.
 | Command | Does |
 |---|---|
 | `languages` | Every language and tool: on or off, how many allowlist entries it opens and extensions it brings, and whether the image was built with other ones. For a profile that doesn't exist yet, the catalogue, every entry off. |
-| `enable <lang>… [--no-build]`, `disable <lang>… [--no-build]` | Switch languages and tools on or off: `INSTALL_<LANG>` in `.env`; the allowlist entries they bring (a running proxy reloads at once; `allowlist.txt` isn't touched, and an entry switched off there stays off); the extension list (a running sandbox installs or removes the extensions within seconds); then the image is rebuilt with the new software and the VS Code container recreated. `--no-build` leaves the image for a later `rebuild`, and does everything else at once. |
+| `enable <lang>… [--no-build]`, `disable <lang>… [--no-build]` | Switch languages and tools on or off: `INSTALL_<LANG>` in `.env`; the allowlist entries they bring (a running proxy reloads with them in the background, a few seconds later; `allowlist.txt` isn't touched, and an entry switched off there stays off); the extension list (a running sandbox installs or removes the extensions within seconds); then the image is rebuilt with the new software and the VS Code container recreated. `--no-build` leaves the image for a later `rebuild`, and does everything else at once. |
 | `rebuild` | Rebuild the VS Code image with the profile's languages and tools, and recreate the container if it runs. Gives the proxy its allowlist too, as `up` does. |
 | `extensions` | Every VS Code extension the sandbox gets, and where it comes from: every VS Code container, a language or tool, or the profile's own. While the sandbox runs, which are still installing, refused (a publisher without a verified domain) or to be tried again. |
 | `extension add\|remove <publisher.name>` | Add or remove one of the profile's own extensions (`VSCODE_EXTENSIONS` in `.env`). A running sandbox installs or removes it within seconds, without a restart. One a language or tool already brings isn't added twice; a language's own goes when the language is switched off, and the one every sandbox has can't be removed. Only publishers with a verified domain are installed. |
@@ -160,18 +160,27 @@ work too: `c`, `c++`, `cxx`, `c#`, `csharp`, `net`, `.net`, `js`,
 | Command | Does |
 |---|---|
 | `allowlist` | Every entry of one profile's allowlist, as the app lists them: its own from `allowlist.txt` first, then those HardCode provides, by block (every profile's, then its languages' and tools'); each on or off, with its access and note; an invalid line is marked. The names on your network follow, in a section of their own. |
-| `allow <entry> [rw\|ssh]` | Add the entry (or uncomment and re-flag an existing line), and reload a running proxy. A provided entry that already allows as much isn't added; one that was switched off is switched back on. `github:OWNER/REPO` adds the two entries one GitHub repository needs, `github.com/OWNER/REPO.git` and `api.github.com/repos/OWNER/REPO`; `deny` accepts it too ([GitHub from the sandbox](github.md)). When the entry's name points inside your network, it asks whether to let the name reach that address; `--lan` says yes without asking ([a server on your own network](allowlist.md#a-server-on-your-own-network)). |
+| `allow <entry> [rw\|ssh]` | Add the entry (or uncomment and re-flag an existing line); a running proxy reloads with it a few seconds after the profile's last change, in the background. A provided entry that already allows as much isn't added; one that was switched off is switched back on. `github:OWNER/REPO` adds the two entries one GitHub repository needs, `github.com/OWNER/REPO.git` and `api.github.com/repos/OWNER/REPO`; `deny` accepts it too ([GitHub from the sandbox](github.md)). When the entry's name points inside your network, it asks whether to let the name reach that address; `--lan` says yes without asking ([a server on your own network](allowlist.md#a-server-on-your-own-network)). |
 | `lan` | The names that may reach an address on your network, each with its state: `ok`, `moved` (the name points elsewhere now; the approved address stays), `unresolved`, or `this-computer` (a pin written by hand to this computer, which the proxy is never given). |
 | `lan add <name> [address]` | Let one name reach one address on your network: the address given, or the one the name has now. Adding a name again moves it. |
 | `lan remove <name>` | Stop letting the name reach its address. |
 | `lan check <name>` | What the name resolves to now, and whether that is on your network; it says why when an address can't be pinned (this computer, or the sandbox's own network). |
 | `deny <entry> [ssh]` | Switch an entry off: one of the profile's own is commented out (wherever it is in the file), a provided one gets an `off <entry>` line. An error if it isn't on. `ssh` means the host's SSH entry; without it, its HTTPS one. |
 | `allowlist enable\|disable\|remove <entry> [ssh]` | Comment the entry's line back in, comment it out, or delete it. A provided entry is switched on or off (its `off` line removed or added) and can't be removed: it would come back with its block. `github:OWNER/REPO` acts on both its entries. |
-| `reload` | Give a running proxy the allowlist again, after you edited `allowlist.txt` by hand, with the entries this HardCode provides; says what changed. |
+| `reload` | Give a running proxy the allowlist at once, with the entries this HardCode provides, and wait until it has it; says what changed. For after you edited `allowlist.txt` by hand, and for a script that needs its edits in force before its next step. |
 | `blocked [--since 10m\|30m\|2h\|24h]` | What the proxy and the DNS server refused, by target, most frequent first. Default: the last 30 minutes. |
 
-If the proxy doesn't come back healthy after a change on a running
-profile, the command fails (exit 1, the change kept): which rules are in
+An edit of the allowlist (`allow`, `deny`, `allowlist enable|disable|remove`,
+`lan add|remove`, and `enable`/`disable` for the entries a language or
+tool brings) on a running profile returns once its files are written: the
+proxy reloads with it in the background, five seconds after the profile's
+last change, so a script's edits in a row are one reload after the last
+([how](allowlist.md#how-edits-are-made)). An edit doesn't wait for a reload
+under way; every other change to the profile does, as it waits for any
+other change. If the proxy doesn't come back healthy, `ps --json` says so
+(`proxy.error`).
+`reload` gives the proxy the allowlist at once: if the proxy doesn't come
+back healthy, it fails (exit 1, the change kept), and which rules are in
 force is then unknown until `hardcode logs allowlist squid` says why.
 [The allowlist](allowlist.md#entry-format) has the entry format.
 
@@ -208,14 +217,16 @@ profile they touched:
 ```json
 {
   "results": [
-    {"profile": "default", "message": "allowed github.com/ourcompany (rw)", "changed": true, "applied": true, "data": {}}
+    {"profile": "default", "message": "allowed github.com/ourcompany (rw)", "changed": true, "applied": true, "data": {}, "reloading": true}
   ]
 }
 ```
 
 `applied` is `true` when the running containers took the change, `false`
 when the profile isn't running (the change applies at its next start), and
-`null` when there was nothing to apply. `profile add` puts the new
+`null` when there was nothing to apply. `reloading` is `true` when the
+running proxy is given the change in the background, a few seconds after
+the profile's last change: until then it isn't in force. `profile add` puts the new
 profile's `name`, `source`, `port`, `subnet` and `languages` in `data`;
 `open` puts the `url` there; `reload` its `changes`.
 
@@ -224,7 +235,7 @@ Queries print their own objects:
 | Command | Shape |
 |---|---|
 | `profiles` / `status` | `{"home": "<folder>", "version": "<as --version says it>", "profiles": [{"name", "port", "subnet", "state", "running"}]}` |
-| `ps` | `{"services": [{"service", "state", "status", "health"}], "docker": true, "error": "", "extensions": {"state", "installed", "total"}}` (`docker: false` when the Docker CLI isn't found; `error` says why Compose couldn't list the containers, such as a daemon that isn't running, and is empty when it could; `extensions` is how far the running VS Code container's extensions have got, `state` `installing` or `done`, and `null` when it isn't running) |
+| `ps` | `{"services": [{"service", "state", "status", "health"}], "docker": true, "error": "", "extensions": {"state", "installed", "total"}, "proxy": {"reloading", "behind", "error"}}` (`docker: false` when the Docker CLI isn't found; `error` says why Compose couldn't list the containers, such as a daemon that isn't running, and is empty when it could; `extensions` is how far the running VS Code container's extensions have got, `state` `installing` or `done`, and `null` when it isn't running; `proxy` is `{"reloading", "behind", "error"}`: whether the proxy's background reload is running, whether the running proxy hasn't the allowlist the files say, and while it hasn't, why its last background reload failed, `""` when none did) |
 | `show` | `{"profile", "env": {…}, "vscodePort", "allowlist": [entries], "forwards": [{port, host, target}], "mounts": [{local, remote, mode}], "langs": [languages], "extensions": [extensions], "lan": [pins], "packages": [names], "dockerfile": {"path", "exists"}, "image": {"built", "languages", "packages", "dockerfile"}, "rebuildNeeded", "rebuildReasons", "docker": bool, "profiles": [{name, port}]}` (`image.built` is `false` with no image and `null` when Docker can't say; `image.languages` is `[]` with no image, the image's languages and tools when it has the label, `null` when nobody can tell; `rebuildNeeded` is `null` when nobody can tell) |
 | `languages` | `{"languages": [languages], "rebuildNeeded": bool}` |
 | `devices` | `{"devices": [{"key", "name", "summary", "warning", "enabled", "available", "reason"}]}` |

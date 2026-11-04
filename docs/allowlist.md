@@ -68,9 +68,14 @@ hardcode allow github.com/your-org              # read-only
 hardcode allow github.com/your-org/app rw       # read-write
 ```
 
-The change applies at once: a running sandbox's proxy reloads with it
-within seconds (the app says *proxy reloaded*). With the sandbox stopped,
-it applies at the next start.
+The change is saved at once. A running sandbox's proxy reloads with it a
+few seconds after your last change: the app says *the proxy reloads in a
+few seconds*, and its header says *applying allowlist* until it has. Many
+changes in a row are one reload, after the last, so a script can allow a
+hundred entries without waiting for a hundred reloads. To have the proxy
+take them at once, click **Reload proxy** on the app's Allowlist page, or
+run `hardcode reload`. With the sandbox stopped, changes apply at the next
+start.
 
 Some entries you may want:
 
@@ -192,7 +197,8 @@ The profile's own entries are in its `allowlist.txt`
   may reach an address on your network.
 
 After editing it, give the proxy the new list: **Reload proxy** on the
-app's Allowlist page, or `hardcode reload`. An invalid line stops the
+app's Allowlist page, or `hardcode reload`; until then the app's header
+says *allowlist not applied*. An invalid line stops the
 proxy from starting, so the reload says so; the app marks the line
 *invalid*, and `hardcode allowlist` flags it.
 
@@ -317,8 +323,9 @@ agents' telemetry and error-reporting hosts are never opened
 
 Switching a language or tool on or off (on the app's **Languages /
 Tools** page, or `hardcode enable` and `disable`) brings its block or
-takes it away, and a running proxy reloads at once. It doesn't touch
-`allowlist.txt`: an entry you switched off stays off.
+takes it away, and a running proxy reloads with it a few seconds later,
+as it does after any change. It doesn't touch `allowlist.txt`: an entry
+you switched off stays off.
 
 An entry of your own that a block also provides is allowed as long as
 either is on. To allow more than a block does (`rw` where it is
@@ -345,19 +352,41 @@ github.com` adds an HTTPS entry and leaves the template's commented
 error for one profile; with `--all`, each profile without it says so and
 the others go ahead.
 
-Every edit writes `allowlist.txt`, then `proxy-allowlist.txt` from it.
-When the profile is running, the proxy is then recreated with the new rules
-and HardCode waits for it to be healthy; the DNS server picks up its new
-list within 10 seconds. If the proxy doesn't come back healthy, the
-command fails (the edit is kept) and says to look at
-`hardcode logs allowlist squid`: until then, which rules are in force is
-unknown.
+Every edit writes `allowlist.txt`, and the command ends there. When the
+profile is running, the proxy is given the edit in the background: the
+edit starts a small process of HardCode's for the profile, unless one is
+running already, and that process waits until the profile's files have
+gone five seconds without a change. It then writes `proxy-allowlist.txt`,
+recreates the proxy with the new rules and waits for it to be healthy; the
+DNS server picks up its new list within 10 seconds. An edit made while it
+waits starts the five seconds again, and one made during the reload is
+given in another reload, five seconds after that one ends. The process
+ends once the proxy has the allowlist the files say, or when the profile
+isn't running.
+
+If the proxy doesn't come back healthy, the process keeps why, and
+`hardcode --json ps` and the app's header show it (*allowlist not
+applied*): until then, which rules are in force is unknown. `hardcode logs
+allowlist squid` shows the proxy's side; the next edit, or `hardcode
+reload`, tries again. `hardcode reload` doesn't wait: it gives the proxy
+the allowlist at once, and fails if the proxy doesn't come back healthy.
+
+An edit doesn't wait for a reload under way, either: it writes only
+`allowlist.txt`, which the proxy's container doesn't read. Every other
+change to the profile (a start, a switch of a language, a port) waits for
+the reload to end, as it waits for any other change.
 
 A running proxy keeps the rules it loaded, whatever the file says since,
 so HardCode records what it saw the proxy load
 (`proxy-allowlist.applied`). A start or rebuild that finds the proxy
-running with anything else reloads it: an edit whose reload failed is put
-right by the next start that succeeds.
+running with anything else reloads it: an edit whose reload failed, or
+never happened, is put right by the next start that succeeds.
+
+On Kubernetes, the operator gathers changes the same way: it restarts a
+profile's proxy and DNS server once the profile's allowlist has gone five
+seconds without a change, and a change made while they are still
+restarting for the last one waits for that restart to end, then five
+seconds more. The profile is *Pending* meanwhile.
 
 ## How the rules are enforced
 

@@ -28,7 +28,7 @@ const api = window.hardcode;
 const state = {
   view: 'overview',
   data: null, // the profile's state, from state:get
-  status: { services: [], docker: null, error: '', extensions: null },
+  status: { services: [], docker: null, error: '', extensions: null, proxy: null },
   statusTimer: null, // the next status refresh
   epoch: 0, // moves on when another profile is shown; replies asked for the last one are dropped
   shownProfile: null, // the profile the page shows
@@ -44,6 +44,7 @@ const state = {
   extensionStatusAsked: false, // whether extensions:status has answered for the profile shown
   extensionStatusError: '', // why the VS Code container couldn't be asked, when it couldn't
   extensionWatchUntil: 0, // until when (Date.now()) the status is read often, after a change to the extensions
+  proxyWatchUntil: 0, // ... and after a change the proxy is given in the background
   extensionDraft: '', // what is typed in the Extensions view's form
   packageDraft: '', // what is typed in the Ubuntu packages card's form
   imageSteps: null, // the profile's own Dockerfile steps, from image:get; null until it answers
@@ -94,7 +95,7 @@ const ALLOWLIST_FILTERS = {
 // How a change's toast says that the running sandbox took it, or that it
 // waits for the next start. A language's words depend on what it brings
 // (languageOutcome).
-const ALLOWLIST_OUTCOME = { applied: 'proxy reloaded', waiting: 'applies when the sandbox starts' };
+const ALLOWLIST_OUTCOME = { applied: 'the proxy reloads in a few seconds', waiting: 'applies when the sandbox starts' };
 const EXTENSION_ADDED = { applied: 'installing in the background', waiting: 'applies when the sandbox starts' };
 const EXTENSION_REMOVED = { applied: 'removing in the background', waiting: 'applies when the sandbox starts' };
 const DOCKER_OUTCOME = { applied: 'containers recreated', waiting: 'applies when the sandbox starts' };
@@ -123,6 +124,10 @@ const STATUS_REFRESH_INSTALLING = 3000;
 // anyway: the container notices the change within a few seconds, and only
 // then says it is installing.
 const EXTENSION_WATCH = 15000;
+
+// ... and after a change to the allowlist: the proxy is given it five seconds
+// after the last change, and the reload takes some seconds more.
+const PROXY_WATCH = 30000;
 
 // How much of a container's log the logs dialog shows, and how often it is read again.
 const LOG_LINES = 300;
@@ -205,7 +210,8 @@ function errorText(error) {
 /**
  * Tell the user what the last change did, from the CLI's own results:
  * whether the running sandbox took it, or it waits for the next start.
- * Nothing already in force is shown as "pending".
+ * Nothing already in force is shown as "pending". A change the running
+ * proxy is given in the background is followed until it has it.
  *
  * *outcome* has the words for both (the allowlist's by default). *head*,
  * when given, says what changed in place of the CLI's message.
@@ -214,6 +220,10 @@ function reportOutcome(outcome = ALLOWLIST_OUTCOME, head = '') {
   const results = (state.data && state.data.lastResults) || [];
   if (!results.length) {
     return;
+  }
+
+  if (results.some((result) => result.reloading)) {
+    watchProxy();
   }
 
   const applied = results.filter((result) => result.applied === true).length;
@@ -233,16 +243,16 @@ function reportOutcome(outcome = ALLOWLIST_OUTCOME, head = '') {
 }
 
 /**
- * The words for switching *lang* on or off: what a running sandbox does at
- * once (the proxy reloads with its allowlist block; its VS Code container
- * installs or removes its extensions in the background), or that it waits
- * for the next start. The toolchain waits for a rebuild, which the
- * Languages / Tools view says on its own.
+ * The words for switching *lang* on or off: what a running sandbox does by
+ * itself (the proxy reloads with its allowlist block in a few seconds; its
+ * VS Code container installs or removes its extensions in the background),
+ * or that it waits for the next start. The toolchain waits for a rebuild,
+ * which the Languages / Tools view says on its own.
  */
 function languageOutcome(lang, enabled) {
   const now = [];
   if (lang.domains.length) {
-    now.push('proxy reloaded');
+    now.push('the proxy reloads in a few seconds');
   }
   if (lang.extensions.length) {
     now.push(enabled ? 'extensions installing' : 'extensions removing');
@@ -252,16 +262,11 @@ function languageOutcome(lang, enabled) {
 }
 
 /**
- * What the toast says as an allowlist entry is being added: that, where to,
- * and that the proxy is reloading when this profile's is running.
+ * What the toast says as an allowlist entry is being added: that, and where
+ * to. A running proxy is given it in the background afterwards.
  */
 function addingMessage(entry) {
-  if (state.scope === 'all') {
-    return `Adding ${entry} to every profile…`;
-  }
-
-  const proxyRunning = state.status.services.some((service) => service.service === 'squid' && service.state === 'running');
-  return proxyRunning ? `Adding ${entry} · reloading the proxy…` : `Adding ${entry}…`;
+  return state.scope === 'all' ? `Adding ${entry} to every profile…` : `Adding ${entry}…`;
 }
 
 /** Whether the running sandbox took any of the last change's results. */
@@ -455,12 +460,13 @@ async function readStatus() {
 
   const epoch = state.epoch;
   const wasWatching = watchingExtensions();
+  const failedBefore = proxyState().error;
 
   let status;
   try {
     status = await call('stack:status');
   } catch (error) {
-    status = { services: [], docker: null, error: errorText(error), extensions: null };
+    status = { services: [], docker: null, error: errorText(error), extensions: null, proxy: null };
   }
 
   // Asked for the profile shown before a switch: the new one's comes next.
@@ -469,6 +475,13 @@ async function readStatus() {
   }
   state.status = status;
   showStatusPill();
+
+  // A background reload of the proxy that failed is said once, as it fails;
+  // the status pill keeps saying so until the proxy has the allowlist.
+  const failed = proxyState().error;
+  if (failed && failed !== failedBefore) {
+    toast(`The proxy didn't take the allowlist: ${failed}`, 'error');
+  }
 
   // A VS Code container that stopped takes its token's validity with it, as far as we
   // know; a running one is asked for its URL until it gives it.
@@ -490,12 +503,44 @@ async function readStatus() {
   }
 }
 
-/** Read the status again in a while; in a few seconds while extensions are being installed or removed. */
+/**
+ * Read the status again in a while; in a few seconds while extensions are
+ * being installed or removed, or the proxy is being given the allowlist.
+ */
 function scheduleStatus() {
   clearTimeout(state.statusTimer);
 
-  const delay = watchingExtensions() ? STATUS_REFRESH_INSTALLING : STATUS_REFRESH;
+  const delay = watchingExtensions() || watchingProxy() ? STATUS_REFRESH_INSTALLING : STATUS_REFRESH;
   state.statusTimer = setTimeout(refreshStatus, delay);
+}
+
+/** How the proxy stands with the allowlist, as the last status said: {reloading, behind, error}. */
+function proxyState() {
+  return state.status.proxy || { reloading: false, behind: false, error: '' };
+}
+
+/**
+ * Whether the proxy is being given the allowlist: its background reload
+ * runs, or a change was made a moment ago and the reload is about to start.
+ */
+function proxyApplying() {
+  const proxy = proxyState();
+  const justChanged = Date.now() < state.proxyWatchUntil;
+  return proxy.reloading || (proxy.behind && justChanged && !proxy.error);
+}
+
+/** Whether the proxy is worth following closely: it is being given the allowlist, or was a moment ago. */
+function watchingProxy() {
+  return proxyApplying() || Date.now() < state.proxyWatchUntil;
+}
+
+/**
+ * After a change the running proxy is given in the background: follow it
+ * from now on, until it has it.
+ */
+function watchProxy() {
+  state.proxyWatchUntil = Date.now() + PROXY_WATCH;
+  refreshStatus();
 }
 
 /** Whether the running VS Code container is installing extensions. */
@@ -525,7 +570,9 @@ function watchExtensions() {
 
 /**
  * The header's status pill: what runs and, while the VS Code container
- * installs extensions, how far it has got ("running (5) · extensions 3/12").
+ * installs extensions, how far it has got ("running (5) · extensions 3/12");
+ * while the proxy is being given the allowlist, that ("· applying
+ * allowlist"), and when the running one hasn't the allowlist, that too.
  */
 function showStatusPill() {
   const services = state.status.services;
@@ -565,6 +612,21 @@ function showStatusPill() {
     if (kind === 'ok') {
       kind = 'info';
     }
+  }
+
+  const proxy = proxyState();
+  if (proxyApplying()) {
+    text += ' · applying allowlist';
+    title = 'Giving the proxy the allowlist: it reloads with it a few seconds after your last change';
+    if (kind === 'ok') {
+      kind = 'info';
+    }
+  } else if (proxy.behind) {
+    text += ' · allowlist not applied';
+    title = proxy.error
+      ? `The proxy didn't take the allowlist: ${proxy.error}. Reload proxy, on the Allowlist page, tries again.`
+      : "The running proxy hasn't the allowlist as it is now (edited by hand?): Reload proxy, on the Allowlist page, gives it.";
+    kind = proxy.error ? 'bad' : 'warn';
   }
 
   const pill = $('#status-pill');
@@ -699,13 +761,14 @@ function forgetVscodeUrl() {
 function forgetProfile() {
   state.epoch += 1;
   forgetVscodeUrl();
-  state.status = { services: [], docker: state.status.docker, error: '', extensions: null };
+  state.status = { services: [], docker: state.status.docker, error: '', extensions: null, proxy: null };
   state.blocked = [];
   state.lanStates = null;
   state.extensionStatus = null;
   state.extensionStatusAsked = false;
   state.extensionStatusError = '';
   state.extensionWatchUntil = 0;
+  state.proxyWatchUntil = 0;
   state.packageDraft = '';
   state.imageSteps = null;
   state.imageStepsError = '';
@@ -1456,7 +1519,7 @@ function langs() {
       ${rebuildButton}
     </div>
     ${scopeNote("Switching below switches the language or tool in every profile, and the rebuild rebuilds every profile's image")}
-    <div class="callout info">Switching a language or tool on or off opens or closes its allowlist entries at once, and a running VS Code container installs or removes its extensions in the background within seconds (reload the VS Code window if one doesn't appear). Its toolchain or CLI comes with the next image rebuild.${esc(noImage)}</div>
+    <div class="callout info">Switching a language or tool on or off opens or closes its allowlist entries (a running proxy reloads with them a few seconds after your last change), and a running VS Code container installs or removes its extensions in the background within seconds (reload the VS Code window if one doesn't appear). Its toolchain or CLI comes with the next image rebuild.${esc(noImage)}</div>
     ${rebuildCallout('apply-langs')}
     <h3 class="group-title">Languages</h3>
     <div class="lang-grid">${languages.map(langCard).join('')}</div>
@@ -1981,7 +2044,7 @@ function allowlist() {
       <div class="chips">${filterChips}</div>
       <span class="spacer"></span>
       ${scopeChips('changes')}
-      <button class="btn" data-act="reload-proxy" ${state.running ? 'disabled' : ''} title="Re-render the file into the running proxy, after editing it by hand">Reload ${all ? 'all proxies' : 'proxy'}</button>
+      <button class="btn" data-act="reload-proxy" ${state.running ? 'disabled' : ''} title="Give the running proxy the allowlist now: after editing the file by hand, or rather than wait for the changes below to reach it">Reload ${all ? 'all proxies' : 'proxy'}</button>
     </div>
     ${scopeNote("Adding, toggling and deleting below changes the same entry in every profile's allowlist")}
     <div class="card" style="margin-bottom:14px">
@@ -1991,7 +2054,7 @@ function allowlist() {
         <button class="btn primary" data-act="add-allowlist" ${state.adding ? 'disabled' : ''}>Add${all ? ' to all' : ''}</button>
       </div>
       <div class="form-error" id="al-error"></div>
-      <p class="muted small" style="margin:0">Read-only still lets git clone, fetch and pull. A path such as <code>github.com/myuser</code> allows only that namespace. The entries HardCode provides (every profile's, and those of the languages and tools that are on) can be switched off but not deleted: one switched off stays off through updates, and one an update adds arrives switched on. Every change is written to <code>profiles/${esc(data.profile)}/allowlist.txt</code> and applied to the running proxy at once; with the sandbox stopped it applies at the next start. <b>Reload</b> is for edits you made to the file by hand.</p>
+      <p class="muted small" style="margin:0">Read-only still lets git clone, fetch and pull. A path such as <code>github.com/myuser</code> allows only that namespace. The entries HardCode provides (every profile's, and those of the languages and tools that are on) can be switched off but not deleted: one switched off stays off through updates, and one an update adds arrives switched on. Every change is written to <code>profiles/${esc(data.profile)}/allowlist.txt</code> at once, and a running proxy reloads with it a few seconds after your last change (the header says <i>applying allowlist</i> meanwhile); with the sandbox stopped it applies at the next start. <b>Reload</b> gives it at once, and is for edits you made to the file by hand.</p>
     </div>
     ${lanSection()}
     <div class="card" style="padding:0">
@@ -2330,7 +2393,8 @@ function bindForwardsAndMounts() {
 
 /**
  * The Languages / Tools view's switches. A switch changes the allowlist
- * (and the running proxy) and the extension list at once, and leaves the
+ * and the extension list at once (a running proxy is given the allowlist
+ * in the background, a few seconds after the last change), and leaves the
  * image for the rebuild, so the view shows what is now out of date. A
  * running VS Code container's installing is followed from then on.
  */
@@ -2543,9 +2607,9 @@ const actions = {
     }
 
     // The entry shows at once, among the profile's own, while the CLI
-    // writes it and restarts a running proxy with it, which takes a few
-    // seconds; the list the CLI reads back then takes its place. With
-    // nothing typed, the CLI just says what to type.
+    // writes it (a running proxy is given it in the background afterwards);
+    // the list the CLI reads back then takes its place. With nothing typed,
+    // the CLI just says what to type.
     if (entry) {
       state.adding = { entry, flag };
       state.prefill = null;
@@ -2592,6 +2656,7 @@ const actions = {
       ? `Proxy reloaded: ${applied.join(', ')}`
       : 'Nothing running; the allowlist applies at the next start';
     toast(message, 'ok');
+    refreshStatus();
   },
 
   async 'refresh-blocked'() {

@@ -30,6 +30,7 @@ from . import (
     override,
     packages,
     profiles,
+    reloader,
     stack,
     version_text,
     yamlio,
@@ -54,7 +55,7 @@ hardcode [-p NAME | --all] [--json] [--config DIR] <command> [args]
   token rotate  (--all)   a new VS Code token: every copy of the old one stops working
   allowlist               every entry: the profile's own, then those HardCode provides
   allow <entry> [rw|ssh]  allow a site (--all: every profile)        deny <entry> [ssh]
-  allowlist enable|disable|remove <entry> [ssh]  (--all)             reload   push the allowlist to the proxy
+  allowlist enable|disable|remove <entry> [ssh]  (--all)             reload   give the proxy the allowlist now
   lan                     names that may reach your own network      lan add|remove|check <name> [address]  (--all)
                           (allow <entry> --lan: let its name reach it, without asking)
   forward <port> [vscode|docker] [target]                              unforward <port>
@@ -112,8 +113,9 @@ def _print_error(message: str) -> None:
 class App:
     """
     What the command handlers share: the home (where the profiles are), the
-    output mode, and the runner, printers and this computer as the devices
-    see it (all injectable, for tests).
+    output mode, and the runner, printers, this computer as the devices see
+    it and the start of the proxy's background reload (all injectable, for
+    tests).
     """
 
     def __init__(
@@ -129,6 +131,7 @@ class App:
         resolve: lan.Resolver = lan.resolve,
         this_computer: lan.ThisComputer = lan.is_this_computer,
         host: Optional[devices.Host] = None,
+        start_reloader: Callable[[Path, profiles.Profile], None] = reloader.start,
     ):
         self.root = root
         self.home_id = home.home_id(root)
@@ -142,6 +145,7 @@ class App:
         self.resolve = resolve
         self.this_computer = this_computer
         self.host = host or devices.Host()
+        self.start_reloader = start_reloader
         self.results: list[Result] = []
 
     def profile(self, name: str) -> profiles.Profile:
@@ -158,6 +162,7 @@ class App:
             resolve=self.resolve,
             this_computer=self.this_computer,
             host=self.host,
+            start_reloader=self.start_reloader,
         )
 
     def compose(self, name: str) -> Compose:
@@ -203,7 +208,9 @@ class App:
             return
 
         line = f"{prefix}{result.message}"
-        if result.applied is True:
+        if result.reloading:
+            line += " (the proxy reloads in a few seconds; hardcode reload: now)"
+        elif result.applied is True:
             line += " (applied)"
         elif result.applied is False:
             line += f" (profile '{result.profile}' isn't running; applies when it starts)"
@@ -486,22 +493,32 @@ def _confirm_removal(name: str) -> bool:
     return answer.strip().lower() in ("y", "yes")
 
 
-def _for_each(app: App, args: argparse.Namespace, operation: Callable[[Ops], Result]) -> int:
+def _for_each(
+    app: App,
+    args: argparse.Namespace,
+    operation: Callable[[Ops], Result],
+    files_only: bool = False,
+) -> int:
     """
     Run *operation* on the profile, or on every profile with ``--all``.
 
     With ``--all``, a profile the operation fails on is reported as skipped
     and the others carry on; the command fails only if every profile did.
+
+    An edit of the allowlist is *files_only*: it takes the lock on the
+    profile's files alone, so a reload of the proxy under way doesn't hold
+    it up (``profiles.files_lock``).
     """
     names = app.targets(args.profile, args.all)
     failures = 0
+    hold = profiles.files_lock if files_only else profiles.lock
 
     for name in names:
         prefix = f"[{name}] " if args.all else ""
 
         try:
             # One change to a profile at a time: another one waits its turn.
-            with profiles.lock(app.profile(name), waiting=app.err):
+            with hold(app.profile(name), waiting=app.err):
                 app.report(operation(app.ops(name)), prefix)
         except USER_ERRORS as error:
             if not args.all:
@@ -529,7 +546,12 @@ def cmd_allow(app: App, args: argparse.Namespace) -> int:
             question = f"{name} resolves to {address}, on your network. Let it reach that address? [y/N] "
             return app.ask(question).strip().lower() in ("y", "yes")
 
-    return _for_each(app, args, lambda ops: ops.allow(args.entry, flag, lan_ok=args.lan, confirm=confirm))
+    return _for_each(
+        app,
+        args,
+        lambda ops: ops.allow(args.entry, flag, lan_ok=args.lan, confirm=confirm),
+        files_only=True,
+    )
 
 
 def cmd_deny(app: App, args: argparse.Namespace) -> int:
@@ -544,7 +566,7 @@ def cmd_deny(app: App, args: argparse.Namespace) -> int:
 
         return result
 
-    return _for_each(app, args, deny)
+    return _for_each(app, args, deny, files_only=True)
 
 
 def cmd_forward(app: App, args: argparse.Namespace) -> int:
@@ -833,10 +855,10 @@ def cmd_allowlist(app: App, args: argparse.Namespace) -> int:
     ssh = args.flag == "ssh"
 
     if args.action == "remove":
-        return _for_each(app, args, lambda ops: ops.remove_entry(args.entry, ssh=ssh))
+        return _for_each(app, args, lambda ops: ops.remove_entry(args.entry, ssh=ssh), files_only=True)
 
     enabled = args.action == "enable"
-    return _for_each(app, args, lambda ops: ops.set_entry_enabled(args.entry, enabled, ssh=ssh))
+    return _for_each(app, args, lambda ops: ops.set_entry_enabled(args.entry, enabled, ssh=ssh), files_only=True)
 
 
 def _list_allowlist(app: App, args: argparse.Namespace) -> int:
@@ -899,9 +921,9 @@ def cmd_lan(app: App, args: argparse.Namespace) -> int:
         raise CommandError("only lan add takes an address: hardcode lan add <name> [address]")
 
     if args.action == "add":
-        return _for_each(app, args, lambda ops: ops.add_pin(args.name, args.address or ""))
+        return _for_each(app, args, lambda ops: ops.add_pin(args.name, args.address or ""), files_only=True)
     if args.action == "remove":
-        return _for_each(app, args, lambda ops: ops.remove_pin(args.name))
+        return _for_each(app, args, lambda ops: ops.remove_pin(args.name), files_only=True)
 
     if args.all:
         raise CommandError("the list is one profile's: -p NAME picks which")
@@ -972,6 +994,29 @@ def cmd_port(app: App, args: argparse.Namespace) -> int:
 
 def cmd_reload(app: App, args: argparse.Namespace) -> int:
     return _for_each(app, args, lambda ops: ops.reload())
+
+
+def cmd_reloader(app: App, args: argparse.Namespace) -> int:
+    """
+    The background reload of a running profile's proxy, which an edit of its
+    allowlist starts (``reloader``); nobody runs it by hand.
+    """
+    ops = app.ops(args.profile)
+    profile = ops.profile
+
+    def behind() -> bool:
+        try:
+            return not profiles.proxy_allowlist_current(profile, app.this_computer)
+        except OSError:
+            return False
+
+    reloader.run(
+        profile,
+        step=lambda: reloader.reload_step(ops),
+        behind=behind,
+        look=lambda: reloader.fingerprint(profile),
+    )
+    return 0
 
 
 def cmd_rebuild(app: App, args: argparse.Namespace) -> int:
@@ -1178,7 +1223,13 @@ def _add_allowlist_commands(sub) -> None:
     lan_command.add_argument("address", nargs="?", help="with add: its address (default: what it resolves to here)")
     lan_command.set_defaults(func=cmd_lan)
 
-    sub.add_parser("reload", help="re-render the allowlist into the running proxy").set_defaults(func=cmd_reload)
+    sub.add_parser(
+        "reload",
+        help="give the running proxy the allowlist now (an edit gives it a few seconds after the last one)",
+    ).set_defaults(func=cmd_reload)
+
+    # The background reload an allowlist edit starts: not in the usage.
+    sub.add_parser(reloader.COMMAND).set_defaults(func=cmd_reloader)
 
     blocked = sub.add_parser("blocked", help="what the proxy and DNS filter refused")
     blocked.add_argument("--since", default="30m", choices=["10m", "30m", "2h", "24h"])
@@ -1347,6 +1398,7 @@ def main(
     resolve: lan.Resolver = lan.resolve,
     this_computer: lan.ThisComputer = lan.is_this_computer,
     host: Optional[devices.Host] = None,
+    start_reloader: Callable[[Path, profiles.Profile], None] = reloader.start,
 ) -> int:
     """
     Run the command line in *argv* and return the exit code.
@@ -1355,8 +1407,9 @@ def main(
     *terminal* (by default, when its input is one), and never with
     ``--json``. *env* stands in for the environment (the home, sudo) in
     tests, *resolve* for this machine's name lookups, *this_computer* for
-    its test of whether an address is its own, and *host* for this computer
-    as the devices see it.
+    its test of whether an address is its own, *host* for this computer as
+    the devices see it, and *start_reloader* for the start of a proxy's
+    background reload.
     """
     parser = build_parser()
     args = parser.parse_args(argv)
@@ -1391,6 +1444,7 @@ def main(
             resolve=resolve,
             this_computer=this_computer,
             host=host,
+            start_reloader=start_reloader,
         )
         return args.func(app, args)
     except (CommandError, *USER_ERRORS) as error:

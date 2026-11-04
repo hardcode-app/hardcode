@@ -78,7 +78,8 @@ extensions it **brings** (one too long for the card is cut short with
 "…", and its tooltip has it whole).
 
 Switching one sets `spec.languages`, and the operator gives the proxy the
-language's entries, or takes them away, within seconds (`spec.allowlist`
+language's entries, or takes them away, a few seconds after the last
+change (`spec.allowlist`
 isn't touched, and an entry switched off there stays off). Its extensions
 follow without a restart: the operator rewrites the profile's extension
 list (the `<profile>-vscode-extensions` ConfigMap), the kubelet brings the
@@ -148,8 +149,9 @@ your own, a delete button; the form at the top adds one
   `off <entry>` into `spec.allowlist` and lasts through updates and
   language switches, but not deleted.
 - Changes go into `spec.allowlist`, and the operator rolls the profile's
-  proxy and DNS server, so they are live within seconds; there is no
-  separate *Apply*.
+  proxy and DNS server five seconds after the last one, so they are live
+  within seconds, and several changes in a row are one restart; there is
+  no separate *Apply*. The profile is *Pending* until the proxy has them.
 - Two admins editing the same profile at once can't lose each other's
   edits: every single-entry write names the version it read, and one that
   lost the race is applied again on top of the newer text.

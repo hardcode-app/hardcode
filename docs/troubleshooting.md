@@ -114,6 +114,19 @@ Look at **Blocked traffic** (or `hardcode blocked`):
 Before you allow anything, read
 [Staying safe](staying-safe.md#read-blocked-traffic-before-you-allow-anything).
 
+### The app says *applying allowlist*, or *allowlist not applied*
+
+*applying allowlist*: the proxy reloads with your changes a few seconds
+after the last one. Nothing is wrong; it goes away once the proxy has
+them. To have them at once, click **Reload proxy** on the Allowlist page,
+or run `hardcode reload`.
+
+*allowlist not applied*: the running proxy doesn't have the allowlist as
+it is now. Hover over it for why. Either you edited `allowlist.txt` by
+hand, or the proxy didn't come back healthy with your changes:
+`hardcode logs allowlist squid` shows what it said. Fix the line it
+names, if it names one, then click **Reload proxy**.
+
 ### `git push` is refused
 
 Pushing needs read-write access to the repository, and a way for the

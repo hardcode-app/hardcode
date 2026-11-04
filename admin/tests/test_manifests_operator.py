@@ -15,7 +15,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from hardcode_admin import manifests
+from hardcode_admin import manifests, operator
 from hardcode_admin.operator import Operator, _status_only, allowlist_hash, generate_ca, profiles_path
 from hardcode_cli import langs
 
@@ -955,6 +955,136 @@ class OperatorTests(unittest.TestCase):
         self.assertIsNotNone(timer, "the profile is looked at again later")
         timer.cancel()
         self.assertIn("p3", self.operator._inflight, "the other reconcile is left alone")
+
+
+class AllowlistHoldTests(unittest.TestCase):
+    """
+    Allowlist changes gathered before the proxy is restarted with them, as
+    the command gathers them on one computer.
+    """
+
+    def setUp(self):
+        self.now = 0.0
+        self.k8s = FakeK8s()
+        self.operator = Operator(self.k8s, chart_defaults({"image": "img:1"}), clock=lambda: self.now)
+        self.k8s.create(PROFILES, profile("p3"))
+
+        # The profile's resources, and its pods up and current: Ready.
+        self.operator.reconcile(self.current())
+        self.k8s.pods = self.current_pods()
+        self.assertEqual(self.operator.reconcile(self.current())["phase"], "Ready")
+
+        # Reconciles asked for later are noted, not timed.
+        self.enqueued = []
+        self.operator.enqueue = lambda name, delay=0.3: self.enqueued.append((name, delay))
+
+    def current(self):
+        return self.k8s.get(f"{PROFILES}/p3")
+
+    def current_pods(self):
+        """
+        Ready pods of the profile, on the policy (and token) their templates carry.
+        """
+        pods = []
+        for component in ("vscode", "squid", "coredns"):
+            kind = STATEFULSETS if component == "vscode" else DEPLOYMENTS
+            workload = self.k8s.get(f"{kind}/p3-{component}")
+            pod = ready_pod("p3", component)
+            pod["metadata"]["annotations"] = dict(workload["spec"]["template"]["metadata"]["annotations"])
+            pods.append(pod)
+
+        return pods
+
+    def given(self):
+        return self.k8s.get(f"{CONFIGMAPS}/p3-allowlist")["data"]["allowlist.txt"]
+
+    def edit(self, text):
+        self.k8s.merge_patch(f"{PROFILES}/p3", {"spec": {"allowlist": text}})
+
+    def test_a_new_profile_is_not_held(self):
+        self.k8s.create(PROFILES, profile("p4"))
+
+        self.assertEqual(self.operator.allowlist_hold(self.k8s.get(f"{PROFILES}/p4")), 0)
+
+    def test_other_changes_are_not_held(self):
+        self.k8s.merge_patch(f"{PROFILES}/p3", {"spec": {"suspended": True}})
+
+        self.assertEqual(self.operator.allowlist_hold(self.current()), 0)
+
+    def test_a_burst_of_changes_restarts_the_proxy_once_after_the_last(self):
+        self.edit("pypi.org\na.example\n")
+        self.operator.reconcile_by_name("p3")
+        self.assertEqual(self.enqueued, [("p3", operator.QUIET_SECONDS)])
+        self.assertNotIn("a.example", self.given(), "held: nothing restarted")
+
+        status = self.current()["status"]
+        self.assertEqual(
+            (status["phase"], status["message"]),
+            ("Pending", "allowlist changes apply a few seconds after the last one"),
+        )
+
+        # Another change two seconds on starts the wait again.
+        self.now = 2.0
+        self.edit("pypi.org\na.example\nb.example\n")
+        self.assertEqual(self.operator.allowlist_hold(self.current()), operator.QUIET_SECONDS)
+
+        self.now = 6.0
+        self.assertEqual(self.operator.allowlist_hold(self.current()), 1.0)
+
+        # Quiet for long enough: the profile is reconciled, with both.
+        self.now = 7.0
+        self.operator.reconcile_by_name("p3")
+        self.assertIn("\nb.example\n", self.given())
+        self.assertEqual(self.operator.allowlist_hold(self.current()), 0, "nothing left to wait for")
+
+    def apply(self, text):
+        """
+        Change the allowlist, and let the operator see the change now and
+        apply it once it has been quiet for long enough.
+        """
+        self.edit(text)
+        self.operator.reconcile_by_name("p3")
+
+        self.now += operator.QUIET_SECONDS
+        self.operator.reconcile_by_name("p3")
+        self.assertIn(text.split()[-1], self.given())
+
+    def test_a_change_during_a_restart_waits_for_it_to_end(self):
+        self.apply("pypi.org\na.example\n")
+
+        # The proxy is being restarted with that change (its pods are still
+        # the old ones) when the next comes.
+        self.now = 6.0
+        self.edit("pypi.org\na.example\nb.example\n")
+        self.assertEqual(self.operator.allowlist_hold(self.current()), operator.ROLLOUT_POLL_SECONDS)
+        self.assertEqual(
+            self.current()["status"]["message"], "allowlist changes wait for the proxy's restart to finish"
+        )
+
+        # Restarted: the wait starts over from there.
+        self.now = 8.0
+        self.k8s.pods = self.current_pods()
+        self.assertEqual(self.operator.allowlist_hold(self.current()), operator.QUIET_SECONDS - 2.0)
+
+        self.now = 11.0
+        self.assertEqual(self.operator.allowlist_hold(self.current()), 0)
+
+    def test_a_restart_that_never_ends_is_waited_for_two_minutes_at_most(self):
+        self.apply("pypi.org\na.example\n")
+
+        # Its new pods never get ready.
+        self.k8s.pods = self.current_pods()
+        for pod in self.k8s.pods:
+            pod["status"]["conditions"] = [{"type": "Ready", "status": "False"}]
+
+        self.edit("pypi.org\nb.example\n")
+        self.assertEqual(self.operator.allowlist_hold(self.current()), operator.ROLLOUT_POLL_SECONDS)
+
+        self.now = 5.0 + operator.ROLLOUT_WAIT_SECONDS - 1
+        self.assertEqual(self.operator.allowlist_hold(self.current()), operator.ROLLOUT_POLL_SECONDS)
+
+        self.now += operator.QUIET_SECONDS + 1
+        self.assertEqual(self.operator.allowlist_hold(self.current()), 0, "the change may be what puts it right")
 
 
 @unittest.skipUnless(shutil.which("bash") and os.name != "nt", "needs bash")

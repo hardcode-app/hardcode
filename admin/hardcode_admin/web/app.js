@@ -370,7 +370,7 @@ function languagesTab(profile) {
 
   const note =
     '<div class="callout info">On Kubernetes the image (<b>Settings</b>) decides which toolchains a VS Code container has; the default image has them all. ' +
-    'A language or tool opens its allowlist entries at once (the proxy reloads), and the running VS Code container installs or removes its VS Code extensions in the background within about a minute, without a restart.</div>';
+    'A language or tool opens its allowlist entries (the proxy reloads with them a few seconds after the last change), and the running VS Code container installs or removes its VS Code extensions in the background within about a minute, without a restart.</div>';
 
   return `${note}
       <div class="group-head"><h2>Languages</h2><span class="muted small">${count(languages)}</span></div>
@@ -569,7 +569,7 @@ function allowlistTab(profile) {
         <div class="field"><label>Access</label><select id="al-flag"><option value="">read-only (GET, clone/pull)</option><option value="rw">read-write (uploads, push)</option><option value="ssh" ${state.prefillFlag === 'ssh' ? 'selected' : ''}>ssh tunnel</option></select></div>
         <button class="btn primary" data-act="al-add">Add</button></div>
         <div class="form-error" id="al-error"></div>
-        <p class="muted small" style="margin:0">The entries HardCode provides (every profile's, and those of the languages and tools that are on) can be switched off but not deleted: one switched off stays off through updates, and one an update adds arrives switched on. Changes are applied to the running proxy within seconds (squid and CoreDNS restart with the new rules). To change many profiles at once use <b>All allowlists</b>. <button class="btn ghost small" data-act="al-raw">Edit as text…</button></p></div>
+        <p class="muted small" style="margin:0">The entries HardCode provides (every profile's, and those of the languages and tools that are on) can be switched off but not deleted: one switched off stays off through updates, and one an update adds arrives switched on. The running proxy is given changes a few seconds after the last one (squid and CoreDNS restart with the new rules, and the profile is <i>Pending</i> until they have). To change many profiles at once use <b>All allowlists</b>. <button class="btn ghost small" data-act="al-raw">Edit as text…</button></p></div>
       ${lanCard(profile)}
       <div class="card" style="padding:0"><table><thead><tr><th></th><th>Entry</th><th>Type / access</th><th>Note</th><th></th></tr></thead><tbody>${rows}</tbody></table></div>`;
 }
@@ -838,7 +838,7 @@ function bulkView() {
     .join('');
 
   return {
-    html: `<div class="callout">Changes here apply to <b>every profile</b> (${state.profiles.length}) at once: add an entry, remove it, or enable/disable it. Each profile's proxy reloads on its own.</div>
+    html: `<div class="callout">Changes here apply to <b>every profile</b> (${state.profiles.length}) at once: add an entry, remove it, or enable/disable it. Each profile's proxy reloads on its own, a few seconds after the last change.</div>
       <div class="card"><div class="form-row">
         <div class="field grow"><label>Entry</label><input type="text" class="mono" id="bk-entry" placeholder="github.com/ourcompany" value="${esc(state.bulkEntry)}"></div>
         <div class="field"><label>Access</label><select id="bk-flag">${options}</select></div>
@@ -1015,7 +1015,7 @@ function rawAllowlistModal() {
 
       closeModal();
       await openProfile(state.profile.name);
-      toast('Allowlist saved', 'ok');
+      toast('Allowlist saved · the proxy reloads in a few seconds', 'ok');
     };
   });
 }
@@ -1059,8 +1059,9 @@ async function openProfile(name, tab) {
  * Switch one of the open profile's languages or tools on or off. The list
  * sent is made from the profile as it is now, not as the page last drew it,
  * so a switch another admin made meanwhile isn't undone. The operator gives
- * the proxy the language's allowlist entries or takes them away; the
- * running VS Code container follows with the extensions by itself.
+ * the proxy the language's allowlist entries or takes them away, a few
+ * seconds after the last change; the running VS Code container follows
+ * with the extensions by itself.
  */
 async function setLanguage(key, enabled) {
   const current = await call('GET', profilePath());
@@ -1072,7 +1073,8 @@ async function setLanguage(key, enabled) {
   await openProfile(state.profile.name);
 
   const lang = state.catalogue.find((entry) => entry.key === key);
-  let what = enabled ? 'its allowlist entries are open' : 'its allowlist entries are closed';
+  let what = enabled ? 'its allowlist entries open' : 'its allowlist entries close';
+  what += ' as the proxy reloads in a few seconds';
   if (lang && lang.extensions.length) {
     const how = enabled ? 'installed' : 'removed';
     what += `; its VS Code extensions are ${how} in the background within about a minute`;
@@ -1179,7 +1181,7 @@ const actions = {
     state.prefill = '';
     state.prefillFlag = '';
     await openProfile(state.profile.name);
-    toast(`Added ${entry}`, 'ok');
+    toast(`Added ${entry} · the proxy reloads in a few seconds`, 'ok');
   },
 
   async 'lan-add'() {

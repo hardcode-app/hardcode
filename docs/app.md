@@ -40,7 +40,12 @@ The state next to the page title says:
 | *status unknown* | Docker Compose or the command failed; hover over it for the reason |
 
 While the sandbox installs VS Code extensions, the state adds how far it
-has got: *running (5) · extensions 3/12*.
+has got: *running (5) · extensions 3/12*. After a change to the
+allowlist, it adds *applying allowlist* until the proxy has it. It says
+*allowlist not applied* when the running proxy hasn't the allowlist as it
+is now: after you edited `allowlist.txt` by hand, or when the proxy
+couldn't take a change (hover over it for why). **Reload proxy**, on the
+Allowlist page, gives it the allowlist.
 
 The app opens on the profile you used last. Closing the app doesn't stop
 any sandbox.
@@ -120,8 +125,8 @@ allowlist is struck through) and the VS Code extensions it **brings**.
 
 A switch changes three things, at different times, as the banner says:
 
-1. **The allowlist entries** open or close at once, and a running proxy
-   reloads.
+1. **The allowlist entries** open or close, and a running proxy reloads
+   with them a few seconds later.
 2. **The extensions** follow within seconds, while VS Code runs (reload
    VS Code's window if one doesn't appear).
 3. **The software** comes with the next image rebuild. Until then the card
@@ -192,10 +197,13 @@ Each row has its type (host, subdomains, path, ssh), its access
 
 ![Searching the allowlist](images/app-allowlist-search.png)
 
-Every change is written to the profile's `allowlist.txt` and applied to a
-running proxy at once; the message says *proxy reloaded*, or *applies when
-the sandbox starts* when it isn't running. **Reload proxy** is for after
-you edited `allowlist.txt` by hand.
+Every change is written to the profile's `allowlist.txt` at once. A
+running proxy reloads with it a few seconds after your last change, so
+several changes in a row are one reload: the message says *the proxy
+reloads in a few seconds*, or *applies when the sandbox starts* when it
+isn't running, and the state next to the page title says *applying
+allowlist* until the proxy has it. **Reload proxy** gives the proxy the
+allowlist at once; use it after you edited `allowlist.txt` by hand.
 
 [The allowlist](allowlist.md) explains entries in full.
 

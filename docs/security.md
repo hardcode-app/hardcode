@@ -112,6 +112,17 @@ and CoreDNS the DNS server that answers name lookups.
   it saw the running proxy load, and a start or rebuild reloads a proxy
   that has anything else: a removed entry stays removed, even after a
   reload or start that failed half-way.
+- **A change reaches a running proxy a few seconds after it is made.**
+  An edit of the allowlist returns once it is written, and the proxy is
+  reloaded with it in the background, five seconds after the profile's
+  last change (on Kubernetes, the operator waits the same way): an entry
+  you remove stays allowed until then, and a stream of changes holds the
+  reload off until it stops. The app says *applying allowlist* meanwhile,
+  and *allowlist not applied* if the reload fails; `hardcode reload`
+  gives the proxy the allowlist at once and waits for it, for when a
+  removal can't wait. The proxy's file is written only by whoever then
+  gives it to the proxy, under the profile's lock on its containers, so
+  what is recorded as loaded is what the proxy read.
 
 ### Docker inside the sandbox
 

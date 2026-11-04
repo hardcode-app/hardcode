@@ -121,6 +121,20 @@ profile),
 so `hardcode -p NAME compose <anything>` is always available for what the
 command doesn't cover. [Profiles](profiles.md) has the details.
 
+One change to a profile at a time: every command that changes one holds
+its two locks, the operating system's on files in its folder, one on its
+containers (`.containers.lock`) and one on its files (`.lock`), taken in
+that order. An edit of the allowlist takes the files' lock alone, writes
+`allowlist.txt` and returns; on a running profile it starts the proxy's
+background reload, `hardcode _reloader` (`cli/hardcode_cli/reloader.py`),
+unless one is running (it holds `.reloader.lock`). That process waits until
+the profile's files have gone five seconds without a change, then, under
+both locks, writes `proxy-allowlist.txt`, and recreates `allowlist` and
+`squid` holding the containers' lock alone, so that edits go on meanwhile;
+it does it again for an edit made during the reload, and ends when the
+proxy is caught up or the profile isn't running. A reload that fails is
+kept in `proxy-allowlist.failed`, which `ps --json` reports.
+
 ## The same shape on Kubernetes
 
 The [operator](kubernetes.md) builds the same thing per `Profile` object: a

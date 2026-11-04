@@ -30,6 +30,7 @@ from . import (
     override,
     packages,
     profiles,
+    reloader,
     stack,
 )
 from .compose import Compose, ComposeError, Runner
@@ -69,7 +70,9 @@ class Result:
 
     ``applied`` says whether the running sandbox took the change: ``True`` if
     it did, ``False`` when the profile isn't running (the change applies at its
-    next start), and ``None`` when there was nothing to apply.
+    next start), and ``None`` when there was nothing to apply. ``reloading``
+    says that the running proxy is given it in the background, a few seconds
+    after the profile's last change (see ``reloader``): it isn't in force yet.
     """
 
     profile: str
@@ -77,6 +80,7 @@ class Result:
     changed: bool = True
     applied: Optional[bool] = None
     data: dict = field(default_factory=dict)
+    reloading: bool = False
 
 
 def _checked_status(status: object) -> Optional[dict]:
@@ -168,7 +172,8 @@ class Ops:
     The operations on one profile of a checkout.
 
     *host* is this computer as the devices see it (``devices.Host``): its
-    platform and its device nodes, which tests replace.
+    platform and its device nodes, which tests replace. *start_reloader*
+    starts the background reload of a running proxy (``reloader.start``).
     """
 
     def __init__(
@@ -182,6 +187,7 @@ class Ops:
         resolve: lan.Resolver = lan.resolve,
         this_computer: lan.ThisComputer = lan.is_this_computer,
         host: Optional[devices.Host] = None,
+        start_reloader: Callable[[Path, profiles.Profile], None] = reloader.start,
     ):
         self.root = root
         self.profile = profile
@@ -189,6 +195,7 @@ class Ops:
         self.resolve = resolve
         self.this_computer = this_computer
         self.host = host or devices.Host()
+        self.start_reloader = start_reloader
         self.compose = Compose(profile, runner=runner, docker=docker, sleep=sleep)
 
     # -- helpers --------------------------------------------------------------
@@ -345,9 +352,12 @@ class Ops:
     def _edit_allowlist(self, edit: Callable[[str], tuple[str, str]]) -> tuple[bool, str, Optional[bool]]:
         """
         Apply *edit* to ``allowlist.txt``, and when it changed the file,
-        give the proxy the new allowlist (at once if it is running): whether
-        it changed, what *edit* said about it, and whether the running proxy
-        took it.
+        see that the proxy is given the new allowlist (``give_proxy_later``):
+        whether it changed, what *edit* said about it, and whether the
+        running proxy takes it.
+
+        It runs under the profile's files lock alone (``profiles.files_lock``),
+        so it doesn't wait for a reload of the proxy under way.
         """
         path = self.profile.allowlist_file
         before = path.read_text(encoding="utf-8")
@@ -357,9 +367,47 @@ class Ops:
             return False, message, None
 
         path.write_text(after, encoding="utf-8")
-        self._write_proxy_allowlist()
 
-        return True, message, self.reload_allowlist()
+        return True, message, self.give_proxy_later()
+
+    def give_proxy_later(self) -> bool:
+        """
+        After an edit of the allowlist: a running profile's proxy is given it
+        in the background, a few seconds after the profile's last edit
+        (``reloader``), and ``True`` says so. A profile that isn't running
+        gives its proxy the allowlist at its next start (``False``); the
+        proxy allowlist is written now all the same, unless a holder of the
+        containers lock may be giving the proxy that file this moment.
+        """
+        if self.compose.running():
+            self.start_reloader(self.root, self.profile)
+            return True
+
+        with profiles.try_lock(self.profile, profiles.CONTAINERS_LOCK_FILE) as free:
+            if free:
+                self._write_proxy_allowlist()
+
+        return False
+
+    def _allowlist_result(
+        self,
+        message: str,
+        changed: bool,
+        applied: Optional[bool],
+        data: Optional[dict] = None,
+    ) -> Result:
+        """
+        The result of an allowlist edit: one a running profile took is given
+        to its proxy in the background.
+        """
+        return Result(
+            self.profile.name,
+            message,
+            changed=changed,
+            applied=applied,
+            data=data or {},
+            reloading=applied is True,
+        )
 
     def _write_proxy_allowlist(self) -> tuple[str, str]:
         """
@@ -426,7 +474,7 @@ class Ops:
         elif lan_ok:
             message = f"{message}; {self._why_no_offer(name, entry)}"
 
-        return Result(self.profile.name, message, changed=changed, applied=applied, data=data)
+        return self._allowlist_result(message, changed, applied, data)
 
     def deny(self, entry: str, ssh: bool = False) -> Result:
         """
@@ -441,7 +489,7 @@ class Ops:
         if not changed:
             return Result(self.profile.name, f"'{shown}' is not an active entry", changed=False)
 
-        return Result(self.profile.name, f"denied {shown}", applied=applied)
+        return self._allowlist_result(f"denied {shown}", True, applied)
 
     def set_entry_enabled(self, entry: str, enabled: bool, ssh: bool = False) -> Result:
         """
@@ -452,7 +500,7 @@ class Ops:
         changed, message, applied = self._edit_allowlist(
             lambda text: allowlist.switch(text, entry, enabled, ssh, self._languages()),
         )
-        return Result(self.profile.name, message, changed=changed, applied=applied)
+        return self._allowlist_result(message, changed, applied)
 
     def remove_entry(self, entry: str, ssh: bool = False) -> Result:
         """
@@ -462,7 +510,7 @@ class Ops:
         changed, message, applied = self._edit_allowlist(
             lambda text: allowlist.delete(text, entry, ssh, self._languages()),
         )
-        return Result(self.profile.name, message, changed=changed, applied=applied)
+        return self._allowlist_result(message, changed, applied)
 
     # -- names on your network ---------------------------------------------------
 
@@ -629,7 +677,7 @@ class Ops:
         if changed and not allowlist.entry_ports(self.allowlist_entries(), name):
             message = f"{message}; it allows nothing until {name} has an allowlist entry"
 
-        return Result(self.profile.name, message, changed=changed, applied=applied)
+        return self._allowlist_result(message, changed, applied)
 
     def remove_pin(self, entry: str) -> Result:
         """
@@ -638,7 +686,7 @@ class Ops:
         name = allowlist.pin_name(entry, _flag_of(entry)) or entry.strip().lower()
 
         changed, message, applied = self._edit_allowlist(lambda text: allowlist.remove_pin(text, name))
-        return Result(self.profile.name, message, changed=changed, applied=applied)
+        return self._allowlist_result(message, changed, applied)
 
     def check_name(self, entry: str) -> dict:
         """
@@ -1079,11 +1127,12 @@ class Ops:
         """
         Switch languages and tools on or off, with everything that follows
         from them: the ``.env``; the entries they provide in the proxy's
-        allowlist (the proxy reloads at once if running); the extension
-        list, which a running VS Code container picks up within seconds and
-        installs from in the background; and, unless *build* is false, the
-        image, rebuilt with the toolchains and the VS Code container
-        recreated with it.
+        allowlist (a running proxy is given them in the background, a few
+        seconds after the profile's last change); the extension list, which
+        a running VS Code container picks up within seconds and installs
+        from in the background; and, unless *build* is false, the image,
+        rebuilt with the toolchains and the VS Code container recreated with
+        it.
         """
         env_file = self.profile.env_file
         before = langs.enabled_keys(envfile.read(env_file))
@@ -1104,20 +1153,23 @@ class Ops:
 
         list_changed = profiles.write_extension_list(self.profile)
 
-        # What took effect at once: the proxy's new policy, or else the
-        # extensions the running container installs or removes by itself.
+        # What the running sandbox takes by itself: the proxy's new policy,
+        # in the background, and the extensions the VS Code container
+        # installs or removes.
         applied: Optional[bool] = None
-        if allowlist_changed:
-            applied = self.reload_allowlist()
-        elif list_changed:
+        reloading = False
+        if allowlist_changed or list_changed:
             applied = self.compose.running()
+        if allowlist_changed and applied:
+            self.start_reloader(self.root, self.profile)
+            reloading = True
 
         if build:
             self.compose.run("build", "vscode", check=True, to_stderr=True)
             applied = self._recreate("vscode")
 
         note = "" if build else " (the image is rebuilt with: hardcode rebuild)"
-        return Result(self.profile.name, f"{', '.join(words)}{note}", applied=applied)
+        return Result(self.profile.name, f"{', '.join(words)}{note}", applied=applied, reloading=reloading)
 
     # -- extensions ------------------------------------------------------------
 
@@ -1476,11 +1528,31 @@ class Ops:
             if status:
                 extensions = {key: status.get(key) for key in ("state", "installed", "total")}
 
+        proxy_running = any(service.service == "squid" and service.state == "running" for service in services)
+
         return {
             "services": [asdict(service) for service in services],
             "docker": self.compose.has_docker(),
             "error": error,
             "extensions": extensions,
+            "proxy": self.proxy_state(proxy_running),
+        }
+
+    def proxy_state(self, running: bool) -> dict:
+        """
+        How the proxy stands with the allowlist: ``reloading`` while the
+        background reload runs (``reloader``); ``behind`` while a *running*
+        proxy hasn't the allowlist the files say (an edit waiting for that
+        reload, a hand edit nobody reloaded it for, a reload that failed);
+        and ``error``, why the last background reload failed, while it
+        stays behind.
+        """
+        behind = running and not profiles.proxy_allowlist_current(self.profile, self.this_computer)
+
+        return {
+            "reloading": reloader.running(self.profile),
+            "behind": behind,
+            "error": profiles.proxy_reload_failure(self.profile) if behind else "",
         }
 
     def blocked(self, since: str = "30m") -> list[dict]:

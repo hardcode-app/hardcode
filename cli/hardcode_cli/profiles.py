@@ -98,6 +98,15 @@ class Profile:
         return self.dir / "proxy-allowlist.applied"
 
     @property
+    def proxy_failed_file(self) -> Path:
+        """
+        Why the proxy's last background reload failed (see ``reloader``);
+        there is none once the proxy is given the allowlist, or another
+        reload is on its way.
+        """
+        return self.dir / "proxy-allowlist.failed"
+
+    @property
     def extensions_file(self) -> Path:
         """
         The extension list the VS Code container watches (mounted read-only),
@@ -185,16 +194,21 @@ def list_profiles(root: Path) -> list[str]:
     return sorted(names, key=lambda name: (name != "default", name))
 
 
-# The file a profile's lock is taken on, in its folder.
+# The files a profile's locks are taken on, in its folder: the lock on its
+# files, the one on its containers, and the one its proxy's background
+# reload holds while it runs (see reloader).
 LOCK_FILE = ".lock"
+CONTAINERS_LOCK_FILE = ".containers.lock"
+RELOADER_LOCK_FILE = ".reloader.lock"
+LOCK_FILES = (LOCK_FILE, CONTAINERS_LOCK_FILE, RELOADER_LOCK_FILE)
 
 
 def _is_profile(folder: Path) -> bool:
     """
-    Whether *folder* holds a profile: anything but a lock file. A profile
-    removed under its lock keeps that file until the lock is let go.
+    Whether *folder* holds a profile: anything but lock files. A profile
+    removed under its locks keeps those files until the locks are let go.
     """
-    return folder.is_dir() and any(path.name != LOCK_FILE for path in folder.iterdir())
+    return folder.is_dir() and any(path.name not in LOCK_FILES for path in folder.iterdir())
 
 
 def exists(root: Path, name: str) -> bool:
@@ -508,20 +522,132 @@ def lock(
     sleep: Callable[[float], None] = time.sleep,
 ) -> Iterator[None]:
     """
-    Hold the profile's lock for the length of the ``with`` block: one change
+    Hold the profile's locks for the length of the ``with`` block: one change
     to a profile at a time, whichever command or front end makes it.
 
     Two changes at once would edit the same files from the same old content,
     so that one is lost, and ask Compose to recreate the same containers, so
     that one removes what the other is renaming. A command that finds the
     lock taken says so through *waiting*, once, and waits (an image rebuild
-    can hold it for many minutes) up to *timeout* seconds. The lock is the
-    operating system's on ``.lock`` in the profile's directory, so it goes
-    with the process that held it, however that process ends.
+    can hold it for many minutes) up to *timeout* seconds. The locks are the
+    operating system's on files in the profile's directory, so they go with
+    the process that held them, however that process ends.
+
+    They are two, taken in this order: the containers' (``.containers.lock``)
+    and the files' (``.lock``). Only an edit of the allowlist takes the
+    files' alone (``files_lock``), and the proxy's background reload holds
+    the containers' alone while it recreates the proxy (``reloader``).
     """
-    path = profile.dir / LOCK_FILE
     deadline = clock() + timeout
-    told = False
+    tell = _once(waiting)
+
+    with _held(profile, CONTAINERS_LOCK_FILE, tell, deadline, clock, sleep):
+        with _held(profile, LOCK_FILE, tell, deadline, clock, sleep):
+            yield
+
+
+@contextmanager
+def files_lock(
+    profile: Profile,
+    waiting: Optional[Callable[[str], None]] = None,
+    timeout: float = 3600,
+    clock: Callable[[], float] = time.monotonic,
+    sleep: Callable[[float], None] = time.sleep,
+) -> Iterator[None]:
+    """
+    Hold the lock on the profile's files alone: for an edit of the
+    allowlist, which writes nothing a container reads while the proxy's
+    background reload recreates it, and so needn't wait for that reload to
+    end. Every other change takes this lock after the containers' (``lock``),
+    so it waits for such an edit, and such an edit for it. A holder of this
+    lock never waits for the containers' one, or the two could wait for each
+    other: it may only try it (``try_lock``).
+    """
+    deadline = clock() + timeout
+
+    with _held(profile, LOCK_FILE, _once(waiting), deadline, clock, sleep):
+        yield
+
+
+@contextmanager
+def containers_lock(
+    profile: Profile,
+    waiting: Optional[Callable[[str], None]] = None,
+    timeout: float = 3600,
+    clock: Callable[[], float] = time.monotonic,
+    sleep: Callable[[float], None] = time.sleep,
+) -> Iterator[None]:
+    """
+    Hold the lock on the profile's containers alone, as the proxy's
+    background reload does while it recreates the proxy. It is taken before
+    the files' lock, by whoever needs both.
+    """
+    deadline = clock() + timeout
+
+    with _held(profile, CONTAINERS_LOCK_FILE, _once(waiting), deadline, clock, sleep):
+        yield
+
+
+@contextmanager
+def try_lock(
+    profile: Profile,
+    name: str,
+    timeout: float = 0,
+    clock: Callable[[], float] = time.monotonic,
+    sleep: Callable[[float], None] = time.sleep,
+) -> Iterator[bool]:
+    """
+    Take the profile's lock on the file *name* (one of ``LOCK_FILES``) if it
+    is free, trying for up to *timeout* seconds, and hold it for the ``with``
+    block: whether it was taken. Nothing waits on it beyond that, so it can
+    be tried while holding any other lock.
+    """
+    try:
+        with open(profile.dir / name, "a+b") as handle:
+            deadline = clock() + timeout
+
+            free = _try_lock(handle)
+            while not free and clock() < deadline:
+                sleep(0.1)
+                free = _try_lock(handle)
+
+            try:
+                yield free
+            finally:
+                if free:
+                    _unlock(handle)
+    finally:
+        _remove_if_only_locks(profile.dir)
+
+
+def _once(waiting: Optional[Callable[[str], None]]) -> Callable[[str], None]:
+    """
+    *waiting*, called once at most, however many locks a change waits for.
+    """
+    said: list[str] = []
+
+    def tell(message: str) -> None:
+        if waiting and not said:
+            waiting(message)
+            said.append(message)
+
+    return tell
+
+
+@contextmanager
+def _held(
+    profile: Profile,
+    name: str,
+    waiting: Callable[[str], None],
+    deadline: float,
+    clock: Callable[[], float],
+    sleep: Callable[[float], None],
+) -> Iterator[None]:
+    """
+    Hold the profile's lock on the file *name* for the ``with`` block, saying
+    so through *waiting* while it is taken, and giving up at *deadline*.
+    """
+    path = profile.dir / name
 
     try:
         with open(path, "a+b") as handle:
@@ -529,10 +655,7 @@ def lock(
                 if clock() >= deadline:
                     raise ProfileError(f"profile '{profile.name}' is still being changed by another command; try again")
 
-                if waiting and not told:
-                    waiting(f"waiting for another change to profile '{profile.name}' to finish...")
-                    told = True
-
+                waiting(f"waiting for another change to profile '{profile.name}' to finish...")
                 sleep(0.2)
 
             try:
@@ -540,9 +663,9 @@ def lock(
             finally:
                 _unlock(handle)
     finally:
-        # Removed while it was held: what is left is the lock file, which
-        # Windows couldn't delete while it was open.
-        _remove_if_only_the_lock(profile.dir)
+        # Removed while it was held: what is left is the lock files, which
+        # Windows couldn't delete while they were open.
+        _remove_if_only_locks(profile.dir)
 
 
 def _try_lock(handle) -> bool:
@@ -617,23 +740,19 @@ def pins_to_this_computer(
     return [pin for pin in found if not pin.problem and this_computer(pin.address)]
 
 
-def write_proxy_allowlist(
+def proxy_allowlist_text(
     profile: Profile,
     this_computer: lan.ThisComputer = lan.is_this_computer,
     warn: Optional[Warn] = None,
-) -> tuple[str, str]:
+) -> str:
     """
-    Write the allowlist the proxy is given, from the profile's
-    ``allowlist.txt`` and its languages and tools (``allowlist.render``):
-    the file's text before (``""`` when there was none) and after.
+    The allowlist the proxy is to be given, from the profile's
+    ``allowlist.txt`` and its languages and tools (``allowlist.render``).
 
     A pin to one of this computer's own addresses (``pins_to_this_computer``)
     is left out, as the operator leaves out the pins it ignores, and *warn*
     is told of each, every time. The operator never makes this test: on a
     cluster it would test the operator's own pod.
-
-    It is written in place, as the renderer's bind mount follows the file
-    it was made with, and readable by the renderer's user.
     """
     enabled = langs.enabled_keys(envfile.read(profile.env_file))
     own = profile.allowlist_file.read_text(encoding="utf-8")
@@ -644,7 +763,26 @@ def write_proxy_allowlist(
             warn(f"allowlist.txt pins {pin.name} to {pin.address}, which is this computer: left out")
 
     reasons = {pin.name: f"{pin.address} is this computer" for pin in left_out}
-    text = allowlist.render(allowlist.ignore_pins(own, reasons), enabled)
+    return allowlist.render(allowlist.ignore_pins(own, reasons), enabled)
+
+
+def write_proxy_allowlist(
+    profile: Profile,
+    this_computer: lan.ThisComputer = lan.is_this_computer,
+    warn: Optional[Warn] = None,
+) -> tuple[str, str]:
+    """
+    Write the allowlist the proxy is given (``proxy_allowlist_text``): the
+    file's text before (``""`` when there was none) and after.
+
+    Only a holder of the profile's containers lock writes it, as it gives
+    the proxy the file (a start, a reload), or as nothing else does (an
+    allowlist edit, while the profile isn't running): the proxy's renderer
+    reads it as the proxy is recreated, and what it read is what is recorded
+    as loaded. It is written in place, as the renderer's bind mount follows
+    the file it was made with, and readable by the renderer's user.
+    """
+    text = proxy_allowlist_text(profile, this_computer, warn)
 
     path = profile.proxy_allowlist_file
     before = path.read_text(encoding="utf-8") if path.exists() else ""
@@ -658,24 +796,45 @@ def write_proxy_allowlist(
     return before, text
 
 
+def _digest(text: str) -> str:
+    """
+    The sha256 of a proxy allowlist's text; the same on every platform,
+    whatever line endings the file was written with.
+    """
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
 def _proxy_allowlist_digest(profile: Profile) -> str:
     """
-    The sha256 of the proxy allowlist as it is now; ``""`` without one.
+    The digest of the proxy allowlist file as it is now; ``""`` without one.
     """
     path = profile.proxy_allowlist_file
     if not path.exists():
         return ""
 
-    return hashlib.sha256(path.read_bytes()).hexdigest()
+    return _digest(path.read_text(encoding="utf-8"))
+
+
+def _applied_digest(profile: Profile) -> str:
+    """
+    The digest of the proxy allowlist the running proxy last loaded, as
+    recorded; ``""`` when nothing is.
+    """
+    path = profile.proxy_applied_file
+    if not path.exists():
+        return ""
+
+    return path.read_text(encoding="utf-8").strip()
 
 
 def mark_proxy_allowlist_applied(profile: Profile) -> None:
     """
     Record that the proxy has loaded the proxy allowlist as it is now: it
     started from nothing and read it, or was reloaded with it and came back
-    healthy.
+    healthy. A failed background reload before it is forgotten.
     """
     profile.proxy_applied_file.write_text(_proxy_allowlist_digest(profile) + "\n", encoding="utf-8")
+    forget_proxy_reload_failure(profile)
 
 
 def proxy_allowlist_applied(profile: Profile) -> bool:
@@ -685,11 +844,47 @@ def proxy_allowlist_applied(profile: Profile) -> bool:
     reload failed before the proxy had it: a proxy keeps the rules it
     loaded, so a file that is right says nothing about the proxy.
     """
-    path = profile.proxy_applied_file
-    if not path.exists():
-        return False
+    applied = _applied_digest(profile)
+    return bool(applied) and applied == _proxy_allowlist_digest(profile)
 
-    return path.read_text(encoding="utf-8").strip() == _proxy_allowlist_digest(profile)
+
+def proxy_allowlist_current(profile: Profile, this_computer: lan.ThisComputer = lan.is_this_computer) -> bool:
+    """
+    Whether the proxy last loaded the allowlist the profile's files say it
+    is to be given now (``proxy_allowlist_text``): not while an edit waits
+    for its background reload, after a hand edit nobody reloaded the proxy
+    for, or after a reload that failed. Nothing is written.
+    """
+    applied = _applied_digest(profile)
+    return bool(applied) and applied == _digest(proxy_allowlist_text(profile, this_computer))
+
+
+def record_proxy_reload_failure(profile: Profile, message: str) -> None:
+    """
+    Keep why the proxy's background reload failed, for ``ps`` and the app to
+    show until the proxy is given the allowlist.
+    """
+    profile.proxy_failed_file.write_text(message.strip() + "\n", encoding="utf-8")
+
+
+def forget_proxy_reload_failure(profile: Profile) -> None:
+    """
+    Forget a failed background reload: the proxy has the allowlist since,
+    or another reload is on its way.
+    """
+    profile.proxy_failed_file.unlink(missing_ok=True)
+
+
+def proxy_reload_failure(profile: Profile) -> str:
+    """
+    Why the proxy's last background reload failed; ``""`` when it didn't,
+    or the proxy was given the allowlist since.
+    """
+    path = profile.proxy_failed_file
+    if not path.exists():
+        return ""
+
+    return path.read_text(encoding="utf-8").strip()
 
 
 def write_extension_list(profile: Profile) -> bool:
@@ -721,41 +916,46 @@ def remove(root: Path, name: str) -> None:
     """
     Delete the profile's directory. Its containers and volumes are the caller's job.
 
-    A lock file someone holds (the command removing the profile, usually)
-    stays: Windows can't delete a file that is open. ``lock`` deletes it,
-    and the folder, as it lets go.
+    The lock files stay (the command removing the profile holds two of
+    them, usually): Windows can't delete a file that is open. ``lock``
+    deletes them, and the folder, as it lets go.
     """
     if not exists(root, name):
         raise ProfileError(f"no profile '{name}'")
 
     folder = profiles_dir(root) / name
     for path in folder.iterdir():
-        if path.name == LOCK_FILE:
+        if path.name in LOCK_FILES:
             continue
         if path.is_dir() and not path.is_symlink():
             shutil.rmtree(path)
         else:
             path.unlink()
 
-    _remove_if_only_the_lock(folder)
+    _remove_if_only_locks(folder)
 
 
-def _remove_if_only_the_lock(folder: Path) -> None:
+def _remove_if_only_locks(folder: Path) -> None:
     """
-    Delete *folder* when all it holds is a lock file nobody holds; leave it
-    otherwise, for the lock's holder to delete as it lets go.
+    Delete *folder* when all it holds is lock files nobody holds; leave it
+    otherwise, for the last holder to delete as it lets go.
     """
-    lock_file = folder / LOCK_FILE
-    if not folder.is_dir() or [path.name for path in folder.iterdir()] != [LOCK_FILE]:
+    if not folder.is_dir():
+        return
+
+    names = [path.name for path in folder.iterdir()]
+    if not names or any(name not in LOCK_FILES for name in names):
         return
 
     try:
-        with open(lock_file, "a+b") as handle:
-            if not _try_lock(handle):
-                return
-            _unlock(handle)
+        for name in names:
+            with open(folder / name, "a+b") as handle:
+                if not _try_lock(handle):
+                    return
+                _unlock(handle)
 
-        lock_file.unlink()
+        for name in names:
+            (folder / name).unlink()
         folder.rmdir()
     except OSError:
         # Opened by another command meanwhile (Windows): it deletes them.

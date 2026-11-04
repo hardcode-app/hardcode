@@ -10,12 +10,13 @@ from contextlib import redirect_stdout
 from unittest import mock
 
 import hardcode_cli
-from hardcode_cli import allowlist, cli, compose, envfile, langs, profiles
+from hardcode_cli import allowlist, cli, compose, envfile, langs, profiles, reloader
 
 from .helpers import FakeRunner, HomeTestCase, fake_host, updated_catalogue
 from .resolver import FakeResolver
 
 NOT_RUNNING = "(profile 'default' isn't running; applies when it starts)"
+RELOADS_LATER = "(the proxy reloads in a few seconds; hardcode reload: now)"
 
 
 class CliTestCase(HomeTestCase):
@@ -41,12 +42,17 @@ class CliTestCase(HomeTestCase):
         # A Linux computer without devices: this machine's /dev is never read.
         self.host = fake_host()
 
+        # The profiles whose proxy's background reload was started: none is
+        # really started here.
+        self.reloads = []
+
     def run_cli(self, *argv, running=False, runner=None, config=None, answers=None, docker="docker"):
         """
         Run ``hardcode --config <home> <argv>``; returns the exit code and
         what was printed to stdout and stderr. With *answers*, the command
         runs on a terminal and they answer its questions, in order. The
-        computer is ``self.host``, and its ``docker`` command *docker*.
+        computer is ``self.host``, and its ``docker`` command *docker*; a
+        proxy's background reload is only noted in ``self.reloads``.
         """
         self.runner = runner or FakeRunner(running=running)
         out, err = [], []
@@ -64,6 +70,7 @@ class CliTestCase(HomeTestCase):
             resolve=self.resolver,
             this_computer=lambda address: address in self.this_computer,
             host=self.host,
+            start_reloader=lambda root, profile: self.reloads.append(profile.name),
         )
         return code, "\n".join(out), "\n".join(err)
 
@@ -221,7 +228,9 @@ class CliTests(CliTestCase):
         self.assertIn("isn't running", out)
 
         _, out, _ = self.run_cli("allow", "github.com/me", "rw", running=True)
-        self.assertIn("allowed github.com/me (rw) (applied)", out)
+        self.assertIn(f"allowed github.com/me (rw) {RELOADS_LATER}", out)
+        self.assertEqual(self.reloads, ["default"], "the running proxy is given it in the background")
+        self.assertFalse(self.runner.commands(" rm "), "nothing is recreated while the command runs")
 
         _, out, _ = self.run_cli("deny", "github.com/me")
         self.assertIn("denied github.com/me", out)
@@ -273,7 +282,7 @@ class CliTests(CliTestCase):
         _, out, _ = self.run_cli("allowlist", "disable", "x.org")
         self.assertIn("disabled x.org", out)
         _, out, _ = self.run_cli("allowlist", "enable", "x.org", running=True)
-        self.assertIn("enabled x.org (applied)", out)
+        self.assertIn(f"enabled x.org {RELOADS_LATER}", out)
         _, out, _ = self.run_cli("--all", "allowlist", "remove", "x.org")
         self.assertIn("[default] removed x.org", out)
 
@@ -281,6 +290,7 @@ class CliTests(CliTestCase):
         self.assertIn("isn't running", out)
         _, out, _ = self.run_cli("reload", running=True)
         self.assertIn("proxy reloaded (applied)", out)
+        self.assertTrue(self.runner.commands(" rm "), "reload recreates the proxy at once")
 
         code, out, err = self.run_cli("reload", runner=FakeRunner(running=True, healthy=False))
         self.assertEqual(code, 1, "a reload that doesn't come up healthy is a failure, not a stopped profile")
@@ -365,7 +375,7 @@ class CliTests(CliTestCase):
         self.assertIn("dotnet off (the image is rebuilt with: hardcode rebuild)", out)
 
         _, out, _ = self.run_cli("enable", "dotnet", running=True)
-        self.assertIn("(applied)", out)
+        self.assertIn(f"dotnet on {RELOADS_LATER}", out)
         self.assertTrue(self.runner.commands(" build vscode"))
 
         _, _, err = self.run_cli("enable", "cobol")
@@ -501,26 +511,120 @@ class CliTests(CliTestCase):
             self.assertEqual(self.run_cli("restart", running=True)[0], 0)
         self.assertEqual(self.runner.commands("allowlist squid"), [])
 
-    def test_a_reload_that_failed_is_done_at_the_next_start_or_rebuild(self):
+    def test_an_edit_the_proxy_missed_is_given_at_the_next_start_or_rebuild(self):
+        # The edits are made while the profile runs, and their background
+        # reload never happens (it failed, or was stopped): the next start
+        # or rebuild gives the proxy what it missed.
         self.assertEqual(self.run_cli("up")[0], 0)
 
-        # The edit is written, but the proxy doesn't come back healthy.
-        code, _, _ = self.run_cli("allow", "x.org", runner=FakeRunner(running=True, healthy=False))
-        self.assertEqual(code, 1)
-
+        self.assertEqual(self.run_cli("allow", "x.org", running=True)[0], 0)
         self.assertEqual(self.run_cli("rebuild", running=True)[0], 0)
         self.assertTrue(self.runner.commands("rm --stop --force allowlist squid"), "a rebuild gives it")
 
-        self.assertEqual(self.run_cli("allow", "y.org", runner=FakeRunner(running=True, healthy=False))[0], 1)
+        self.assertEqual(self.run_cli("allow", "y.org", running=True)[0], 0)
         self.assertEqual(self.run_cli("start", running=True)[0], 0)
         self.assertTrue(self.runner.commands("rm --stop --force allowlist squid"), "so does a start")
 
         # A proxy started from nothing reads the file itself.
-        self.assertEqual(self.run_cli("allow", "z.org", runner=FakeRunner(running=True, healthy=False))[0], 1)
+        self.assertEqual(self.run_cli("allow", "z.org", running=True)[0], 0)
         self.assertEqual(self.run_cli("up")[0], 0)
         self.assertEqual(self.run_cli("restart", running=True)[0], 0)
-        self.assertEqual(self.runner.commands("allowlist squid"), [])
         self.assertEqual(self.runner.commands("allowlist squid"), [], "it wasn't running")
+
+    def test_an_edit_does_not_wait_for_a_reload_under_way(self):
+        profile = profiles.get(self.root, "default")
+
+        # The background reload holds the containers' lock while it
+        # recreates the proxy; edits of the allowlist go on meanwhile.
+        with profiles.containers_lock(profile):
+            code, out, _ = self.run_cli("allow", "x.org", running=True)
+            self.assertEqual((code, out), (0, f"allowed x.org {RELOADS_LATER}"))
+
+            code, out, _ = self.run_cli("lan", "add", "gitlab.example.com", running=True)
+            self.assertEqual(code, 0, out)
+
+            # One that isn't running doesn't write the file the proxy is
+            # given while a reload may be giving it.
+            code, out, _ = self.run_cli("allow", "y.org")
+            self.assertEqual((code, out), (0, f"allowed y.org {NOT_RUNNING}"))
+            self.assertNotIn("y.org", profile.proxy_allowlist_file.read_text(encoding="utf-8"))
+
+        self.assertEqual(self.reloads, ["default", "default"])
+
+        # Without a reload under way, it is written.
+        self.run_cli("allow", "z.org")
+        self.assertIn("\nz.org\n", profile.proxy_allowlist_file.read_text(encoding="utf-8"))
+
+    def test_ps_says_how_the_proxy_stands(self):
+        self.assertEqual(self.run_cli("up")[0], 0)
+
+        def proxy():
+            code, out, _ = self.run_cli("--json", "ps", running=True)
+            self.assertEqual(code, 0)
+            return json.loads(out)["proxy"]
+
+        self.assertEqual(proxy(), {"reloading": False, "behind": False, "error": ""})
+
+        # An edit waits for its reload; one that failed says why.
+        self.run_cli("allow", "x.org", running=True)
+        self.assertEqual(proxy(), {"reloading": False, "behind": True, "error": ""})
+
+        profile = profiles.get(self.root, "default")
+        profiles.record_proxy_reload_failure(profile, "squid didn't come back healthy")
+        self.assertEqual(proxy()["error"], "squid didn't come back healthy")
+
+        with profiles.try_lock(profile, profiles.RELOADER_LOCK_FILE):
+            self.assertTrue(proxy()["reloading"], "a reloader holds its lock while it runs")
+
+        # Reloaded, it is caught up, and the failure is forgotten.
+        self.assertEqual(self.run_cli("reload", running=True)[0], 0)
+        self.assertEqual(proxy(), {"reloading": False, "behind": False, "error": ""})
+        self.assertFalse(profile.proxy_failed_file.exists())
+
+        # A stopped proxy isn't behind anything.
+        self.run_cli("allow", "y.org")
+        code, out, _ = self.run_cli("--json", "ps")
+        self.assertFalse(json.loads(out)["proxy"]["behind"])
+
+    def test_the_reloader_gives_the_running_proxy_the_edits(self):
+        self.assertEqual(self.run_cli("up")[0], 0)
+        self.run_cli("allow", "x.org", running=True)
+        profile = profiles.get(self.root, "default")
+
+        with mock.patch.object(reloader, "QUIET_SECONDS", 0):
+            code, _, _ = self.run_cli(reloader.COMMAND, running=True)
+
+        self.assertEqual(code, 0)
+        self.assertTrue(self.runner.commands("rm --stop --force allowlist squid"))
+        self.assertIn("\nx.org\n", profile.proxy_allowlist_file.read_text(encoding="utf-8"))
+        self.assertTrue(profiles.proxy_allowlist_current(profile))
+
+        # Caught up, it reloads nothing; a profile that isn't running neither.
+        with mock.patch.object(reloader, "QUIET_SECONDS", 0):
+            self.run_cli(reloader.COMMAND, running=True)
+            self.assertEqual(self.runner.commands("allowlist squid"), [])
+
+            self.run_cli("allow", "y.org", running=True)
+            self.run_cli(reloader.COMMAND)
+            self.assertEqual(self.runner.commands("allowlist squid"), [])
+
+    def test_a_failed_background_reload_is_kept_for_ps(self):
+        self.assertEqual(self.run_cli("up")[0], 0)
+        self.run_cli("allow", "x.org", running=True)
+
+        with mock.patch.object(reloader, "QUIET_SECONDS", 0):
+            code, _, _ = self.run_cli(reloader.COMMAND, runner=FakeRunner(running=True, healthy=False))
+        self.assertEqual(code, 0, "nobody reads its exit code")
+
+        code, out, _ = self.run_cli("--json", "ps", running=True)
+        proxy = json.loads(out)["proxy"]
+        self.assertTrue(proxy["behind"])
+        self.assertIn("didn't come back healthy", proxy["error"])
+
+        # The next edit starts another, which tries again.
+        self.reloads.clear()
+        self.run_cli("allow", "y.org", running=True)
+        self.assertEqual(self.reloads, ["default"])
 
     def test_allowlist_lists_everything(self):
         self.run_cli("allow", "github.com/me", "rw")

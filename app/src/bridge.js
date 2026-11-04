@@ -25,6 +25,9 @@
   const doneCallbacks = [];
   const pending = new Map(); // stream id -> {resolve, reject}
 
+  // How the proxy stands with the allowlist when the CLI couldn't say.
+  const PROXY_UNKNOWN = { reloading: false, behind: false, error: '' };
+
   // ---------------------------------------------------------------------------
   // Streams
   // ---------------------------------------------------------------------------
@@ -422,7 +425,8 @@
     // CLI failed. Only a missing docker command reads as "docker not found".
     // `extensions` is how far the running VS Code container has got with the
     // profile's extensions ({state, installed, total}), null while it isn't
-    // running.
+    // running. `proxy` is how the proxy stands with the allowlist
+    // ({reloading, behind, error}): an edit is given to it in the background.
     async 'stack:status'() {
       try {
         const response = await cli(['ps']);
@@ -431,9 +435,16 @@
           docker: response.docker !== false,
           error: response.error || '',
           extensions: response.extensions,
+          proxy: response.proxy || { ...PROXY_UNKNOWN },
         };
       } catch (error) {
-        return { services: [], docker: null, error: String(error.message || error), extensions: null };
+        return {
+          services: [],
+          docker: null,
+          error: String(error.message || error),
+          extensions: null,
+          proxy: { ...PROXY_UNKNOWN },
+        };
       }
     },
 

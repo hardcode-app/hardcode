@@ -159,9 +159,11 @@ profiles/
     image/Dockerfile         its own Dockerfile steps, when it has any, with the files they copy beside it
     proxy-allowlist.txt      what the proxy is given: allowlist.txt with HardCode's entries (written by hardcode)
     proxy-allowlist.applied  a digest of what the running proxy last loaded (written by hardcode)
+    proxy-allowlist.failed   why the proxy didn't take the last changes, when it didn't (written by hardcode)
     vscode-extensions.txt    the VS Code extensions the sandbox keeps installed (written by hardcode)
     compose.devices.yaml     the devices of this computer it may use, for Compose (written by hardcode)
-    .lock                    held while a command changes the profile
+    .lock, .containers.lock  held while a command changes the profile
+    .reloader.lock           held while the proxy is being given the latest allowlist changes
 ```
 
 The first four are yours, to edit by hand as well as through the app and

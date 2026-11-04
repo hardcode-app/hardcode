@@ -508,9 +508,9 @@ class ProfileTests(HomeTestCase):
             profiles.remove(self.root, "x")
 
     def test_a_profile_removed_under_its_lock_keeps_the_lock_until_it_is_released(self):
-        # `hardcode profile remove` holds the profile's lock while it removes
+        # `hardcode profile remove` holds the profile's locks while it removes
         # the profile. Windows can't delete a file that is open, so the lock
-        # file stays until the lock is let go, and goes with the folder then.
+        # files stay until the locks are let go, and go with the folder then.
         self.make("x")
         profile = self.profile("x")
         lock_file = profile.dir / ".lock"
@@ -520,9 +520,78 @@ class ProfileTests(HomeTestCase):
 
             self.assertFalse(profiles.exists(self.root, "x"))
             self.assertTrue(lock_file.exists(), "the lock file is open: not deleted")
-            self.assertEqual([path.name for path in profile.dir.iterdir()], [".lock"])
+            self.assertEqual(sorted(path.name for path in profile.dir.iterdir()), [".containers.lock", ".lock"])
 
-        self.assertFalse(profile.dir.exists(), "released, the lock file goes, and the folder with it")
+        self.assertFalse(profile.dir.exists(), "released, the lock files go, and the folder with it")
+
+    def test_a_profile_removed_while_its_reloader_waits_goes_when_it_ends(self):
+        self.make("x")
+        profile = self.profile("x")
+
+        with profiles.try_lock(profile, profiles.RELOADER_LOCK_FILE) as held:
+            self.assertTrue(held)
+            with profiles.lock(profile):
+                profiles.remove(self.root, "x")
+
+            self.assertEqual(sorted(path.name for path in profile.dir.iterdir()), sorted(profiles.LOCK_FILES))
+            self.assertEqual(profiles.list_profiles(self.root), [], "only lock files: no profile")
+
+        self.assertFalse(profile.dir.exists())
+
+    def test_an_allowlist_edit_does_not_wait_for_the_containers(self):
+        self.make("default")
+        profile = self.profile("default")
+
+        # A reload of the proxy holds the containers' lock alone: an edit
+        # of the allowlist goes ahead, any other change waits.
+        with profiles.containers_lock(profile):
+            with profiles.files_lock(profile, timeout=0.5):
+                pass
+
+            with self.assertRaisesRegex(ProfileError, "still being changed by another command"):
+                with profiles.lock(profile, timeout=0.5):
+                    self.fail("got both locks while the containers' was held")
+
+        # And an edit holds up every other change.
+        said: list[str] = []
+        with profiles.files_lock(profile):
+            with self.assertRaises(ProfileError):
+                with profiles.lock(profile, waiting=said.append, timeout=0.5):
+                    self.fail("got both locks while the files' was held")
+        self.assertEqual(said, ["waiting for another change to profile 'default' to finish..."], "said once")
+
+    def test_try_lock_says_whether_it_got_the_lock(self):
+        self.make("default")
+        profile = self.profile("default")
+
+        with profiles.try_lock(profile, profiles.CONTAINERS_LOCK_FILE) as first:
+            with profiles.try_lock(profile, profiles.CONTAINERS_LOCK_FILE, timeout=0.3) as second:
+                self.assertEqual((first, second), (True, False))
+
+        with profiles.try_lock(profile, profiles.CONTAINERS_LOCK_FILE) as again:
+            self.assertTrue(again, "free once let go")
+
+    def test_what_the_proxy_loaded_is_compared_with_what_the_files_say(self):
+        self.make("default")
+        profile = self.profile("default")
+
+        self.assertFalse(profiles.proxy_allowlist_current(profile), "nothing is recorded yet")
+
+        profiles.write_proxy_allowlist(profile)
+        profiles.record_proxy_reload_failure(profile, "it failed\n")
+        self.assertEqual(profiles.proxy_reload_failure(profile), "it failed")
+
+        profiles.mark_proxy_allowlist_applied(profile)
+        self.assertTrue(profiles.proxy_allowlist_applied(profile))
+        self.assertTrue(profiles.proxy_allowlist_current(profile))
+        self.assertEqual(profiles.proxy_reload_failure(profile), "", "a proxy given the allowlist forgets the failure")
+
+        # An edit the file hasn't been written for: the proxy is behind the
+        # files, though not behind the file.
+        with open(profile.allowlist_file, "a", encoding="utf-8") as handle:
+            handle.write("x.org\n")
+        self.assertTrue(profiles.proxy_allowlist_applied(profile))
+        self.assertFalse(profiles.proxy_allowlist_current(profile))
 
 
 if __name__ == "__main__":
