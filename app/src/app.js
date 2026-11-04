@@ -109,6 +109,11 @@ const PACKAGE_NAME = /^[a-z0-9][a-z0-9+.-]+$/;
 // One-shot containers that exit when their work is done; not worth a status row.
 const SETUP_SERVICES = ['allowlist', 'pki'];
 
+// The CLI's refusal of the Docker snap, and the address of HardCode's own
+// docs it ends with: only those become a link.
+const DOCKER_SNAP = /^Docker on this computer is the snap\b/;
+const DOCS_LINK = /https:\/\/github\.com\/hardcode-app\/hardcode\/blob\/main\/docs\/[\w./#-]+$/;
+
 // How often the header's status is read (milliseconds): usually, and while
 // the VS Code container installs extensions, so their progress shows.
 const STATUS_REFRESH = 15000;
@@ -533,7 +538,12 @@ function showStatusPill() {
     text = 'docker not found';
     kind = 'bad';
   } else if (state.status.error) {
-    text = /Cannot connect to the Docker daemon/i.test(state.status.error) ? 'docker not running' : 'status unknown';
+    text = 'status unknown';
+    if (/Cannot connect to the Docker daemon/i.test(state.status.error)) {
+      text = 'docker not running';
+    } else if (DOCKER_SNAP.test(state.status.error)) {
+      text = 'docker snap unsupported';
+    }
     kind = 'bad';
   } else if (!services.length) {
     text = 'not created';
@@ -1147,10 +1157,27 @@ function serviceRow(service, busy) {
   );
 }
 
-/** What the overview's container list says when there are no containers to list. */
+/**
+ * What the overview's container list says when there are no containers to
+ * list. The Docker snap's refusal is said as it is, and the docs' address it
+ * ends with ("…another way: <address>") becomes a link on a line of its own.
+ */
 function emptyServiceList() {
-  if (state.status.error) {
-    return `<div class="empty">Docker can't say what is running: ${esc(state.status.error)}</div>`;
+  const error = state.status.error;
+
+  if (DOCKER_SNAP.test(error)) {
+    const docs = error.match(DOCS_LINK);
+    if (!docs) {
+      return `<div class="empty">${esc(error)}</div>`;
+    }
+
+    const words = error.slice(0, docs.index).trim().replace(/:$/, '.');
+    const link = `<a href="#" data-docs="${esc(docs[0])}">How to install Docker</a>`;
+    return `<div class="empty">${esc(words)}<br>${link}</div>`;
+  }
+
+  if (error) {
+    return `<div class="empty">Docker can't say what is running: ${esc(error)}</div>`;
   }
 
   return `<div class="empty">Not created yet. Press <b>Start</b> to build and run this profile's sandbox.</div>`;
@@ -2448,6 +2475,13 @@ function bindOverview() {
 
   each('[data-logs]', (row) => {
     row.onclick = () => openLogs(row.dataset.logs);
+  });
+
+  each('[data-docs]', (link) => {
+    link.onclick = (event) => {
+      event.preventDefault();
+      call('docs:open', link.dataset.docs);
+    };
   });
 
   // The URL itself is asked for by refreshStatus, whatever the view.

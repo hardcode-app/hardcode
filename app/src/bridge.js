@@ -517,6 +517,14 @@
       await opener.openUrl(url);
     },
 
+    /** A page of HardCode's docs, in the browser; no other address. */
+    async 'docs:open'(url) {
+      if (!String(url).startsWith('https://github.com/hardcode-app/hardcode/blob/main/docs/')) {
+        throw new Error(`not a page of HardCode's docs: ${url}`);
+      }
+      await opener.openUrl(url);
+    },
+
     // -- plumbing
 
     'shell:open': async () => false,

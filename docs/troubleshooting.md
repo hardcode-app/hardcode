@@ -26,6 +26,21 @@ The `docker` command isn't on the `PATH` of the app (HardCode also looks
 where Docker Desktop installs it on macOS). Install Docker, start Docker
 Desktop, or start the app from a shell whose `PATH` has `docker`.
 
+### The app says *docker snap unsupported*, or Docker can't open a profile's file
+
+Docker on this computer is the snap. The snap can't open HardCode's
+folders, and it refuses the security settings HardCode's containers run
+with, so it can't run a sandbox. Remove it, then install Docker as
+[Getting started](getting-started.md#1-install-docker) says:
+
+```sh
+sudo snap remove --purge docker
+```
+
+That also deletes the snap's containers, images and volumes, so copy out
+anything you need from them first. Your profiles are kept, and work as
+they are with the new Docker.
+
 ### The app says the hardcode command was not found
 
 A release has its own copy beside the app; reinstall the app if it has

@@ -39,6 +39,24 @@ class ParseTests(unittest.TestCase):
         with self.assertRaises(ComposeError):
             compose.docker_executable(lambda _: None)
 
+    def test_the_docker_snap_is_told_by_its_command(self):
+        def same(path):
+            return path
+
+        # The snap's command, and a link of one's own to it, which ends at snap.
+        self.assertTrue(compose.is_snap("/snap/bin/docker", resolve=same))
+        self.assertTrue(compose.is_snap("/usr/local/bin/docker", resolve=lambda _: "/usr/bin/snap"))
+
+        # Docker's and Ubuntu's packages, Docker Desktop, and Windows.
+        for docker in (
+            "/usr/bin/docker",
+            "/usr/local/bin/docker",
+            "/Applications/Docker.app/Contents/Resources/bin/docker",
+            r"C:\Program Files\Docker\Docker\resources\bin\docker.exe",
+        ):
+            with self.subTest(docker=docker):
+                self.assertFalse(compose.is_snap(docker, resolve=same))
+
 
 # A container command that ignores the cutoff it was given.
 LOUD = Path(__file__).resolve().parent / "loud_command.py"
@@ -264,6 +282,24 @@ class ComposeTests(HomeTestCase):
 
         with mock.patch.object(compose, "docker_executable", side_effect=ComposeError("docker not found on the PATH")):
             self.assertEqual(self.make(docker=None).status(), ([], "docker not found on the PATH"))
+
+    def test_the_docker_snap_runs_no_compose_and_says_where_to_look(self):
+        # The snap can't read the profile's files, and refuses its containers'
+        # no-new-privileges: Compose isn't run at all.
+        project = self.make(docker="/snap/bin/docker")
+
+        with self.assertRaisesRegex(ComposeError, r"^Docker on this computer is the snap\b") as raised:
+            project.run("up", "-d")
+        self.assertTrue(str(raised.exception).endswith(compose.INSTALL_DOCS))
+        self.assertEqual(self.runner.commands("compose"), [])
+
+        # The app's status says so, while Docker is still found.
+        self.assertEqual(project.status(), ([], compose.SNAP_REFUSAL))
+        self.assertTrue(project.has_docker())
+
+        # Plain docker works under the snap (devices, the image's labels).
+        self.assertEqual(project.run_docker("info").returncode, 0)
+        self.assertEqual(self.runner.commands("/snap/bin/docker info"), ["/snap/bin/docker info"])
 
     def test_published(self):
         runner = FakeRunner(running=True)

@@ -28,6 +28,18 @@ Runner = Callable[..., subprocess.CompletedProcess]
 # the Dock doesn't have it on its PATH.
 MAC_DOCKER_DIRS = ("/usr/local/bin", "/opt/homebrew/bin", "~/.docker/bin")
 
+# The docs' section on installing Docker, which has both ways that work.
+INSTALL_DOCS = "https://github.com/hardcode-app/hardcode/blob/main/docs/getting-started.md#1-install-docker"
+
+# Why the Docker snap can't run a profile. Its confinement keeps it out of
+# hidden folders (~/.config, ~/.cache), where the profiles and the stack
+# are, and its AppArmor profile refuses to start a program under
+# no-new-privileges, which every HardCode container has.
+SNAP_REFUSAL = (
+    "Docker on this computer is the snap, which can't run HardCode: the snap can't read HardCode's folders, "
+    f"and it refuses the containers' security settings. Install Docker another way: {INSTALL_DOCS}"
+)
+
 
 @dataclass(frozen=True)
 class Service:
@@ -62,6 +74,17 @@ def docker_executable(which: Callable[[str], Optional[str]] = shutil.which) -> s
             return str(candidate)
 
     raise ComposeError("docker not found on the PATH")
+
+
+def is_snap(docker: str, resolve: Callable[[str], str] = os.path.realpath) -> bool:
+    """
+    Whether *docker* is the Docker snap's command: one under /snap, or a link
+    that ends at snap itself, as /snap/bin/docker does (to /usr/bin/snap).
+    """
+    if docker.startswith("/snap/"):
+        return True
+
+    return Path(resolve(docker)).name == "snap"
 
 
 def parse_ps(output: str) -> list[Service]:
@@ -267,7 +290,13 @@ class Compose:
 
         Captured output is held up to the runner's limit, or *limit* bytes:
         a command that prints more is stopped, a ``ComposeError``.
+
+        With the Docker snap, nothing is run: the ``ComposeError`` says why
+        it can't run a profile, and where the docs say how to install Docker.
         """
+        if is_snap(self.docker):
+            raise ComposeError(SNAP_REFUSAL)
+
         options: dict = {}
         if to_stderr and not capture:
             options["stdout"] = sys.stderr

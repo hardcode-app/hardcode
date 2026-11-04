@@ -22,12 +22,30 @@ check at the end of this step.
 - **macOS and Windows**: install
   [Docker Desktop](https://docs.docker.com/desktop/) and start it. It has
   to be running whenever you use HardCode.
-- **Linux**: install Docker Engine as
-  [Docker's instructions](https://docs.docker.com/engine/install/) say for
-  your distribution, then follow its
+- **Linux**: install Docker Engine in one of two ways.
+  - **Your distribution's Docker.** On Ubuntu 26.04, Ubuntu's own
+    packages are new enough:
+
+    ```sh
+    sudo apt install docker.io docker-compose-v2 docker-buildx
+    ```
+
+  - **Docker's own**, for the newest version, or when your distribution's
+    is older than 28: follow
+    [Docker's instructions](https://docs.docker.com/engine/install/) for
+    your distribution.
+
+  Either way, then follow Docker's
   [post-installation steps](https://docs.docker.com/engine/install/linux-postinstall/)
-  so that you can run `docker` without `sudo`. HardCode never needs root
-  and refuses to run under `sudo`.
+  so that you can run `docker` without `sudo`. On Ubuntu that is
+  `sudo usermod -aG docker "$USER"`, then logging out and back in.
+  HardCode never needs root and refuses to run under `sudo`.
+
+  Don't use the Docker snap (`snap install docker`): it can't run
+  HardCode. If you have it, remove it first with
+  `sudo snap remove --purge docker`. That also deletes the snap's
+  containers, images and volumes, so copy out anything you need from them
+  first.
 
 Then check the versions. Open a terminal (Terminal on macOS, PowerShell on
 Windows) and type:

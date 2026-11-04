@@ -36,6 +36,7 @@ The state next to the page title says:
 | *not created* | the sandbox hasn't been started yet, or was removed |
 | *docker not found* | the `docker` command can't be found |
 | *docker not running* | Docker doesn't answer: start Docker Desktop, or the Docker service |
+| *docker snap unsupported* | Docker is the snap, which can't run HardCode: the Overview links to how to install Docker |
 | *status unknown* | Docker Compose or the command failed; hover over it for the reason |
 
 While the sandbox installs VS Code extensions, the state adds how far it

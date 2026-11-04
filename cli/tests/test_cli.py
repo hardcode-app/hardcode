@@ -10,7 +10,7 @@ from contextlib import redirect_stdout
 from unittest import mock
 
 import hardcode_cli
-from hardcode_cli import allowlist, cli, envfile, langs, profiles
+from hardcode_cli import allowlist, cli, compose, envfile, langs, profiles
 
 from .helpers import FakeRunner, HomeTestCase, fake_host, updated_catalogue
 from .resolver import FakeResolver
@@ -41,12 +41,12 @@ class CliTestCase(HomeTestCase):
         # A Linux computer without devices: this machine's /dev is never read.
         self.host = fake_host()
 
-    def run_cli(self, *argv, running=False, runner=None, config=None, answers=None):
+    def run_cli(self, *argv, running=False, runner=None, config=None, answers=None, docker="docker"):
         """
         Run ``hardcode --config <home> <argv>``; returns the exit code and
         what was printed to stdout and stderr. With *answers*, the command
         runs on a terminal and they answer its questions, in order. The
-        computer is ``self.host``.
+        computer is ``self.host``, and its ``docker`` command *docker*.
         """
         self.runner = runner or FakeRunner(running=running)
         out, err = [], []
@@ -55,7 +55,7 @@ class CliTestCase(HomeTestCase):
         code = cli.main(
             ["--config", str(config or self.root), *argv],
             runner=self.runner,
-            docker="docker",
+            docker=docker,
             out=out.append,
             err=err.append,
             sleep=lambda _: None,
@@ -722,6 +722,17 @@ class CliTests(CliTestCase):
         runner.fail_on.add("ps -a")
         _, out, _ = self.run_cli("--json", "ps", runner=runner)
         self.assertIn("simulated failure", json.loads(out)["error"])
+
+    def test_the_docker_snap_is_refused_with_the_docs_install_section(self):
+        code, _, err = self.run_cli("up", docker="/snap/bin/docker")
+        self.assertNotEqual(code, 0)
+        self.assertIn("Docker on this computer is the snap, which can't run HardCode", err)
+        self.assertIn(compose.INSTALL_DOCS, err)
+
+        # What the app reads: Docker is there, and the refusal is the reason.
+        _, out, _ = self.run_cli("--json", "ps", docker="/snap/bin/docker")
+        status = json.loads(out)
+        self.assertEqual((status["docker"], status["error"]), (True, compose.SNAP_REFUSAL))
 
 
 class GithubRepositoryCliTests(CliTestCase):
