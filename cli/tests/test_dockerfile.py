@@ -288,7 +288,11 @@ class OpsTests(HomeTestCase):
         outside = Path(self._tmp) / "src"
         outside.mkdir()
 
-        for folder in (self.root, inside, ops.profile.dir, self.root.parent, Path("/")):
+        # The root of the home's own drive: on Windows, "/" is the current
+        # drive's, which needn't be the home's.
+        drive_root = Path(self.root.anchor)
+
+        for folder in (self.root, inside, ops.profile.dir, self.root.parent, drive_root):
             with self.subTest(folder=folder):
                 with self.assertRaisesRegex(override.OverrideError, "HardCode's home .* or is in it"):
                     ops.mount(str(folder), "work")
