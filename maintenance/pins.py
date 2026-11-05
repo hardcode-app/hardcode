@@ -737,16 +737,26 @@ def _numbers(version: str) -> tuple[int, ...]:
     return tuple(numbers)
 
 
+# The update type of a package that goes to an older version, which isn't
+# one of Dependabot's: maintenance/merge.py leaves it for a person. A lock
+# refresh takes one when the package's version was withdrawn (yanked) and
+# its next one isn't a week old yet, and no version ever moves backwards.
+DOWNGRADE = "version-downgrade"
+
+
 def version_update(old: str, new: str) -> str:
     """
     Dependabot's word for a package going from *old* to *new*: a package
     the lock didn't have (*old* empty) counts as a minor update, and a
     version that can't be read as a major one, which waits for a person.
+    An older version is ``DOWNGRADE``, which waits for a person too.
     """
     before, after = _numbers(old), _numbers(new)
 
     if not old:
         return "version-update:semver-minor"
+    if before and after and after < before:
+        return DOWNGRADE
     if not before or not after or before[0] != after[0]:
         return "version-update:semver-major"
     if before[1:2] != after[1:2]:
@@ -803,6 +813,8 @@ def locks_message(changed: dict[str, list[dict]]) -> str:
                 lines.append(f"- {change['name']} {change['new']} (added)")
             elif not change["new"]:
                 lines.append(f"- {change['name']} {change['old']} (removed)")
+            elif version_update(change["old"], change["new"]) == DOWNGRADE:
+                lines.append(f"- {change['name']} {change['old']} -> {change['new']} (backwards: waits for a person)")
             else:
                 lines.append(f"- {change['name']} {change['old']} -> {change['new']}")
 

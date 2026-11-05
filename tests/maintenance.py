@@ -294,7 +294,8 @@ def check_ages(suite: Suite) -> None:
 
 def check_locks(suite: Suite) -> None:
     suite.check(
-        "a step in a lock is told apart: patch, minor, major, a package added, a version that can't be read",
+        "a step in a lock is told apart: patch, minor, major, a package added, a version that can't be read, "
+        "and one going backwards",
         [
             pins.version_update("1.5.2", "1.5.3"),
             pins.version_update("6.0.1", "6.2.0"),
@@ -302,6 +303,8 @@ def check_locks(suite: Suite) -> None:
             pins.version_update("", "1.0.3"),
             pins.version_update("2026.9", "2026.10"),
             pins.version_update("1.0", "latest"),
+            pins.version_update("1.14.0", "1.13.3"),
+            pins.version_update("2.0.0", "1.9.9"),
         ]
         == [
             "version-update:semver-patch",
@@ -310,6 +313,8 @@ def check_locks(suite: Suite) -> None:
             "version-update:semver-minor",
             "version-update:semver-minor",
             "version-update:semver-major",
+            pins.DOWNGRADE,
+            pins.DOWNGRADE,
         ],
     )
 
@@ -365,6 +370,25 @@ def check_locks(suite: Suite) -> None:
         and merge.needs_a_person({"head": {"ref": "pins/locks"}}, [commit_of(text, "github-actions[bot]")])
         == "a major update (4.0.0)",
         text,
+    )
+
+    # A package taken back to an older version (its version withdrawn, the
+    # next not a week old): the proposal says so, and waits for a person.
+    backwards = pins.locks_message(
+        {
+            "app/src-tauri/Cargo.lock": [
+                {"name": "brotli", "old": "9.0.0", "new": "9.1.0"},
+                {"name": "async-executor", "old": "1.14.0", "new": "1.13.3"},
+            ]
+        }
+    )
+    suite.check(
+        "a package the refresh takes backwards is marked in the proposal, and leaves it for a person",
+        "- async-executor 1.14.0 -> 1.13.3 (backwards: waits for a person)\n" in backwards
+        and "- brotli 9.0.0 -> 9.1.0\n" in backwards
+        and merge.needs_a_person({"head": {"ref": "pins/locks"}}, [commit_of(backwards, "github-actions[bot]")])
+        == "a version going backwards (1.13.3)",
+        backwards,
     )
 
     # The workflow: a refresh that only reads, and a job that takes only the
