@@ -18,8 +18,9 @@ files), is:
 - asked to rebase ("@dependabot rebase") when main has moved on since;
 - given its pin-age check again when that was all that failed, a day
   later: a pin a few days too young becomes old enough;
-- left for a person otherwise: a major update, an action the workflows use
-  (each is new code that runs with their tokens), and anything that failed.
+- left for a person otherwise: a major update, a package the lock refresh
+  takes back to an older version, an action the workflows use (each is new
+  code that runs with their tokens), and anything that failed.
 
 Standard library only; GITHUB_TOKEN is the token it acts with.
 """
@@ -67,6 +68,10 @@ VERSION = re.compile(r"^\s*dependency-version:\s*(\S+)\s*$", re.MULTILINE)
 # A dated build, such as Ubuntu's resolute-20261024.1: a newer one of the
 # same release looks like a major update to Dependabot, and isn't.
 DATED = re.compile(r"(?:^|-)20\d{6}(?:\.\d+)?$")
+
+# The lock refresh's update type for a package that goes to an older
+# version (pins.py's DOWNGRADE): no version moves backwards unseen.
+DOWNGRADE = "version-downgrade"
 
 
 class GitHubError(Exception):
@@ -163,6 +168,8 @@ def needs_a_person(pull: dict, commits: list[dict]) -> str:
     for index, kind in enumerate(types):
         version = versions[index] if index < len(versions) else ""
 
+        if kind == DOWNGRADE:
+            return f"a version going backwards ({version or 'version not given'})"
         if kind == "version-update:semver-major" and not DATED.search(version):
             return f"a major update ({version or 'version not given'})"
         if kind not in ("version-update:semver-major", "version-update:semver-minor", "version-update:semver-patch"):

@@ -221,9 +221,11 @@ whose updates are all patch or minor ones (or a newer dated build of the
 same image), and, from one of our own jobs' `pins/` branches, that changes
 only the files that job makes. One behind `main` gets `@dependabot rebase`; one whose only
 failure was its pin-age check gets that job run again a day later. What is
-left for a person: a major update, any action (each is new code the
-workflows run with their tokens), a pull request with anyone else's
-commit, and anything that failed. `maintenance/merge.py --dry-run` says
+left for a person: a major update, a package the lock refresh takes back
+to an older version (one whose version was withdrawn, while its next isn't
+a week old yet), any action (each is new code the workflows run with their
+tokens), a pull request with anyone else's commit, and anything that
+failed. `maintenance/merge.py --dry-run` says
 what it would do.
 
 The jobs that act hold a write token, so they run nothing but
