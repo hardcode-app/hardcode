@@ -40,12 +40,12 @@ RUN apt-get update \
 ARG KIND_VERSION=0.33.0
 ARG KIND_SHA256_AMD64=aee6151561422756b764a4ae28e7f44cda5af5a9eead3cc9985112b1de8d8e0d
 ARG KIND_SHA256_ARM64=20022bee6cfcd5086cb7234d218e3454e6090022f2a8f55d1fa7fcf42c3867a2
-ARG KUBECTL_VERSION=1.37.1
-ARG KUBECTL_SHA256_AMD64=65691ff77eb6fa44c908b77a1082c9f092c3b9733b5cefabec0d1104890e21a8
-ARG KUBECTL_SHA256_ARM64=ff749f4b78d9c4f1ec87307df9b50119ed819e2094aa9810cb9acffc3286c8c7
-ARG HELM_VERSION=4.3.0
-ARG HELM_SHA256_AMD64=86584a54def73570558f66f5111cc53dfed56689637ae32c1201205d494f54fb
-ARG HELM_SHA256_ARM64=31c5794dd55c66a51e6b7d2e2ac7a114ae8b1de41ff1d9ba51748ac973b06a08
+ARG KUBECTL_VERSION=1.37.2
+ARG KUBECTL_SHA256_AMD64=c04487523e7aa7d1493f7808174c899db93d7a9cf57531420cd76b9bd415f8f4
+ARG KUBECTL_SHA256_ARM64=fcc16f63186659d9722014b7e02d5fdd2d4e669cb8c0ab66365d7d3b8ba03509
+ARG HELM_VERSION=4.3.1
+ARG HELM_SHA256_AMD64=0403a88ae20913d11b10a2467b50087721fea7581736da6b9d3992f5357fe54b
+ARG HELM_SHA256_ARM64=8cf8f66ecbc252ac8f7f06cca68aba88508ddfde3a6a34feb1678ad1694b4f88
 RUN set -eu; \
     arch="$(dpkg --print-architecture)"; \
     case "$arch" in \
@@ -83,8 +83,8 @@ RUN set -eu; \
 # The Tauri CLI, for the installers: the project's release binary for amd64,
 # checksum-pinned; other architectures build the same version from crates.io,
 # and so do the release's macOS and Windows builds (release.yml reads it here).
-ARG TAURI_CLI_VERSION=2.12.2
-ARG TAURI_CLI_SHA256_AMD64=35c7b50266256cb6d5f757608d7097a59a5faeb0c75879ee1f504652a9b6087e
+ARG TAURI_CLI_VERSION=2.12.4
+ARG TAURI_CLI_SHA256_AMD64=820ae3c7580ca637cad15f65638960ee2a96e5a491e224691c86d6f25e6c9e8a
 RUN set -eu; \
     if [ "$(dpkg --print-architecture)" = amd64 ]; then \
       release="https://github.com/tauri-apps/tauri/releases/download/tauri-cli-v${TAURI_CLI_VERSION}"; \
