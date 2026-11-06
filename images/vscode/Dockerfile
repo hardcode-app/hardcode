@@ -12,8 +12,8 @@
 #   - kind                  GitHub release binary, sha256-verified (archive ships
 #                           0.30.0, whose default cluster, Kubernetes 1.34, is
 #                           further from the current kubectl than kubectl supports)
-#   - Claude Code CLI       claude.ai native installer (not in the archive)
-#   - Codex CLI             GitHub release binary, sha256-verified (not in the archive)
+#   - Claude Code CLI       npm registry, @anthropic-ai/claude-code (not in the archive)
+#   - Codex CLI             npm registry, @openai/codex (not in the archive)
 #
 # Each language is its own section and can be skipped with a build arg, e.g.
 #   docker build --build-arg INSTALL_JAVA=false ...
@@ -54,8 +54,11 @@ ARG INSTALL_CODEX_CLI=true
 ARG VSCODE_VERSION=latest
 # "latest", a release such as 9.8.0, or "none" to skip.
 ARG GRADLE_VERSION=latest
-# "latest" or a release such as 0.162.1. Updating Codex means rebuilding the
-# image: its own update check is switched off (see the entrypoint).
+# Claude Code's and Codex's npm releases: "latest" or a release such as
+# 2.1.318 and 0.166.0. Updating either means rebuilding the image: their own
+# updaters are switched off (DISABLE_AUTOUPDATER below; Codex's in the
+# entrypoint).
+ARG CLAUDE_VERSION=latest
 ARG CODEX_VERSION=latest
 # kubectl, Helm and kind: each "latest" or a release, such as 1.37.1, 4.3.0
 # and 0.33.0. Updating them means rebuilding the image.
@@ -288,31 +291,34 @@ RUN if [ "${INSTALL_KUBERNETES}" = "true" ]; then \
     fi
 
 # ---------------------------------------------------------------------------
-# Codex CLI: OpenAI's release binary (static, musl), checked against the
-# sha256 digest GitHub publishes for it
+# Claude Code and Codex CLIs: each vendor's npm package, which npm checks
+# against the hash the registry publishes, installed for everyone in
+# /usr/local so that a rebuild updates them. Node and npm come from the
+# archive for them, whether or not the profile has JavaScript.
 # ---------------------------------------------------------------------------
-RUN if [ "${INSTALL_CODEX_CLI}" = "true" ]; then \
-      case "$(uname -m)" in \
-        x86_64) target=x86_64-unknown-linux-musl ;; \
-        aarch64) target=aarch64-unknown-linux-musl ;; \
-        *) echo "no Codex release for $(uname -m)" >&2; exit 1 ;; \
-      esac \
-      && if [ "${CODEX_VERSION}" = "latest" ]; then \
-           release=latest; \
-         else \
-           release="tags/rust-v${CODEX_VERSION}"; \
-         fi \
-      && meta="$(curl -fsSL "https://api.github.com/repos/openai/codex/releases/${release}")" \
-      && asset="codex-${target}.tar.gz" \
-      && url="$(jq -r --arg name "${asset}" '.assets[] | select(.name == $name) | .browser_download_url' <<<"${meta}")" \
-      && digest="$(jq -r --arg name "${asset}" '.assets[] | select(.name == $name) | .digest // ""' <<<"${meta}")" \
-      && case "${digest}" in sha256:*) ;; *) echo "no sha256 digest for ${asset}" >&2; exit 1 ;; esac \
-      && curl -fsSLo /tmp/codex.tar.gz "${url}" \
-      && echo "${digest#sha256:}  /tmp/codex.tar.gz" | sha256sum -c - \
-      && tar -xzf /tmp/codex.tar.gz -C /tmp \
-      && install -m 0755 "/tmp/codex-${target}" /usr/local/bin/codex \
-      && rm -f /tmp/codex.tar.gz "/tmp/codex-${target}" \
-      && codex --version; \
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    --mount=type=cache,target=/var/lib/apt,sharing=locked \
+    if [ "${INSTALL_CLAUDE_CLI}" = "true" ]; then \
+      apt-install nodejs npm \
+      # The package installs its native build for this platform.
+      && npm install --global --prefix /usr/local "@anthropic-ai/claude-code@${CLAUDE_VERSION}" \
+      && claude --version; \
+    fi
+
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    --mount=type=cache,target=/var/lib/apt,sharing=locked \
+    if [ "${INSTALL_CODEX_CLI}" = "true" ]; then \
+      apt-install nodejs npm \
+      # The whole package, not its binary alone: Codex runs a background
+      # server (codex app-server), which it starts from its package.
+      && npm install --global --prefix /usr/local "@openai/codex@${CODEX_VERSION}" \
+      && codex --version \
+      # Checked as Codex uses it: its server starts from the package, in a
+      # Codex home of its own, and stops.
+      && codex_home="$(mktemp -d)" \
+      && CODEX_HOME="${codex_home}" codex app-server daemon start >/dev/null \
+      && CODEX_HOME="${codex_home}" codex app-server daemon stop >/dev/null \
+      && rm -rf "${codex_home}"; \
     fi
 
 # ---------------------------------------------------------------------------
@@ -384,10 +390,6 @@ COPY --chmod=0755 install-packages.sh /usr/local/bin/hardcode-install-packages
 USER ${USERNAME}
 WORKDIR /home/${USERNAME}
 
-RUN if [ "${INSTALL_CLAUDE_CLI}" = "true" ]; then \
-      curl -fsSL https://claude.ai/install.sh | bash; \
-    fi
-
 RUN ln -s /shared ~/shared
 
 # SSH goes through squid too (only to hosts with an "ssh" allowlist entry).
@@ -405,7 +407,10 @@ ENV PATH=/home/${USERNAME}/.local/bin:/home/${USERNAME}/.cargo/bin:/home/${USERN
     PERL_MB_OPT="--install_base /home/${USERNAME}/perl5" \
     PERL_MM_OPT="INSTALL_BASE=/home/${USERNAME}/perl5" \
     DOTNET_CLI_TELEMETRY_OPTOUT=1 \
-    DOTNET_NOLOGO=1
+    DOTNET_NOLOGO=1 \
+    # Claude Code comes with the image: its updater would install a newer
+    # copy into ~/.local, ahead of the image's on the PATH.
+    DISABLE_AUTOUPDATER=1
 
 EXPOSE 8000
 ENTRYPOINT ["/usr/bin/tini", "--", "/usr/local/bin/hardcode-entrypoint"]

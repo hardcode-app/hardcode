@@ -176,7 +176,7 @@ NOTES = {
     "claude.ai": "account sign-in",
     "platform.claude.com": "OAuth token exchange",
     "claude.com": "sign-in redirect page",
-    "downloads.claude.ai": "native installer, auto-updates",
+    "downloads.claude.ai": "its list of models, official plugins",
     "auth.openai.com": "sign-in and token refresh",
     "chatgpt.com/backend-api": "the model, with a ChatGPT plan",
     "api.openai.com": "the model, with an API key",
@@ -354,8 +354,10 @@ CATALOGUE = (
         "claude in the terminal and its VS Code extension: Anthropic's coding agent",
         kind="tool",
         # The API; account sign-in; the OAuth token exchange; the sign-in
-        # redirect page; the native installer and its updates. Its telemetry
-        # and error reporting are off (compose.yaml), and their hosts closed.
+        # redirect page; its list of models and its official plugin
+        # marketplace (it is installed from npm with the image, and doesn't
+        # update itself). Its telemetry and error reporting are off
+        # (compose.yaml), and their hosts closed.
         domains=("api.anthropic.com", "claude.ai", "platform.claude.com", "claude.com", "downloads.claude.ai"),
         rw=("api.anthropic.com", "claude.ai", "platform.claude.com"),
         extensions=("anthropic.claude-code",),

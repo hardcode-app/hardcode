@@ -171,10 +171,12 @@ in as it asks; the sign-in is kept in your home folder.
 - **Its telemetry and error reporting are off**, and their hosts aren't on
   the allowlist. The connectors from your claude.ai account are off too,
   and the host they go through is closed.
-- **Its own hosts** (the API, sign-in, its downloads and updates) are the
-  Claude Code CLI's allowlist block. Switching the tool off closes them and
-  removes the extension.
-- **It keeps itself up to date**, from its own download host.
+- **Its own hosts** (the API, sign-in, its list of models and its
+  official plugins) are the Claude Code CLI's allowlist block. Switching
+  the tool off closes them and removes the extension.
+- **Updating.** Claude Code comes with the image, from npm: rebuild to
+  update it, and set `CLAUDE_VERSION` in the profile's `.env` to stay on
+  one release. It doesn't update itself.
 - **Anything else it needs to reach**, such as an MCP server or a plugin
   marketplace, needs an allowlist entry of its own. Claude Code's
   official plugin marketplace is a GitHub repository:
@@ -203,8 +205,9 @@ and crash reports stay closed.
   proxy and its network are the sandbox here, as they are for Claude Code.
   Codex still asks before acting, as its approval policy says. The file is
   yours to change afterwards.
-- **Updating.** Codex comes with the image: rebuild to update it, and set
-  `CODEX_VERSION` in the profile's `.env` to stay on one release.
+- **Updating.** Codex comes with the image, from npm: rebuild to update
+  it, and set `CODEX_VERSION` in the profile's `.env` to stay on one
+  release.
 - **Its connections.** The proxy doesn't pass WebSocket connections, so
   Codex uses HTTPS instead, as it is built to.
 
@@ -349,8 +352,8 @@ nothing usable:
 | kubectl (from dl.k8s.io, checksum-checked; `KUBECTL_VERSION`) | not in Ubuntu |
 | Helm (from get.helm.sh, checksum-checked; `HELM_VERSION`) | not in Ubuntu |
 | kind (its release on GitHub, checksum-checked; `KIND_VERSION`) | Ubuntu's is too old for the current kubectl |
-| Claude Code CLI (Anthropic's installer, from claude.ai) | not in Ubuntu |
-| Codex CLI (OpenAI's release on GitHub, checked against the checksum GitHub publishes; `CODEX_VERSION`) | not in Ubuntu |
+| Claude Code CLI (Anthropic's npm package, `@anthropic-ai/claude-code`, which npm checks against the registry's checksum; `CLAUDE_VERSION`) | not in Ubuntu. Node and npm come from Ubuntu for it, with or without JavaScript |
+| Codex CLI (OpenAI's npm package, `@openai/codex`, checked the same way; `CODEX_VERSION`) | not in Ubuntu. The whole package, which Codex's background server starts from |
 
 The image records the languages and tools it was built with (in its
 `io.github.hardcode-app.languages` label), which `hardcode languages` and

@@ -246,6 +246,19 @@ class CatalogueAgreementTests(unittest.TestCase):
 
         self.assertIn(f"LABEL {ops.IMAGE_LANGUAGES_LABEL}=", dockerfile, "the label the CLI reads")
 
+    def test_the_coding_agents_come_from_npm_and_nothing_is_piped_into_a_shell(self):
+        # A vendor's install script piped into a shell runs whatever it
+        # serves at that moment, unchecked: the coding agents are their
+        # npm packages, which npm checks against the registry's hash, and
+        # nothing else installs that way either.
+        dockerfile = (REPO / "images" / "vscode" / "Dockerfile").read_text(encoding="utf-8")
+
+        self.assertIn(
+            'npm install --global --prefix /usr/local "@anthropic-ai/claude-code@${CLAUDE_VERSION}"', dockerfile
+        )
+        self.assertIn('npm install --global --prefix /usr/local "@openai/codex@${CODEX_VERSION}"', dockerfile)
+        self.assertIsNone(re.search(r"\|\s*(sudo\s+)?(ba)?sh\b", dockerfile), "no install script piped into a shell")
+
     def test_the_templates_env_is_a_reference_of_compose_yamls_defaults(self):
         # A profile's .env holds only what it changes: the template's is all
         # comments, each setting with compose.yaml's default.

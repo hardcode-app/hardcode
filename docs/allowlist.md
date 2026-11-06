@@ -314,7 +314,7 @@ given its rules. Entries are read-only unless marked `rw`.
 | Ruby | `rubygems.org`, `index.rubygems.org` |
 | Perl | `www.cpan.org`, `cpan.metacpan.org`, `fastapi.metacpan.org`, `cpanmetadb.plackperl.org` |
 | Kubernetes | `dl.k8s.io` and `cdn.dl.k8s.io` (kubectl), `get.helm.sh` (Helm). A cluster's address is an entry of your own. |
-| Claude Code CLI | `api.anthropic.com` `rw` (the API), `claude.ai` `rw` (sign-in), `platform.claude.com` `rw` (sign-in), `claude.com` (sign-in page), `downloads.claude.ai` (installer and updates) |
+| Claude Code CLI | `api.anthropic.com` `rw` (the API), `claude.ai` `rw` (sign-in), `platform.claude.com` `rw` (sign-in), `claude.com` (sign-in page), `downloads.claude.ai` (its list of models, and its official plugins) |
 | Codex CLI | `auth.openai.com` `rw` (sign-in), `chatgpt.com/backend-api` `rw` (the model, with a ChatGPT plan), `api.openai.com` `rw` (the model, with an API key) |
 
 C / C++, Build essentials and the Docker CLI open nothing. The coding

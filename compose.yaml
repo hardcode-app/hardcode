@@ -258,6 +258,7 @@ services:
         USER_GID: ${DEV_GID:-1000}
         VSCODE_VERSION: ${VSCODE_VERSION:-latest}
         GRADLE_VERSION: ${GRADLE_VERSION:-latest}
+        CLAUDE_VERSION: ${CLAUDE_VERSION:-latest}
         CODEX_VERSION: ${CODEX_VERSION:-latest}
         KUBECTL_VERSION: ${KUBECTL_VERSION:-latest}
         HELM_VERSION: ${HELM_VERSION:-latest}
