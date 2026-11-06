@@ -188,9 +188,14 @@ pull request changes where it was published (crates.io, PyPI, Docker Hub,
 GitHub's releases), the crates and Python packages a lock file update
 pulls in included, and
 fails if one is younger than a week or can't be dated
-(`maintenance/pins.py ages`). A GitHub release counts from its newest file:
-an asset uploaded again after the release was published is as young as
-that upload. The vendor binaries' pull request is checked the same way:
+(`maintenance/pins.py ages`). A version counts from its newest file: a
+GitHub release's asset uploaded again after the release was published, or
+a PyPI version's wheel uploaded after its sdist, is as young as that
+upload. A pin also changes when its files do for the same version (the
+hashes a lock file or a requirements file records, the checksums the
+build image pins), and is aged then too; a change that leaves every pin's
+version and files as they were (a comment, the order of the lines) ages
+nothing. The vendor binaries' pull request is checked the same way:
 its workflow starts CI by hand on its branch, and the job runs there too.
 The actions aren't aged there: Dependabot's cooldown holds them, and a
 person merges them.

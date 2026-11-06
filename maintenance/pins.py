@@ -193,19 +193,45 @@ def fetch_url(url: str, headers: dict) -> bytes:
 # ---------------------------------------------------------------------------
 
 
+def crate_records(text: str) -> dict[Pin, frozenset[str]]:
+    """
+    The crates.io packages a Cargo.lock holds, each with its checksum.
+    """
+    records = {}
+
+    for block in text.split("[[package]]")[1:]:
+        fields = dict(re.findall(r'^(name|version|source|checksum) = "([^"]*)"$', block, re.MULTILINE))
+
+        if fields.get("source") == CRATES_IO:
+            checksum = fields.get("checksum")
+            records[Pin("crate", fields["name"], fields["version"])] = frozenset({checksum} if checksum else ())
+
+    return records
+
+
 def crates(text: str) -> set[Pin]:
     """
     The crates.io packages a Cargo.lock holds.
     """
-    pins = set()
+    return set(crate_records(text))
 
-    for block in text.split("[[package]]")[1:]:
-        fields = dict(re.findall(r'^(name|version|source) = "([^"]*)"$', block, re.MULTILINE))
 
-        if fields.get("source") == CRATES_IO:
-            pins.add(Pin("crate", fields["name"], fields["version"]))
+def requirement_records(text: str) -> dict[Pin, frozenset[str]]:
+    """
+    The Python packages a requirements file pins with ``==``, each with the
+    hashes on the lines after it (none, without them).
+    """
+    records: dict[Pin, frozenset[str]] = {}
+    found = list(REQUIREMENT_LINE.finditer(text))
 
-    return pins
+    for index, match in enumerate(found):
+        end = found[index + 1].start() if index + 1 < len(found) else len(text)
+        hashes = frozenset(re.findall(r"--hash=(\S+)", text[match.end() : end]))
+
+        pin = Pin("pypi", match.group(1).lower(), match.group(2))
+        records[pin] = records.get(pin, frozenset()) | hashes
+
+    return records
 
 
 def requirements(text: str) -> set[Pin]:
@@ -213,7 +239,24 @@ def requirements(text: str) -> set[Pin]:
     The Python packages a requirements file pins with ``==``, with their
     hashes or without.
     """
-    return {Pin("pypi", name.lower(), version) for name, version in REQUIREMENT_LINE.findall(text)}
+    return set(requirement_records(text))
+
+
+def uv_lock_records(text: str) -> dict[Pin, frozenset[str]]:
+    """
+    The PyPI packages a uv.lock holds (not the project itself, nor anything
+    from another source), each with its files' hashes: its sdist's and its
+    wheels'.
+    """
+    records = {}
+
+    for package in tomllib.loads(text).get("package", []):
+        if package.get("source", {}).get("registry") == PYPI:
+            files = [package.get("sdist") or {}, *(package.get("wheels") or [])]
+            hashes = frozenset(file["hash"] for file in files if file.get("hash"))
+            records[Pin("pypi", package["name"], package["version"])] = hashes
+
+    return records
 
 
 def uv_lock(text: str) -> set[Pin]:
@@ -221,13 +264,7 @@ def uv_lock(text: str) -> set[Pin]:
     The PyPI packages a uv.lock holds: not the project itself, nor anything
     from another source.
     """
-    pins = set()
-
-    for package in tomllib.loads(text).get("package", []):
-        if package.get("source", {}).get("registry") == PYPI:
-            pins.add(Pin("pypi", package["name"], package["version"]))
-
-    return pins
+    return set(uv_lock_records(text))
 
 
 def images(text: str) -> set[Pin]:
@@ -249,28 +286,47 @@ def images(text: str) -> set[Pin]:
     return pins
 
 
-def vendor_pins(text: str) -> set[Pin]:
+def _checksums(text: str, arg: str) -> frozenset[str]:
+    """
+    The checksums the build image's Dockerfile pins for *arg*'s downloads,
+    an architecture each ("ARG HELM_SHA256_AMD64=..."), as ``AMD64=...``.
+    """
+    found = re.findall(rf"^ARG {arg}_SHA256_([A-Z0-9]+)=(\S+)$", text, re.MULTILINE)
+    return frozenset(f"{architecture}={checksum}" for architecture, checksum in found)
+
+
+def vendor_records(text: str) -> dict[Pin, frozenset[str]]:
     """
     The vendor binaries' versions the build image's Dockerfile pins, and
-    the AppImage tools' release tags.
+    the AppImage tools' release tags, each with the checksums it pins for
+    their downloads.
     """
-    pins = set()
+    records = {}
 
     for vendor in VENDORS:
         match = re.search(rf"^ARG {vendor.arg}_VERSION=(\S+)$", text, re.MULTILINE)
         if match is None:
             raise PinError(f"{BUILD_DOCKERFILE} has no ARG {vendor.arg}_VERSION")
 
-        pins.add(Pin("release", vendor.repository, vendor.tag.format(version=match.group(1))))
+        pin = Pin("release", vendor.repository, vendor.tag.format(version=match.group(1)))
+        records[pin] = _checksums(text, vendor.arg)
 
     for arg, repository in FIXED_RELEASES.items():
         match = re.search(rf"^ARG {arg}_TAG=(\S+)$", text, re.MULTILINE)
         if match is None:
             raise PinError(f"{BUILD_DOCKERFILE} has no ARG {arg}_TAG")
 
-        pins.add(Pin("release", repository, match.group(1)))
+        records[Pin("release", repository, match.group(1))] = _checksums(text, arg)
 
-    return pins
+    return records
+
+
+def vendor_pins(text: str) -> set[Pin]:
+    """
+    The vendor binaries' versions the build image's Dockerfile pins, and
+    the AppImage tools' release tags.
+    """
+    return set(vendor_records(text))
 
 
 def rust_toolchain(text: str) -> set[Pin]:
@@ -285,41 +341,54 @@ def rust_toolchain(text: str) -> set[Pin]:
     return {Pin("release", "rust-lang/rust", channel)}
 
 
-def pins_in(read: Callable[[str], Optional[str]]) -> set[Pin]:
+def records_in(read: Callable[[str], Optional[str]]) -> dict[Pin, frozenset[str]]:
     """
     Everything the repository pins, its files read with *read* (a path's
-    text, or None when the file isn't there).
+    text, or None when the file isn't there), each with the records of the
+    files it pins: their hashes and checksums, from every file that pins it.
+    An image's digest is in its version; a Rust release has none.
     """
-    found: set[Pin] = set()
+    found: dict[Pin, frozenset[str]] = {}
+
+    def add(records: dict[Pin, frozenset[str]]) -> None:
+        for pin, files in records.items():
+            found[pin] = found.get(pin, frozenset()) | files
 
     lock = read(CARGO_LOCK)
     if lock is not None:
-        found |= crates(lock)
+        add(crate_records(lock))
 
     for name in REQUIREMENTS:
         text = read(name)
         if text is not None:
-            found |= requirements(text)
+            add(requirement_records(text))
 
     for name in UV_LOCKS:
         text = read(name)
         if text is not None:
-            found |= uv_lock(text)
+            add(uv_lock_records(text))
 
     for name in IMAGE_FILES:
         text = read(name)
         if text is not None:
-            found |= images(text)
+            add({pin: frozenset() for pin in images(text)})
 
     dockerfile = read(BUILD_DOCKERFILE)
     if dockerfile is not None:
-        found |= vendor_pins(dockerfile)
+        add(vendor_records(dockerfile))
 
     toolchain = read(RUST_TOOLCHAIN)
     if toolchain is not None:
-        found |= rust_toolchain(toolchain)
+        add({pin: frozenset() for pin in rust_toolchain(toolchain)})
 
     return found
+
+
+def pins_in(read: Callable[[str], Optional[str]]) -> set[Pin]:
+    """
+    Everything the repository pins, its files read with *read*.
+    """
+    return set(records_in(read))
 
 
 def reader_at(ref: str, root: Path = ROOT) -> Callable[[str], Optional[str]]:
@@ -404,18 +473,22 @@ def release_published(release: dict) -> datetime:
 
 def published(pin: Pin, fetch: Fetch) -> datetime:
     """
-    When *pin* was published, as its registry says.
+    When *pin* was published, as its registry says: for a version with
+    several files (a PyPI version's, a GitHub release's), when the newest of
+    them was.
     """
     if pin.kind == "crate":
         answer = _json(fetch, f"https://crates.io/api/v1/crates/{pin.name}/{pin.version}")
         return _when(answer["version"]["created_at"])
 
+    # A PyPI version is as old as its newest file: a wheel can be uploaded
+    # long after the version's first files, and a lock takes the wheel.
     if pin.kind == "pypi":
         answer = _json(fetch, f"https://pypi.org/pypi/{pin.name}/{pin.version}/json")
         uploads = [_when(file["upload_time_iso_8601"]) for file in answer.get("urls") or []]
         if not uploads:
             raise PinError(f"PyPI has no files for {pin.name} {pin.version}")
-        return min(uploads)
+        return max(uploads)
 
     if pin.kind == "image":
         return _image_published(pin, fetch)
@@ -496,9 +569,17 @@ def ages(
     """
     Report every pin that differs from *base*'s and how old it is; 1 when
     one is younger than MINIMUM_AGE or can't be dated, else 0.
+
+    A pin differs when its version does, or when the files it pins do (their
+    hashes and checksums) for a version *base* pins too: a file added to a
+    version, or replaced, since it was published is what the lock or the
+    image takes. A change that leaves both alone (a comment, the order of a
+    file) dates nothing.
     """
     now = now or datetime.now(timezone.utc)
-    new = pins_in(reader_of(root)) - pins_in(reader_at(base, root))
+    current = records_in(reader_of(root))
+    before = records_in(reader_at(base, root))
+    new = {pin for pin, files in current.items() if before.get(pin) != files}
 
     if not new:
         print(f"no pin differs from {base}'s")
@@ -507,6 +588,8 @@ def ages(
     refused = 0
     for item in age_all(new, fetch, sleep):
         label = f"{item.pin.kind} {item.pin.name} {item.pin.version}"
+        if item.pin in before:
+            label += " (its files changed)"
 
         if item.published is None:
             print(f"REFUSED  {label}: {item.problem}")

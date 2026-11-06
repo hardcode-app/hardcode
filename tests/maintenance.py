@@ -190,6 +190,13 @@ def check_ages(suite: Suite) -> None:
             "https://crates.io/api/v1/crates/serde/1.0.300": crate_answer(30),
             "https://crates.io/api/v1/crates/fresh/0.2.0": crate_answer(2),
             "https://pypi.org/pypi/ruff/0.17.3/json": {"urls": [{"upload_time_iso_8601": days_ago(9)}]},
+            # An old version's sdist, and a wheel uploaded for it this week.
+            "https://pypi.org/pypi/flask/3.1.3/json": {
+                "urls": [{"upload_time_iso_8601": days_ago(8)}, {"upload_time_iso_8601": days_ago(1)}]
+            },
+            "https://pypi.org/pypi/gunicorn/26.2.0/json": {
+                "urls": [{"upload_time_iso_8601": days_ago(8)}, {"upload_time_iso_8601": days_ago(7)}]
+            },
             "https://hub.docker.com/v2/repositories/library/ubuntu/tags/resolute-20261006": {
                 "digest": "sha256:aaa",
                 "tag_last_pushed": days_ago(15),
@@ -225,6 +232,11 @@ def check_ages(suite: Suite) -> None:
     suite.check(
         "a GitHub release is as old as its newest file: one uploaded again this week counts from then",
         published(pins.Pin("release", "kubernetes-sigs/kind", "v0.34.0")) == NOW - timedelta(days=2),
+    )
+    suite.check(
+        "so is a PyPI version: an old sdist doesn't vouch for a wheel uploaded yesterday",
+        published(pins.Pin("pypi", "flask", "3.1.3")) == NOW - timedelta(days=1)
+        and published(pins.Pin("pypi", "gunicorn", "26.2.0")) == NOW - timedelta(days=7),
     )
     suite.check(
         "a digest the tag has moved on from can't be dated",
@@ -271,6 +283,69 @@ def check_ages(suite: Suite) -> None:
             "only the pins a change brings are aged: a week old passes, two days old is refused",
             (accepted, refused) == (0, 1) and unchanged == 1,
             f"accepted={accepted} refused={refused}; asked {registries.asked}",
+        )
+
+    # The same versions, with other files: a uv.lock that takes a new wheel of
+    # an old version, a requirements file whose hashes change, and a
+    # change that moves nothing (a comment, the order of the lines).
+    with tempfile.TemporaryDirectory(prefix="hc-pins-") as temporary:
+        root = Path(temporary)
+        (root / "cli").mkdir(parents=True)
+        (root / "images/admin").mkdir(parents=True)
+
+        uv_lock = (
+            'version = 1\n\n[[package]]\nname = "{name}"\nversion = "{version}"\n'
+            'source = {{ registry = "{registry}" }}\n'
+            'sdist = {{ url = "https://files.example/{name}.tar.gz", hash = "sha256:sdist" }}\n'
+            "wheels = [\n{wheels}]\n"
+        )
+        wheel = '    {{ url = "https://files.example/{name}-{tag}.whl", hash = "sha256:{tag}" }},\n'
+
+        def lock(name: str, version: str, *tags: str) -> str:
+            wheels = "".join(wheel.format(name=name, tag=tag) for tag in tags)
+            return uv_lock.format(name=name, version=version, registry=pins.PYPI, wheels=wheels)
+
+        (root / "images/admin/uv.lock").write_text(lock("flask", "3.1.3", "old"), encoding="utf-8")
+        requirement = "gunicorn==26.2.0 \\\n    --hash=sha256:{first} \\\n    --hash=sha256:{second}\n"
+        (root / "cli/requirements.txt").write_text(requirement.format(first="a", second="b"), encoding="utf-8")
+        git(root, "init", "-q", "-b", "main")
+        git(root, "add", ".")
+        git(root, "commit", "-q", "-m", "base")
+
+        quiet = lambda seconds: None  # noqa: E731 - the fake registries don't ask for a pace
+
+        # A comment and the hashes' order: nothing a pin's files are changes.
+        (root / "cli/requirements.txt").write_text(
+            "# pinned\n" + requirement.format(first="b", second="a"),
+            encoding="utf-8",
+        )
+        asked = len(registries.asked)
+        moved_nothing = pins.ages("main", root, registries, NOW, quiet)
+        suite.check(
+            "a change that leaves every pin's files as they were dates nothing",
+            moved_nothing == 0 and len(registries.asked) == asked,
+            str(registries.asked[asked:]),
+        )
+
+        # The same version of flask, now with yesterday's wheel: refused.
+        (root / "images/admin/uv.lock").write_text(lock("flask", "3.1.3", "old", "new"), encoding="utf-8")
+        new_wheel = pins.ages("main", root, registries, NOW, quiet)
+
+        # The same version of gunicorn with another hash, all its files a
+        # week old: aged, and accepted.
+        (root / "images/admin/uv.lock").write_text(lock("flask", "3.1.3", "old"), encoding="utf-8")
+        (root / "cli/requirements.txt").write_text(requirement.format(first="a", second="c"), encoding="utf-8")
+        asked = len(registries.asked)
+        new_hash = pins.ages("main", root, registries, NOW, quiet)
+        suite.check(
+            "the same version with other files is aged as a new one: a wheel uploaded yesterday is refused",
+            new_wheel == 1,
+            f"new_wheel={new_wheel}",
+        )
+        suite.check(
+            "...and a hash changed for a version a week old passes",
+            new_hash == 0 and registries.asked[asked:] == ["https://pypi.org/pypi/gunicorn/26.2.0/json"],
+            f"new_hash={new_hash}; asked {registries.asked[asked:]}",
         )
 
     # CI's own check, on the runs that bring pins: pull requests, and the
