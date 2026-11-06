@@ -251,5 +251,30 @@ class StartTests(HomeTestCase):
         self.assertEqual(reloader.fingerprint(profiles.Profile("gone", Path(self.root) / "nowhere")), "")
 
 
+class SpawnTests(unittest.TestCase):
+    """
+    How a reloader is started: on its own, and, from the app's single-file
+    command, as a program of its own. Nothing is started: Popen is faked.
+    """
+
+    def test_a_single_file_build_starts_a_copy_that_unpacks_itself(self):
+        # The app's command runs from a folder it unpacks itself into and
+        # deletes as it ends: a reloader started with the environment it
+        # inherits would run from that folder, and die with it.
+        with mock.patch.object(subprocess, "Popen") as popen, mock.patch.object(sys, "frozen", True, create=True):
+            reloader._spawn(["hardcode", "_reloader"])
+
+        options = popen.call_args.kwargs
+        self.assertEqual(options["env"]["PYINSTALLER_RESET_ENVIRONMENT"], "1")
+        self.assertEqual(options["env"]["PATH"], os.environ["PATH"], "and the rest of its environment as it is")
+        self.assertEqual((options["stdin"], options["stdout"]), (subprocess.DEVNULL, subprocess.DEVNULL))
+
+    def test_run_from_source_it_inherits_the_environment_as_it_is(self):
+        with mock.patch.object(subprocess, "Popen") as popen:
+            reloader._spawn(["python3", "-c", "pass"])
+
+        self.assertNotIn("env", popen.call_args.kwargs)
+
+
 if __name__ == "__main__":
     unittest.main()

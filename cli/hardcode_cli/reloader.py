@@ -100,6 +100,14 @@ def _spawn(command: list[str]) -> None:
     else:
         options["start_new_session"] = True
 
+    # The app's command is a single-file build (PyInstaller's --onefile): it
+    # runs from a folder it unpacks itself into, and deletes as it ends. A
+    # copy started from inside it would, by the environment it inherits, run
+    # from that same folder, and die with it a moment later, before it had
+    # reloaded anything. Told to start afresh, the copy unpacks its own.
+    if getattr(sys, "frozen", False):
+        options["env"] = {**os.environ, "PYINSTALLER_RESET_ENVIRONMENT": "1"}
+
     subprocess.Popen(
         command,
         stdin=subprocess.DEVNULL,

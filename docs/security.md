@@ -244,8 +244,15 @@ languages while the chart's `profileDefaults.languages` is empty.
   runs once it has printed more than 64 MiB (the extension status the VS
   Code container writes: 64 KiB, and taken only when it has the fields and
   sizes the extension sync writes), and the app stops the command at
-  128 MiB and cuts a streamed line at 64 KiB. On Kubernetes the kubelet
-  rotates logs, and the admin reads at most 16 MiB of one.
+  128 MiB and cuts a streamed line at 64 KiB. A command `hardcode` reads
+  runs in a session of its own (on Windows, a job), so that what it starts
+  is stopped with it, whether it ends, runs out of time or prints too
+  much. That is best effort: a process that leaves the session, or on
+  Windows one started in the moment before the job holds the command, is
+  left running. Either way `hardcode` stops reading from it after a few
+  seconds and lets go of its pipes, so nothing a command leaves behind can
+  keep `hardcode` waiting. On Kubernetes the kubelet rotates logs, and the
+  admin reads at most 16 MiB of one.
 
 ### The admin UI
 

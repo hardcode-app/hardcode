@@ -8,7 +8,9 @@ installers signed for real, with a throwaway key), the release's and the
 development build's descriptions, the checksums, the known vulnerabilities'
 section, whether a nightly run builds and when a development build is
 published, and what builds a release: the pinned BuildKit, the actions and
-secrets each job gets, and the macOS and Windows builds' toolchains.
+secrets each job gets, and the macOS and Windows builds' toolchains. And the
+command as a release ships it, one file frozen with PyInstaller: a reloader
+it starts in the background outlives it.
 """
 
 from __future__ import annotations
@@ -28,7 +30,7 @@ from pathlib import Path
 import yaml
 
 import harness
-from harness import ROOT, Suite
+from harness import FIXTURES, ROOT, Suite
 
 REPOSITORY = "Example-Owner/hardcode"
 
@@ -929,6 +931,49 @@ def check_build_supply(suite: Suite) -> None:
     )
 
 
+def check_frozen_reloader(suite: Suite) -> None:
+    """
+    The command a release ships (and the app carries) is one file, frozen
+    with PyInstaller as app/build.sh and the release workflow freeze it: it
+    unpacks itself into a folder it deletes as it ends. An allowlist edit
+    starts the proxy's reloader as a copy of it and ends; the copy must not
+    run from the folder that is about to go. frozen_spawner.py does what the
+    edit does, with the CLI's own _spawn, and its copy what the reloader
+    does: wait, then load what it hadn't.
+    """
+    with harness.scratch_directory("hc-frozen-") as scratch:
+        built = harness.run(
+            [
+                "pyinstaller",
+                "--onefile",
+                "--name",
+                "frozen_spawner",
+                "--paths",
+                ROOT / "cli",
+                "--distpath",
+                scratch / "dist",
+                "--workpath",
+                scratch / "work",
+                "--specpath",
+                scratch,
+                FIXTURES / "frozen_spawner.py",
+            ],
+            timeout=600,
+        )
+        suite.require("PyInstaller freezes it as a release freezes the command", built.ok, built.tail(20))
+
+        marker = scratch / "the-copy-lived"
+        started = harness.run([scratch / "dist" / "frozen_spawner", "start", marker], timeout=60)
+        suite.check("the frozen command starts its copy and ends", started.ok, started.text)
+
+        lived = harness.wait_until(marker.exists, timeout=30, interval=0.5)
+        suite.check(
+            "the copy outlives it and does its work, from a folder of its own",
+            lived,
+            "the copy never wrote its marker: it ran from the folder the frozen command deleted as it ended",
+        )
+
+
 def run_checks(suite: Suite) -> None:
     suite.section("the version")
     check_versions(suite)
@@ -956,6 +1001,9 @@ def run_checks(suite: Suite) -> None:
 
     suite.section("what builds a release")
     check_build_supply(suite)
+
+    suite.section("the frozen command's background reloader")
+    check_frozen_reloader(suite)
 
 
 if __name__ == "__main__":
