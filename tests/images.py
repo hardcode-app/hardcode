@@ -74,7 +74,29 @@ MARKETPLACE = {
     # package pulls it in though the Marketplace doesn't list it.
     "good.parent": {"extensionDependencies": ["bad.one"]},
     "sly.parent": {"extensionDependencies": ["bad.one"], "listed": {"extensionDependencies": []}},
+    # Packages that pull in more than the Marketplace lists, and fail to
+    # install part of the way: VS Code has put the first of what they need
+    # in place by then. One of those is unverified; the other is verified,
+    # beside one that was there already.
+    "half.parent": {
+        "extensionDependencies": ["bad.one", "nonexistent.extension"],
+        "listed": {"extensionDependencies": []},
+    },
+    "half.good": {
+        "extensionDependencies": ["core.one", "lone.dep", "nonexistent.extension"],
+        "listed": {"extensionDependencies": []},
+    },
+    "lone.dep": {},
 }
+
+# A chain of ten verified extensions, each needing the next, the last of
+# them needing an unverified one: deeper than the checks once went before
+# they stopped. And a chain of eighteen, deeper than they go at all.
+MARKETPLACE.update({f"chain.{level}": {"extensionDependencies": [f"chain.{level + 1}"]} for level in range(1, 10)})
+MARKETPLACE["chain.10"] = {"extensionDependencies": ["bad.one"]}
+MARKETPLACE.update({f"deep.{level}": {"extensionDependencies": [f"deep.{level + 1}"]} for level in range(1, 18)})
+MARKETPLACE["deep.18"] = {}
+
 UNVERIFIED = "bad.one,lldb.reviewed"
 
 
@@ -641,6 +663,58 @@ def check_extension_dependencies(suite: Suite, world: ExtensionWorld) -> None:
     )
 
 
+def check_extension_closure(suite: Suite, world: ExtensionWorld) -> None:
+    """
+    Nothing is installed until everything it pulls in has been checked, all
+    the way down, and whatever an install leaves behind is accounted for,
+    whether it finished or not.
+    """
+    world.want("chain.1")
+    chained = world.sync()
+    suite.check(
+        "an unverified extension ten levels down is refused before anything is installed",
+        chained.ok
+        and not [call for call in world.calls() if call.startswith("install ")]
+        and world.status().get("refused") == ["chain.1"],
+        f"{chained.text}\n{world.calls()}\n{world.status()}",
+    )
+
+    world.want("deep.1")
+    deep = world.sync()
+    suite.check(
+        "a chain deeper than the checks go is refused, not checked part of the way",
+        not [call for call in world.calls() if call.startswith("install ")]
+        and world.status().get("failed") == ["deep.1"]
+        and not any(extension.startswith("deep.") for extension in world.installed()),
+        f"{deep.text}\n{world.calls()}\n{world.status()}",
+    )
+
+    world.want("half.parent")
+    half = world.sync()
+    suite.check(
+        "an install that fails part of the way doesn't leave an unverified extension behind",
+        "install bad.one" in world.calls()
+        and "uninstall bad.one" in world.calls()
+        and not {"bad.one", "half.parent"} & world.installed()
+        and world.status().get("refused") == ["half.parent"],
+        f"{half.text}\n{world.calls()}\n{sorted(world.installed())}\n{world.status()}",
+    )
+
+    world.want("core.one")
+    world.sync()
+    world.want("core.one", "half.good")
+    partly = world.sync()
+    suite.check(
+        "...nor a verified one, which is tried again whole, and what was there before stays",
+        "install lone.dep" in world.calls()
+        and "lone.dep" not in world.installed()
+        and "core.one" in world.installed()
+        and "uninstall core.one" not in world.calls()
+        and world.status().get("failed") == ["half.good"],
+        f"{partly.text}\n{world.calls()}\n{sorted(world.installed())}\n{world.status()}",
+    )
+
+
 def check_extension_watch(suite: Suite, world: ExtensionWorld) -> None:
     """
     Watching, the sync follows a change to the list within seconds, with
@@ -801,6 +875,7 @@ def run_checks(suite: Suite) -> None:
         check_extension_sync(suite, world)
         check_extension_watch(suite, ExtensionWorld(scratch / "watch"))
         check_extension_dependencies(suite, ExtensionWorld(scratch / "dependencies"))
+        check_extension_closure(suite, ExtensionWorld(scratch / "closure"))
 
         suite.section("the build image's runner")
         check_build_runner_cpus(suite, scratch)

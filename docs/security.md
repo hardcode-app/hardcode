@@ -200,8 +200,11 @@ languages while the chart's `profileDefaults.languages` is empty.
   *New token…*), which makes every copy of the old one useless.
 - **Only verified VS Code extension publishers.** Each extension is
   checked before the running container installs it, with everything the
-  Marketplace says it pulls in (dependencies, pack members), and checked
-  again as it arrives; the whole set is removed if any of it fails. There
+  Marketplace says it pulls in (dependencies, pack members) all the way
+  down: a chain deeper than 16 levels is refused rather than checked part
+  of the way. It is checked again as it arrives, and the whole set is
+  removed if any of it fails; an install that fails part of the way leaves
+  nothing behind either, and what was installed before it stays. There
   are explicit, reviewed exceptions. The rule keeps a mistaken or
   look-alike choice off a profile's list; it doesn't stop code inside the
   sandbox from installing extensions itself.

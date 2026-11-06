@@ -9,7 +9,8 @@
 #
 # With --with-dependencies, the extensions' dependencies and pack members, as
 # the Marketplace lists them for their latest release, are checked too, and
-# theirs in turn, until nothing new comes up.
+# theirs in turn, until nothing new comes up; a chain deeper than 16 levels
+# is refused, not checked part of the way.
 #
 # Exits 0 when every one is verified, or is a reviewed exception: a line of
 # the profile's extension list ($HARDCODE_EXTENSIONS_WANTED) marked
@@ -71,12 +72,24 @@ pulled_in='[.results[0].extensions[].versions[]?.properties[]?
 
 result="$(ask "${checked[@]}")"
 
-# Until nothing new comes up, asked again with what the answer pulls in.
+# Until nothing new comes up, asked again with what the answer pulls in, at
+# most max_depth times. Extensions that pull in more, more levels deep than
+# that, are refused rather than checked part of the way: whatever the
+# checks didn't reach would be installed unchecked, and VS Code, which is
+# running, would load it.
+max_depth=16
 if [ "$with_dependencies" = true ]; then
-  for _ in 1 2 3 4 5 6 7 8; do
+  depth=0
+  while true; do
     mapfile -t new < <(comm -23 <(jq -r "$pulled_in" <<<"$result" | sort -u) <(printf '%s\n' "${checked[@]}" | sort -u))
     if [ "${#new[@]}" -eq 0 ]; then
       break
+    fi
+
+    depth=$((depth + 1))
+    if [ "$depth" -gt "$max_depth" ]; then
+      echo "These extensions pull in others more than $max_depth levels deep, which weren't all checked: none are installed" >&2
+      exit 1
     fi
 
     checked+=("${new[@]}")

@@ -131,9 +131,10 @@ write_status() {
 # Marketplace says it pulls in (dependencies, a pack's members): one from a
 # publisher without a verified domain never gets there. What arrives is
 # checked again, the extension included, in case the package pulls in more
-# than the Marketplace listed; then the whole set goes if any of it fails.
+# than the Marketplace listed; then the whole set goes if any of it fails,
+# and so does whatever an install that failed part of the way left behind.
 install_one() {
-  local id="$1" before report extension
+  local id="$1" before report extension installed
   local arrived
 
   if ! report="$(hardcode-verify-extensions --with-dependencies "$id" 2>&1)"; then
@@ -146,18 +147,27 @@ install_one() {
   fi
 
   before="$(list_installed)"
-  if ! "${code_cli[@]}" --install-extension "$id" >/dev/null 2>&1; then
-    echo failed
-    return 0
-  fi
+  installed=true
+  "${code_cli[@]}" --install-extension "$id" >/dev/null 2>&1 || installed=false
 
+  # What arrived, whether the install finished or not: VS Code puts an
+  # extension's dependencies in place first, and can fail after some of
+  # them. What was there before isn't counted, so it is never removed.
   mapfile -t arrived < <(comm -13 <(printf '%s\n' "$before") <(list_installed))
-  if [ "${#arrived[@]}" -eq 0 ] || report="$(hardcode-verify-extensions "${arrived[@]}" 2>&1)"; then
+
+  report=""
+  if [ "${#arrived[@]}" -gt 0 ]; then
+    if report="$(hardcode-verify-extensions "${arrived[@]}" 2>&1)" && [ "$installed" = true ]; then
+      echo ok
+      return 0
+    fi
+  elif [ "$installed" = true ]; then
     echo ok
     return 0
   fi
 
-  # Not verified, or not checkable now: either way it doesn't stay.
+  # Not verified, not checkable now, or left behind by an install that
+  # failed (and is tried again whole): either way none of it stays.
   for extension in "${arrived[@]}"; do
     "${code_cli[@]}" --uninstall-extension "$extension" >/dev/null 2>&1 || true
   done
