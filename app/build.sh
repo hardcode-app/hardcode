@@ -109,7 +109,8 @@ bundle() {
   # The AppImage's tools: the Tauri CLI downloads them unchecked unless its
   # tools folder (XDG_CACHE_HOME/tauri) has them. A fresh folder each time,
   # with the build image's pinned copies (images/build/Dockerfile), copied
-  # since the CLI patches linuxdeploy in place.
+  # since the CLI patches linuxdeploy in place; the AppImage runtime, taken
+  # out of the pinned plugin, is with them.
   # TOOLS_CACHE is global, for the trap, which runs after this returns.
   local tools
   TOOLS_CACHE="$(mktemp -d)"
@@ -118,8 +119,18 @@ bundle() {
   mkdir "$tools"
   cp /opt/tauri-tools/* "$tools/"
 
+  # The runtime the AppImage starts with, which the AppImage plugin's
+  # appimagetool would otherwise download, unchecked, from a moving release:
+  # the build image's, taken out of the pinned plugin itself.
+  local runtime
+  runtime="$tools/runtime-$(uname -m)"
+  if [ ! -f "$runtime" ]; then
+    echo "no AppImage runtime at $runtime: the build image takes it out of the pinned plugin" >&2
+    return 1
+  fi
+
   # Arguments after -- go to cargo build.
-  (cd "$ROOT/app" && XDG_CACHE_HOME="$TOOLS_CACHE" cargo tauri build "${configs[@]}" -- --locked)
+  (cd "$ROOT/app" && XDG_CACHE_HOME="$TOOLS_CACHE" LDAI_RUNTIME_FILE="$runtime" cargo tauri build "${configs[@]}" -- --locked)
 
   # Afterwards, nothing but those and the two plugin scripts the CLI carries:
   # anything else is a tool it fetched itself (a newer CLI naming a new

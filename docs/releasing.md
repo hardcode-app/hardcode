@@ -71,7 +71,12 @@ runs every crate's build script, so no key is given to it.
 The AppImage's tools (AppRun, linuxdeploy and its AppImage plugin), which
 the Tauri CLI would download unchecked, come from the build image, pinned
 by checksum; `app/build.sh bundle` hands them to the CLI and fails if it
-fetched anything else. A tagged release is published with `gh` on the
+fetched anything else. So does the runtime the AppImage starts with, which
+the plugin's appimagetool would otherwise download from type2-runtime's
+moving `continuous` release: the build image takes it out of the pinned
+plugin (`images/build/appimage-runtime.sh`), clearing what the plugin's
+own build wrote into it (its update information, digest and signature),
+and `app/build.sh` hands it over (`LDAI_RUNTIME_FILE`). A tagged release is published with `gh` on the
 runner, at the tag that was pushed (`--verify-tag`): no third-party action
 runs in a job that can write.
 

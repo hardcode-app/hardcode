@@ -106,6 +106,13 @@ RUN set -eu; \
 # anything itself. GitHub's digests where it publishes them; the plugin's
 # release predates those, so its are the files' own, taken when it was
 # pinned. They move with the Tauri CLI, by hand: pins.py ages dates them.
+#
+# And the runtime the app's AppImage starts with, which the plugin's
+# appimagetool would otherwise download as it packages the app, unchecked,
+# from type2-runtime's moving "continuous" release: the one at the front of
+# the pinned plugin, taken out once its checksum has been checked, with
+# what the plugin's own build wrote into it cleared (appimage-runtime.sh).
+# app/build.sh hands it to the plugin (LDAI_RUNTIME_FILE).
 ARG APPRUN_TAG=apprun-old
 ARG APPRUN_SHA256_AMD64=f30140a43a0a59e46db21bdefdf749b9e9f2c6946e92afabbacf98b8ae73fb4f
 ARG APPRUN_SHA256_ARM64=072f17c0895a85c490282fe5395c5007e5fc75da727e553b3b8fb680feb11578
@@ -115,6 +122,7 @@ ARG LINUXDEPLOY_SHA256_ARM64=556ab80baa98e600aa80f0dcedfb70bca0e1ce7e9f147fb345b
 ARG LINUXDEPLOY_PLUGIN_APPIMAGE_TAG=1-alpha-20250213-1
 ARG LINUXDEPLOY_PLUGIN_APPIMAGE_SHA256_AMD64=992d502a248e14ab185448ddf6f6e7d25558cb84d4623c354c3af350c25fccb3
 ARG LINUXDEPLOY_PLUGIN_APPIMAGE_SHA256_ARM64=83c292149274965a865dcd44c135cfca8ba28c6b7de3eb628d4b8b5f248af17c
+COPY appimage-runtime.sh /tmp/appimage-runtime.sh
 RUN set -eu; \
     case "$(dpkg --print-architecture)" in \
       amd64) arch=x86_64 apprun_sha="$APPRUN_SHA256_AMD64" linuxdeploy_sha="$LINUXDEPLOY_SHA256_AMD64" plugin_sha="$LINUXDEPLOY_PLUGIN_APPIMAGE_SHA256_AMD64" ;; \
@@ -133,7 +141,9 @@ RUN set -eu; \
       "$linuxdeploy_sha" "${LINUXDEPLOY_TAG}-${arch}.AppImage" \
       "$plugin_sha" linuxdeploy-plugin-appimage.AppImage \
       | sha256sum -c -; \
-    chmod 0755 ./*
+    chmod 0755 ./*; \
+    bash /tmp/appimage-runtime.sh ./linuxdeploy-plugin-appimage.AppImage "runtime-${arch}"; \
+    rm /tmp/appimage-runtime.sh
 
 # uv, from PyPI as uv/requirements.txt pins it, every file checked against its
 # hash: the archive's pip installs it into a venv of its own, /opt/uv; the

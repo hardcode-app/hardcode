@@ -4,7 +4,9 @@ The desktop app (Tauri): its Rust unit tests, a build, a headless launch
 (``--smoke``) that renders every view against the real CLI and a throwaway
 checkout, under a virtual X server, the launcher ``app/build.sh desktop``
 writes for the app grid, and a build configured as a release's, which asks
-for a newer release and offers it.
+for a newer release and offers it. And the runtime the app's AppImage starts
+with: the build image's, taken out of the pinned AppImage plugin, never
+downloaded.
 """
 
 from __future__ import annotations
@@ -13,8 +15,10 @@ import contextlib
 import http.server
 import json
 import os
+import platform
 import re
 import secrets
+import shutil
 import sys
 import tempfile
 import threading
@@ -22,7 +26,7 @@ from pathlib import Path
 from typing import Iterator
 
 import harness
-from harness import ROOT, Suite
+from harness import FIXTURES, ROOT, Suite
 
 APP = ROOT / "app" / "src-tauri"
 BINARY = APP / "target" / "debug" / "hardcode-app"
@@ -249,6 +253,71 @@ def check_updater(suite: Suite) -> None:
     suite.check("the debug build is built again without it", rebuilt.ok, rebuilt.tail(40))
 
 
+def check_appimage_runtime(suite: Suite) -> None:
+    """
+    The runtime the app's AppImage starts with is the build image's, taken
+    out of the pinned AppImage plugin (images/build/appimage-runtime.sh):
+    the plugin's appimagetool builds an AppImage on it with no way to
+    download anything, the AppImage runs, and it carries none of what the
+    plugin's own build wrote into the runtime (its update information).
+    """
+    script = (ROOT / "app" / "build.sh").read_text(encoding="utf-8")
+    suite.check(
+        "app/build.sh hands the AppImage plugin the build image's runtime",
+        'runtime="$tools/runtime-$(uname -m)"' in script and 'LDAI_RUNTIME_FILE="$runtime"' in script,
+    )
+
+    tools = Path("/opt/tauri-tools")
+    runtime = tools / f"runtime-{platform.machine()}"
+    plugin = tools / "linuxdeploy-plugin-appimage.AppImage"
+    suite.require("the build image has the runtime, beside the pinned plugin", runtime.is_file(), str(runtime))
+
+    # Nowhere to download from: a proxy on a port nothing listens on.
+    nowhere = "http://127.0.0.1:9"
+    offline = {**os.environ, **{name: nowhere for name in ("http_proxy", "https_proxy", "HTTP_PROXY", "HTTPS_PROXY")}}
+
+    with harness.scratch_directory("hc-appimage-") as scratch:
+        extracted = harness.run([plugin, "--appimage-extract"], cwd=scratch)
+        appimagetool = scratch / "squashfs-root" / "usr" / "bin" / "appimagetool"
+        suite.require("the pinned plugin's appimagetool", extracted.ok and appimagetool.exists(), extracted.tail(10))
+
+        # The smallest AppImage there is: a program, a desktop entry, an icon.
+        appdir = scratch / "Probe.AppDir"
+        appdir.mkdir()
+        shutil.copyfile(FIXTURES / "appimage_probe.sh", appdir / "AppRun")
+        (appdir / "AppRun").chmod(0o755)
+        desktop = "[Desktop Entry]\nType=Application\nName=Probe\nExec=probe\nIcon=probe\nCategories=Utility;\n"
+        (appdir / "probe.desktop").write_text(desktop, encoding="utf-8")
+        shutil.copyfile(ROOT / "assets" / "hardcode-128.png", appdir / "probe.png")
+
+        # Its AppRun is a script, which says nothing of the architecture:
+        # appimagetool is told, as the plugin tells it for the app.
+        probe = scratch / "probe.AppImage"
+        built = harness.run(
+            [appimagetool, "--runtime-file", runtime, appdir, probe],
+            cwd=scratch,
+            env={**offline, "ARCH": platform.machine()},
+        )
+        suite.check(
+            "appimagetool builds an AppImage on it, with nowhere to download anything from",
+            built.ok and probe.exists() and "Downloading runtime" not in built.text,
+            built.tail(20),
+        )
+
+        version = harness.run([probe, "--appimage-version"]).text.strip()
+        suite.check(
+            "...which starts with the pinned plugin's own runtime",
+            version != "" and version == harness.run([plugin, "--appimage-version"]).text.strip(),
+            version,
+        )
+
+        updates = harness.run([probe, "--appimage-updateinformation"]).text.strip()
+        suite.check("...says nothing of the plugin's updates", updates == "", updates)
+
+        ran = harness.run([probe], env={**offline, "APPIMAGE_EXTRACT_AND_RUN": "1"}, cwd=scratch)
+        suite.check("...and runs", ran.ok and "the probe ran" in ran.text, ran.tail(10))
+
+
 def run_checks(suite: Suite) -> None:
     suite.section("rust unit tests")
     check_unit_tests(suite)
@@ -264,6 +333,9 @@ def run_checks(suite: Suite) -> None:
 
     suite.section("updater")
     check_updater(suite)
+
+    suite.section("the AppImage's runtime")
+    check_appimage_runtime(suite)
 
 
 if __name__ == "__main__":
