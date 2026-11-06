@@ -1,6 +1,11 @@
 """
 Who may use the admin: accounts (email, scrypt password and TOTP) kept in a
 Kubernetes Secret, in-memory sessions, and a throttle for failed sign-ins.
+
+An account is an admin's, who can do everything, or a member's, who sees
+and manages only the profiles they own, with the rights an admin gives
+them (``RIGHTS``): how many profiles they may create, and what they may do
+with their profiles' allowlists.
 """
 
 from __future__ import annotations
@@ -20,6 +25,25 @@ from . import totp
 
 EMAIL = re.compile(r"^[^\s@]+@[^\s@]+\.[^\s@]+$")
 MIN_PASSWORD = 12
+
+# An account's role: an admin can do everything; a member works on the
+# profiles they own, with the rights below.
+ADMIN = "admin"
+MEMBER = "member"
+ROLES = (ADMIN, MEMBER)
+
+# What a member may do with their profiles' allowlists: nothing (an admin
+# edits them), ask for entries (an admin approves each), or edit them.
+ALLOWLIST_RIGHTS = ("none", "ask", "edit")
+
+# A member's rights, as a new member gets them: one profile of their own,
+# and an allowlist only an admin edits. Under "ask" and "edit", rw, ssh and
+# lan say whether they may also have read-write entries, ssh tunnels and
+# names on the network.
+RIGHTS = {"profiles": 1, "allowlist": "none", "rw": False, "ssh": False, "lan": False}
+
+# The most profiles an admin may let one member have.
+MAX_PROFILES = 100
 
 # scrypt at 2^15 iterations: about 100 ms and 32 MB per check on a server.
 # maxmem has to allow for that, as the default is lower.
@@ -52,6 +76,60 @@ def canonical(email: object) -> str:
     return str(email or "").strip().lower()
 
 
+def is_admin(user: dict) -> bool:
+    """
+    Whether *user* is an admin's account. Any other is a member's.
+    """
+    return user.get("role") == ADMIN
+
+
+def rights_of(user: dict) -> dict:
+    """
+    What *user* may do as a member: their rights, with ``RIGHTS`` for any
+    that weren't given.
+    """
+    return {**RIGHTS, **(user.get("rights") or {})}
+
+
+def check_role(role: object) -> str:
+    """
+    A role from a request: ``admin`` or ``member``.
+    """
+    if role not in ROLES:
+        raise AuthError("role must be admin or member")
+
+    return str(role)
+
+
+def check_rights(rights: object) -> dict:
+    """
+    A member's rights from a request, checked: the fields of ``RIGHTS``
+    that *rights* has, and ``RIGHTS``' values for the others.
+    """
+    if not isinstance(rights, dict):
+        raise AuthError("rights: an object with profiles, allowlist, rw, ssh and lan")
+
+    unknown = sorted(set(rights) - set(RIGHTS))
+    if unknown:
+        raise AuthError(f"rights: no such right {', '.join(unknown)}")
+
+    checked = {**RIGHTS, **rights}
+
+    # A JSON true is a bool, which Python counts as an int: it isn't a number.
+    profiles = checked["profiles"]
+    if isinstance(profiles, bool) or not isinstance(profiles, int) or not 0 <= profiles <= MAX_PROFILES:
+        raise AuthError(f"rights: profiles is a number from 0 to {MAX_PROFILES}")
+
+    if checked["allowlist"] not in ALLOWLIST_RIGHTS:
+        raise AuthError("rights: allowlist is none, ask or edit")
+
+    for flag in ("rw", "ssh", "lan"):
+        if not isinstance(checked[flag], bool):
+            raise AuthError(f"rights: {flag} is true or false")
+
+    return checked
+
+
 def hash_password(password: str, salt: Optional[bytes] = None) -> dict:
     """
     A salted scrypt hash of *password*, as the account stores it; no more
@@ -77,19 +155,48 @@ def check_password(password: str, user: Optional[dict]) -> bool:
     return hmac.compare_digest(base64.b64decode(computed), base64.b64decode(user["hash"]))
 
 
+def modify_versioned(
+    store,
+    lock: threading.Lock,
+    mutate: Callable[[list[dict]], object],
+    retries: int = 4,
+) -> object:
+    """
+    Load a list from a versioned *store*, let *mutate* edit it, and save it
+    under the version that was loaded; returns what *mutate* returned.
+
+    The store has ``load() -> (items, version)`` and ``save(items, version)``,
+    and ``save`` raises ``StoreConflict`` when the store moved since that
+    ``load``. The version travels with the snapshot it belongs to, never
+    through shared state. Writes from this process are serialised by *lock*;
+    one that finds the store changed by a writer elsewhere starts over from
+    a fresh load, so two admins working at once don't lose each other's edits.
+    """
+    with lock:
+        for attempt in range(retries):
+            items, version = store.load()
+            result = mutate(items)
+
+            try:
+                store.save(items, version)
+            except StoreConflict:
+                if attempt == retries - 1:
+                    raise
+                continue
+
+            return result
+
+    return None  # pragma: no cover - the loop returns or raises
+
+
 class Users:
     """
-    The admin accounts, behind a versioned store.
-
-    The store has ``load() -> (accounts, version)`` and
-    ``save(accounts, version)``, and ``save`` raises ``StoreConflict`` when
-    the store moved since that ``load``. The version travels with the
-    snapshot it belongs to, never through shared state. Writes from this
-    process are serialised, and the compare-and-set still catches writers
-    elsewhere.
+    The accounts, admins' and members', behind a versioned store
+    (``modify_versioned``).
 
     Every account carries a ``sessionVersion``. A password change or a TOTP
     reset bumps it, and sessions created under an older version stop working.
+    There is always an admin: the last one can't be removed or made a member.
     """
 
     RETRIES = 4
@@ -105,29 +212,18 @@ class Users:
         wanted = canonical(email)
         return next((user for user in self.list() if user["email"] == wanted), None)
 
+    def admins(self) -> list[dict]:
+        """
+        The admins' accounts.
+        """
+        return [user for user in self.list() if is_admin(user)]
+
     def _modify(self, mutate: Callable[[list[dict]], object]) -> object:
         """
         Load the accounts, let *mutate* edit them, and save them under the
-        version that was loaded; returns what *mutate* returned.
-
-        If the store changed in between, everything starts over from a fresh
-        load, so two admins working at once don't lose each other's edits.
+        version that was loaded (``modify_versioned``).
         """
-        with self._lock:
-            for attempt in range(self.RETRIES):
-                users, version = self.store.load()
-                result = mutate(users)
-
-                try:
-                    self.store.save(users, version)
-                except StoreConflict:
-                    if attempt == self.RETRIES - 1:
-                        raise
-                    continue
-
-                return result
-
-        return None  # pragma: no cover - the loop returns or raises
+        return modify_versioned(self.store, self._lock, mutate, self.RETRIES)
 
     @staticmethod
     def _one(users: list[dict], email: str) -> dict:
@@ -140,9 +236,17 @@ class Users:
 
         return user
 
-    def add(self, email: str, password: str, must_enrol: bool = True) -> dict:
+    def add(
+        self,
+        email: str,
+        password: str,
+        role: str,
+        rights: Optional[dict] = None,
+        must_enrol: bool = True,
+    ) -> dict:
         """
-        Create an account. Unless *must_enrol* is false, its owner sets up
+        Create an account with *role*, and for a member *rights* (``RIGHTS``
+        for any not given). Unless *must_enrol* is false, its owner sets up
         TOTP at the first sign-in.
         """
         address = canonical(email)
@@ -151,12 +255,17 @@ class Users:
         if len(str(password or "")) < MIN_PASSWORD:
             raise AuthError(f"password must be at least {MIN_PASSWORD} characters")
 
+        role = check_role(role)
+        rights = check_rights(rights or {})
+
         def mutate(users: list[dict]) -> dict:
             if any(user["email"] == address for user in users):
                 raise AuthError("that user already exists")
 
             user = {
                 "email": address,
+                "role": role,
+                "rights": rights,
                 **hash_password(password),
                 "totpSecret": totp.generate_secret(),
                 "totpEnrolled": not must_enrol,
@@ -169,21 +278,54 @@ class Users:
 
         return self._modify(mutate)  # type: ignore[return-value]
 
+    @staticmethod
+    def _keep_an_admin(users: list[dict], address: str, doing: str) -> None:
+        """
+        Refuse *doing* to the account *address* when it is the last admin's:
+        with no admin left, nobody could manage the accounts.
+        """
+        others = [user for user in users if is_admin(user) and user["email"] != address]
+        if not others:
+            raise AuthError(f"the last admin can't be {doing}")
+
     def remove(self, email: str) -> None:
         """
-        Delete an account. The last one stays, so the admin can't lock
-        everyone out.
+        Delete an account. The last admin's stays, so nobody locks everyone out.
         """
         address = canonical(email)
 
         def mutate(users: list[dict]) -> None:
-            if len(users) <= 1:
-                raise AuthError("the last admin can't be removed")
+            if is_admin(self._one(users, address)):
+                self._keep_an_admin(users, address, "removed")
 
-            self._one(users, address)
             users[:] = [user for user in users if user["email"] != address]
 
         self._modify(mutate)
+
+    def set_role(self, email: str, role: Optional[str] = None, rights: Optional[dict] = None) -> dict:
+        """
+        Change an account's role, or a member's rights, or both. They apply
+        at the account's next request: every request reads the account.
+        The last admin can't be made a member.
+        """
+        address = canonical(email)
+        role = check_role(role) if role is not None else None
+        rights = check_rights(rights) if rights is not None else None
+
+        def mutate(users: list[dict]) -> dict:
+            user = self._one(users, address)
+
+            if role == MEMBER and is_admin(user):
+                self._keep_an_admin(users, address, "made a member")
+
+            if role is not None:
+                user["role"] = role
+            if rights is not None:
+                user["rights"] = rights
+
+            return user
+
+        return self._modify(mutate)  # type: ignore[return-value]
 
     def update(self, email: str, **fields) -> dict:
         """

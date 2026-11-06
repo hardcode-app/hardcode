@@ -289,6 +289,26 @@ The cluster's network plugin (CNI) doesn't enforce NetworkPolicy. The
 policies are created, but without enforcement the VS Code pod has normal
 pod networking. Install Calico, Cilium or another CNI that enforces them.
 
+### A member doesn't see a profile
+
+The profile isn't theirs: its **Owner** (on its **Settings** tab) isn't
+their email. An admin sets it there. A member sees only the profiles they
+own.
+
+### A member's **Ask** or **Add** is refused
+
+Their rights don't allow that kind of entry: an admin changes them with
+**Edit…** on the **People** page. Read-write entries, ssh tunnels and names
+on your network each need their own tick.
+
+### Admins get no email about requests
+
+Requests still appear on the **Requests** page. For the emails, the chart
+needs `admin.smtp.host` and `admin.smtp.from`; when a send fails, the
+admin's log says why (`kubectl -n <ns> logs deploy/<release>-admin`, the
+line `couldn't email the admins about request …`). If the email arrives but
+its link goes to the wrong place, set `admin.url` to the admin UI's address.
+
 ### Signed out of the admin UI unexpectedly
 
 Sessions are kept in memory, so an admin restart (a rollout, running out of

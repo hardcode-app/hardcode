@@ -5,9 +5,19 @@ Sign-in is a password and then a TOTP code. Signed in, an admin manages the
 profiles: the languages and tools each is built around (which open the
 allowlist entries HardCode provides for them and bring their VS Code
 extensions), its own extensions and how far its VS Code container has got
-with installing them, its own Ubuntu packages, its allowlist (its own entries and the provided ones
-it switches off, one at a time or across every profile), what its proxy
-refused; and manages the other admins.
+with installing them, its own Ubuntu packages, its allowlist (its own
+entries and the provided ones it switches off, one at a time or across
+every profile), what its proxy refused, and who owns it; manages the
+accounts, admins' and members'; and approves or denies members' requests.
+
+A member sees only the profiles they own (``spec.owner``), and another's is
+404 to them, as if it weren't there. On their own they do the day-to-day
+(suspend and resume, languages, extensions, packages, VS Code's address,
+blocked traffic, delete, and create up to their limit), and what their
+rights say with the allowlist: nothing, ask (each change that would let the
+sandbox reach more waits for an admin), or edit. The image, the Docker
+sidecar, the Ingress host, the volumes and the rest of the settings, the
+bulk allowlist and the accounts are an admin's.
 """
 
 from __future__ import annotations
@@ -18,6 +28,7 @@ import json
 import os
 import re
 import secrets
+import threading
 from concurrent.futures import ThreadPoolExecutor
 from concurrent.futures import wait as wait_for
 from pathlib import Path
@@ -29,8 +40,22 @@ from flask import Flask, g, jsonify, request, send_file
 from hardcode_cli import allowlist, blocked, lan, langs, packages
 
 from . import manifests, totp
-from .auth import AuthError, Sessions, StoreConflict, Throttle, Users, canonical, check_password, hash_password
+from .approvals import APPROVED, DENIED, PENDING, ApprovalError, Approvals, NoSuchRequest
+from .auth import (
+    MEMBER,
+    AuthError,
+    Sessions,
+    StoreConflict,
+    Throttle,
+    Users,
+    canonical,
+    check_password,
+    hash_password,
+    is_admin,
+    rights_of,
+)
 from .k8s import ApiError, K8s
+from .mail import Mailer
 from .operator import profiles_path
 
 WEB = Path(__file__).resolve().parent / "web"
@@ -133,6 +158,31 @@ EDITABLE_FIELDS = (
     "allowlist",
 )
 
+# What a member may change with PATCH /api/profiles/<name> on a profile of
+# theirs; everything else in EDITABLE_FIELDS, and the owner, is an admin's.
+MEMBER_EDITABLE = ("suspended", "languages")
+
+# What a member's copy of one of their profiles takes from it: what a member
+# may change themselves. The rest (the image, the Docker sidecar, volumes,
+# mounts, environment, ...) is the chart's defaults, as for a profile from
+# the template: an admin's settings for one profile stay that profile's.
+MEMBER_COPIED = ("allowlist", "languages", "extensions", "packages")
+
+# What a member may not give a new profile, in the words of the refusal.
+ADMIN_ONLY_ON_CREATE = {"image": "the image", "vscodeHost": "the VS Code host", "owner": "the owner"}
+
+# The Secret holding the members' requests (approvals.py), beside the
+# accounts' (``USERS_SECRET``).
+REQUESTS_SECRET = "hardcode-admin-requests"
+
+# Why a member's allowlist edit is refused, by what it needed.
+NO_ALLOWLIST_RIGHTS = "an admin decides what this profile may reach: ask one to change it"
+NOT_ALLOWED_TO_OPEN = {
+    "rw": "your account can't allow read-write entries: ask an admin",
+    "ssh": "your account can't allow ssh tunnels: ask an admin",
+    "lan": "your account can't let names reach your network: ask an admin",
+}
+
 # A password hash for addresses that have no account: checking against it
 # costs the same as a real check, so the response time doesn't tell which
 # addresses exist.
@@ -169,30 +219,32 @@ def qr_data_url(text: str) -> Optional[str]:
 
 class SecretStore:
     """
-    The admin accounts, as ``users.json`` in one Secret.
+    A list kept as JSON in one Secret: the accounts (``users.json``), or the
+    members' requests (``requests.json``).
 
-    ``load`` returns the accounts with the resourceVersion they came from, and
+    ``load`` returns the list with the resourceVersion it came from, and
     ``save`` names that version, so a write based on an older snapshot is
     refused (``StoreConflict``) rather than overwriting a newer one. Nothing is
     kept between calls: the version belongs to the snapshot, not to the store
     the threads share.
     """
 
-    def __init__(self, k8s: K8s, name: str = "hardcode-admin-users"):
+    def __init__(self, k8s: K8s, name: str = "hardcode-admin-users", key: str = "users.json"):
         self.k8s = k8s
         self.name = name
+        self.key = key
         self.path = f"/api/v1/namespaces/{k8s.namespace}/secrets/{name}"
 
     def load(self) -> tuple[list[dict], Optional[str]]:
         secret = self.k8s.get(self.path) or {}
         version = secret.get("metadata", {}).get("resourceVersion")
-        data = secret.get("data", {}).get("users.json")
+        data = secret.get("data", {}).get(self.key)
 
-        users = json.loads(base64.b64decode(data)) if data else []
-        return users, version
+        items = json.loads(base64.b64decode(data)) if data else []
+        return items, version
 
-    def save(self, users: list[dict], version: Optional[str]) -> None:
-        data = {"users.json": base64.b64encode(json.dumps(users).encode()).decode()}
+    def save(self, items: list[dict], version: Optional[str]) -> None:
+        data = {self.key: base64.b64encode(json.dumps(items).encode()).decode()}
 
         try:
             if version is None:
@@ -307,7 +359,8 @@ def catalogue_entry(lang: langs.Lang) -> dict:
 class AdminApi:
     """
     The routes of the admin, and what they share: the Kubernetes client, the
-    accounts, the sessions and the sign-in throttles.
+    accounts, the members' requests and the emails about them, the
+    sessions and the sign-in throttles.
     """
 
     def __init__(
@@ -320,10 +373,16 @@ class AdminApi:
         sessions: Sessions,
         clock: Optional[Callable[[], float]],
         trusted_proxies: list[str],
+        approvals: Approvals,
+        mailer: Mailer,
+        portal_url: str,
         resolve: lan.Resolver = lan.resolve,
     ):
         self.k8s = k8s
         self.users = users
+        self.approvals = approvals
+        self.mailer = mailer
+        self.portal_url = portal_url.rstrip("/")
         self.defaults = defaults
         self.cookie_secure = cookie_secure
         self.template_allowlist = template_allowlist
@@ -341,6 +400,11 @@ class AdminApi:
         self.code_throttle = Throttle(limit=ACCOUNT_CODE_ATTEMPTS)
 
         self.trusted = [ipaddress.ip_network(network, strict=False) for network in trusted_proxies if network.strip()]
+
+        # A member's new profile is counted and created under this lock, so
+        # that two at once can't both take the last one their limit allows.
+        # The admin runs one worker process: its threads share it.
+        self._creating = threading.Lock()
 
         self.app = Flask("hardcode_admin", static_folder=None)
         self.app.config["JSON_SORT_KEYS"] = False
@@ -384,9 +448,14 @@ class AdminApi:
             ("POST", "/api/profiles/<name>/lan/check", self.check_lan),
             ("POST", "/api/allowlist/bulk", self.bulk_allowlist),
             ("GET", "/api/profiles/<name>/blocked", self.blocked_traffic),
-            # Admins
+            # Members' requests
+            ("GET", "/api/requests", self.list_requests),
+            ("POST", "/api/requests/<request_id>/approve", self.approve_request),
+            ("POST", "/api/requests/<request_id>/deny", self.deny_request),
+            # Accounts
             ("GET", "/api/users", self.list_users),
             ("POST", "/api/users", self.add_user),
+            ("PATCH", "/api/users/<path:email>", self.patch_user),
             ("DELETE", "/api/users/<path:email>", self.remove_user),
             ("POST", "/api/users/<path:email>/reset-totp", self.reset_totp),
             ("POST", "/api/users/<path:email>/password", self.set_password),
@@ -471,6 +540,144 @@ class AdminApi:
 
         return user
 
+    def require_admin(self) -> dict:
+        """
+        The signed-in account, which must be an admin's: 403 for a member's.
+        """
+        user = self.require("full")
+        if not is_admin(user):
+            raise HttpError(403, "only an admin can do that")
+
+        return user
+
+    @staticmethod
+    def owner_of(profile: dict) -> str:
+        """
+        The email of the account a profile belongs to; ``""`` for nobody's.
+        """
+        return canonical((profile.get("spec") or {}).get("owner"))
+
+    def may_use(self, user: dict, profile: dict) -> bool:
+        """
+        Whether *user* may see and work on *profile*: an admin any, a member
+        the ones they own.
+        """
+        return is_admin(user) or self.owner_of(profile) == user["email"]
+
+    def own_profile(self, user: dict, name: str) -> dict:
+        """
+        A profile *user* may work on (``may_use``). Another's is 404 to a
+        member, as if it weren't there.
+        """
+        profile = self.get_profile(name)
+        if not self.may_use(user, profile):
+            raise HttpError(404, f"no profile '{name}'")
+
+        return profile
+
+    def owner_email(self, value: object) -> Optional[str]:
+        """
+        A profile's owner from a request: an account's email, or ``None``
+        when it is empty (nobody's).
+        """
+        address = canonical(value)
+        if not address:
+            return None
+
+        if self.users.find(address) is None:
+            raise HttpError(400, f"owner: there is no account {address}")
+
+        return address
+
+    def owned_profiles(self, email: str, profiles: Optional[list[dict]] = None) -> list[dict]:
+        """
+        The profiles the account *email* owns, those being deleted left out
+        (they are going away); from *profiles* when given, or the cluster.
+        """
+        if profiles is None:
+            profiles = self.k8s.list(profiles_path(self.namespace))
+
+        return [
+            profile
+            for profile in profiles
+            if self.owner_of(profile) == email and not profile["metadata"].get("deletionTimestamp")
+        ]
+
+    def check_profile_limit(self, user: dict) -> None:
+        """
+        Refuse (403) a new profile for a member who has as many as their
+        rights allow.
+        """
+        limit = rights_of(user)["profiles"]
+        owned = len(self.owned_profiles(user["email"]))
+
+        if limit == 0:
+            raise HttpError(403, "your account can't create profiles: ask an admin")
+        if owned >= limit:
+            raise HttpError(403, f"your account may have {limit} profiles, and has them: delete one, or ask an admin")
+
+    @staticmethod
+    def opened_by(before: str, after: str, languages: list[str]) -> set[str]:
+        """
+        What an edit of a profile's own allowlist from *before* to *after*
+        would let its sandbox do that it couldn't: the access of each entry
+        it would allow that wasn't allowed (``""`` read-only, ``rw``,
+        ``ssh``), and ``lan`` for a name that may reach an address it
+        couldn't. Empty for an edit that only takes something away.
+
+        It compares what the proxy would be given, not what the edit asked
+        for: switching on ``github:OWNER/REPO`` switches on whatever its
+        entries are, which may be read-write. And it compares it under the
+        profile's *languages* and under every language: a member may switch
+        languages, so taking away an admin's ``off`` line for a provided
+        entry opens that entry whether its language is on now or later.
+        """
+
+        def allowed(text: str, languages_on: list[str]) -> set[tuple[str, str]]:
+            entries = allowlist.effective(text, languages_on)
+            return {(entry.entry, entry.flag) for entry in entries if entry.enabled and not entry.invalid}
+
+        def pinned(text: str) -> set[tuple[str, str]]:
+            return {(pin.name, pin.address) for pin in allowlist.pins(text)}
+
+        opened = set()
+
+        for languages_on in (languages, list(langs.LANGS)):
+            allowed_before = allowed(before, languages_on)
+
+            for entry, flag in allowed(after, languages_on) - allowed_before:
+                # Read-only where the same entry was read-write gives nothing new.
+                if flag == "" and (entry, "rw") in allowed_before:
+                    continue
+                opened.add(flag)
+
+        if pinned(after) - pinned(before):
+            opened.add("lan")
+
+        return opened
+
+    @staticmethod
+    def access_of(opened: set[str]) -> str:
+        """
+        The most a change that opens *opened* gives, as a request shows it:
+        ``ssh``, ``rw`` or ``""``.
+        """
+        for access in ("ssh", "rw"):
+            if access in opened:
+                return access
+
+        return ""
+
+    @staticmethod
+    def check_opening(rights: dict, opened: set[str]) -> None:
+        """
+        Refuse (403) an edit that would open what a member's *rights* don't
+        let them: ``opened_by``'s answer.
+        """
+        for access, message in NOT_ALLOWED_TO_OPEN.items():
+            if access in opened and not rights[access]:
+                raise HttpError(403, message)
+
     def get_profile(self, name: str) -> dict:
         """
         A Profile by name; 400 for a bad name, 404 for a missing one.
@@ -515,6 +722,7 @@ class AdminApi:
             "rw": sum(1 for entry in enabled if entry.flag == "rw"),
             "ssh": sum(1 for entry in enabled if entry.flag == "ssh"),
             "vscodeHost": spec["vscodeHost"],
+            "owner": self.owner_of(profile),
         }
 
     def vscode_access(self, profile: dict) -> dict:
@@ -569,6 +777,8 @@ class AdminApi:
             raise HttpError(400, "op must be add, remove, enable or disable")
         if not entry:
             raise HttpError(400, "entry is required")
+        if flag not in allowlist.FLAGS:
+            raise HttpError(400, "flag must be rw, ssh or nothing")
 
         if op == "add":
             problem = allowlist.validate(entry, flag)
@@ -722,18 +932,87 @@ class AdminApi:
         refusal = langs.removal_refusal(extension_id, spec["languages"])
         raise HttpError(400, refusal or f"{extension_id} isn't one of this profile's extensions")
 
+    def languages_of(self, profile: dict) -> list[str]:
+        """
+        The languages and tools a profile has on: its own, or the defaults.
+        """
+        return manifests.effective_languages(profile.get("spec") or {}, self.defaults)
+
     def patch_allowlist(self, name: str, data: dict) -> bool:
         """
         Apply one edit to a profile's allowlist; whether anything changed.
         """
         return self.patch_allowlist_text(
             name,
-            lambda current, profile: self.apply_op(
-                current,
-                data,
-                manifests.effective_languages(profile.get("spec") or {}, self.defaults),
-            ),
+            lambda current, profile: self.apply_op(current, data, self.languages_of(profile)),
         )
+
+    def member_edit(
+        self,
+        user: dict,
+        profile: dict,
+        edit: Callable[[str, dict], str],
+        change: dict,
+        reason: object,
+    ) -> tuple[dict, int]:
+        """
+        A member's edit of a profile's own allowlist (*edit*, as
+        ``patch_allowlist_text`` takes it), as their rights have it: the
+        answer, and its status.
+
+        With no allowlist rights, it is refused. An edit that would let the
+        sandbox do more (``opened_by``) needs the right to each thing it
+        opens; with ``edit`` it is made, and with ``ask`` it becomes a
+        request (*change*: what an admin's approval does), unless it would
+        change nothing. One that only takes something away is made.
+        """
+        rights = rights_of(user)
+        if rights["allowlist"] == "none":
+            raise HttpError(403, NO_ALLOWLIST_RIGHTS)
+
+        name = profile["metadata"]["name"]
+
+        current = (profile.get("spec") or {}).get("allowlist") or ""
+        updated = edit(current, profile)
+        opened = self.opened_by(current, updated, self.languages_of(profile))
+        self.check_opening(rights, opened)
+
+        if updated == current:
+            return {"changed": False}, 200
+
+        if opened and rights["allowlist"] == "ask":
+            return self.ask(user, {**change, "profile": name, "access": self.access_of(opened)}, reason)
+
+        def checked(latest_text: str, latest: dict) -> str:
+            # The edit is made on the text as it is by then, which another
+            # edit may have moved on: checked again on that.
+            made = edit(latest_text, latest)
+            opens = self.opened_by(latest_text, made, self.languages_of(latest))
+            self.check_opening(rights, opens)
+
+            if opens and rights["allowlist"] == "ask":
+                raise HttpError(409, "the allowlist changed meanwhile; try again")
+
+            return made
+
+        return {"changed": self.patch_allowlist_text(name, checked)}, 200
+
+    def ask(self, user: dict, change: dict, reason: object) -> tuple[dict, int]:
+        """
+        A member's request for *change*, made (or the one waiting for the
+        same change), with an email to every admin about a new one: the
+        answer, and its status (202: accepted, for an admin to decide).
+        """
+        try:
+            request, new = self.approvals.ask({**change, "by": user["email"]}, str(reason or ""))
+        except ApprovalError as error:
+            raise HttpError(400, str(error)) from error
+
+        if new:
+            admins = [admin["email"] for admin in self.users.admins()]
+            self.mailer.request_made(request, admins, self.portal_url)
+
+        return {"changed": False, "requested": True, "request": request}, 202
 
     def patch_allowlist_text(self, name: str, edit: Callable[[str, dict], str]) -> bool:
         """
@@ -953,20 +1232,37 @@ class AdminApi:
 
     def me(self):
         """
-        Who is signed in; ``null`` when nobody is.
+        Who is signed in, and as what; ``null`` when nobody is. A member's
+        rights come with it, and for everyone whether new requests are
+        emailed to the admins.
         """
         try:
             user = self.require("full")
         except HttpError:
             return self.respond(None)
 
-        return self.respond({"email": user["email"], "namespace": self.namespace})
+        admin = is_admin(user)
+
+        return self.respond(
+            {
+                "email": user["email"],
+                "namespace": self.namespace,
+                "role": "admin" if admin else MEMBER,
+                "rights": None if admin else rights_of(user),
+                "mail": self.mailer.enabled,
+            }
+        )
 
     # -- profiles --------------------------------------------------------------
 
     def list_profiles(self):
-        self.require("full")
-        return self.respond([self.summarise(profile) for profile in self.k8s.list(profiles_path(self.namespace))])
+        """
+        The profiles: every one for an admin, a member's own for a member.
+        """
+        user = self.require("full")
+        profiles = self.k8s.list(profiles_path(self.namespace))
+
+        return self.respond([self.summarise(profile) for profile in profiles if self.may_use(user, profile)])
 
     def template(self):
         self.require("full")
@@ -991,9 +1287,20 @@ class AdminApi:
         the template's, or the copy's: the profile's own entries, and the
         provided ones it switches off; the provided entries follow its
         languages by themselves.
+
+        An admin may give it an ``owner``, an account's email. A member's is
+        their own, and only as many as their rights allow; they copy only
+        their own profiles, and only what they may set themselves
+        (``MEMBER_COPIED``), and can't give it an image, a host or an owner.
         """
-        self.require("full")
+        user = self.require("full")
+        admin = is_admin(user)
         data = self.body()
+
+        if not admin:
+            for field, words in ADMIN_ONLY_ON_CREATE.items():
+                if data.get(field):
+                    raise HttpError(403, f"only an admin can set {words}")
 
         name = str(data.get("name") or "").strip().lower()
         if not NAME_OK.match(name):
@@ -1002,37 +1309,54 @@ class AdminApi:
         chosen = data.get("languages")
         languages = self.language_keys(chosen) if chosen is not None else None
 
-        # A profile being deleted still exists until everything it owned is
-        # gone; the name is free again in a moment, not taken.
-        existing = self.k8s.get(self.profile_path(name))
-        if existing and existing["metadata"].get("deletionTimestamp"):
-            raise HttpError(409, f"profile '{name}' is still being deleted; try again in a moment")
-        if existing:
-            raise HttpError(409, f"profile '{name}' already exists")
+        owner = self.owner_email(data.get("owner")) if admin else user["email"]
+        source = self.own_profile(user, str(data["from"])) if data.get("from") else None
 
-        spec: dict = {"allowlist": _template_allowlist(self.template_allowlist)}
-        if data.get("from"):
-            spec = dict(self.get_profile(str(data["from"])).get("spec") or {})
+        # Counted and created under one lock: two of a member's at once
+        # can't both take the last profile their rights allow.
+        with self._creating:
+            if not admin:
+                self.check_profile_limit(user)
 
-            # A copy gets an Ingress host and a connection token of its own.
-            spec.pop("vscodeHost", None)
-            spec.pop("vscodeToken", None)
+            # A profile being deleted still exists until everything it owned
+            # is gone; the name is free again in a moment, not taken.
+            existing = self.k8s.get(self.profile_path(name))
+            if existing and existing["metadata"].get("deletionTimestamp"):
+                raise HttpError(409, f"profile '{name}' is still being deleted; try again in a moment")
+            if existing:
+                raise HttpError(409, f"profile '{name}' already exists")
 
-        if data.get("image"):
-            spec["image"] = str(data["image"])
-        if data.get("vscodeHost"):
-            spec["vscodeHost"] = self.host_name(data["vscodeHost"])
+            spec: dict = {"allowlist": _template_allowlist(self.template_allowlist)}
+            if source and admin:
+                spec = dict(source.get("spec") or {})
 
-        if languages is not None:
-            spec["languages"] = languages
+                # A copy gets an Ingress host, a connection token and an
+                # owner of its own.
+                spec.pop("vscodeHost", None)
+                spec.pop("vscodeToken", None)
+                spec.pop("owner", None)
 
-        profile = {
-            "apiVersion": manifests.API_VERSION,
-            "kind": "Profile",
-            "metadata": {"name": name, "namespace": self.namespace},
-            "spec": spec,
-        }
-        created = self.k8s.create(profiles_path(self.namespace), profile)
+            if source and not admin:
+                source_spec = source.get("spec") or {}
+                spec = {field: source_spec[field] for field in MEMBER_COPIED if field in source_spec}
+
+            if data.get("image"):
+                spec["image"] = str(data["image"])
+            if data.get("vscodeHost"):
+                spec["vscodeHost"] = self.host_name(data["vscodeHost"])
+            if owner:
+                spec["owner"] = owner
+
+            if languages is not None:
+                spec["languages"] = languages
+
+            profile = {
+                "apiVersion": manifests.API_VERSION,
+                "kind": "Profile",
+                "metadata": {"name": name, "namespace": self.namespace},
+                "spec": spec,
+            }
+            created = self.k8s.create(profiles_path(self.namespace), profile)
 
         return self.respond(self.summarise(created), 201)
 
@@ -1050,13 +1374,24 @@ class AdminApi:
         (those of the languages that are off too, marked so), and its
         ``extensionStatus`` how far the running VS Code container has got
         with installing them, and its ``packages`` its own Ubuntu packages,
-        which the VS Code container installs as it starts.
+        which the VS Code container installs as it starts. Its ``requests``
+        are the members' requests for it still waiting for an admin: every
+        one to an admin, a member's own to them.
         """
-        self.require("full")
-        profile = self.get_profile(name)
+        user = self.require("full")
+        profile = self.own_profile(user, name)
         spec = manifests.effective_spec(profile, self.defaults)
         enabled = spec["languages"]
         entries = allowlist.as_dicts(allowlist.effective(spec["allowlist"], enabled))
+
+        waiting = [
+            request
+            for request in self.approvals.list()
+            if request["profile"] == profile["metadata"]["name"]
+            and request["state"] == PENDING
+            and (is_admin(user) or request["by"] == user["email"])
+        ]
+        requests = self.request_views(waiting, [profile])
 
         return self.respond(
             {
@@ -1070,6 +1405,7 @@ class AdminApi:
                 "allowlist": entries,
                 "lan": self.lan_view(profile),
                 "access": self.vscode_access(profile),
+                "requests": requests,
                 "version": profile["metadata"].get("generation"),
             }
         )
@@ -1084,10 +1420,22 @@ class AdminApi:
         doesn't depend on what was read, so when something else lands in
         between (the operator's status writes do, all the time) it is made
         again; any other patch that loses such a race is refused.
+
+        An admin may also give the profile an ``owner`` (an account's email;
+        empty: nobody's). A member may change only ``MEMBER_EDITABLE``.
         """
-        self.require("full")
+        user = self.require("full")
+        self.own_profile(user, name)
         data = self.body()
+
+        if not is_admin(user):
+            refused = [field for field in (*EDITABLE_FIELDS, "owner") if field in data and field not in MEMBER_EDITABLE]
+            if refused:
+                raise HttpError(403, f"only an admin can change {', '.join(refused)}")
+
         spec = self.editable_spec(data)
+        if "owner" in data:
+            spec["owner"] = self.owner_email(data["owner"])
 
         chosen = data.get("languages")
         languages = self.language_keys(chosen) if chosen is not None else None
@@ -1116,15 +1464,44 @@ class AdminApi:
         raise HttpError(409, "the profile changed meanwhile; reload and try again")  # pragma: no cover
 
     def delete_profile(self, name: str):
-        self.require("full")
-        self.get_profile(name)
+        """
+        Delete a profile, and forget the requests still waiting for it.
+        """
+        user = self.require("full")
+        self.own_profile(user, name)
         self.k8s.delete(self.profile_path(name))
+        self.approvals.drop_profile(name)
 
         return self.respond({"ok": True})
 
     def edit_allowlist(self, name: str):
-        self.require("full")
-        return self.respond({"changed": self.patch_allowlist(name, self.body())})
+        """
+        One edit of a profile's allowlist: an admin's is made, and a member's
+        goes as their rights have it (``member_edit``); with ``reason``, what
+        a request tells the admins.
+        """
+        user = self.require("full")
+        profile = self.own_profile(user, name)
+        data = self.body()
+
+        if is_admin(user):
+            return self.respond({"changed": self.patch_allowlist(name, data)})
+
+        op, entry, flag = self.check_op(data)
+
+        # Switching an entry on or off, the flag only says which of its
+        # rules: its ssh one, or the other. Kept so, the same switch is the
+        # same request whatever else is sent.
+        if op != "add":
+            flag = "ssh" if flag == "ssh" else ""
+
+        change = {"kind": "entry", "op": op, "entry": entry, "flag": flag, "address": ""}
+
+        def edit(current: str, latest: dict) -> str:
+            return self.apply_op(current, data, self.languages_of(latest))
+
+        payload, status = self.member_edit(user, profile, edit, change, data.get("reason"))
+        return self.respond(payload, status)
 
     def lan_view(self, profile: dict, answers: Optional[dict[str, list[str]]] = None) -> dict:
         """
@@ -1187,8 +1564,8 @@ class AdminApi:
         deadline for all of them together (``resolve_all``): the On your
         network card, with every pin's state.
         """
-        self.require("full")
-        profile = self.get_profile(name)
+        user = self.require("full")
+        profile = self.own_profile(user, name)
 
         spec = manifests.effective_spec(profile, self.defaults)
         answers = self.resolve_all([pin["name"] for pin in spec["lan"]["pins"]])
@@ -1202,8 +1579,12 @@ class AdminApi:
         allowlist. The admin's pod can't see the network the address is on,
         so the address is given, never looked up. A name pinned already is
         moved; an address in the cluster's own ranges is refused.
+
+        A member's edit goes as their rights have it (``member_edit``): a
+        new name, or a new address for one, needs their ``lan`` right.
         """
-        self.require("full")
+        user = self.require("full")
+        profile = self.own_profile(user, name)
         data = self.body()
 
         op = data.get("op")
@@ -1216,6 +1597,23 @@ class AdminApi:
             raise HttpError(400, "name is required")
 
         messages: list[str] = []
+        edit = self.lan_edit(op, pin, address, messages)
+
+        if is_admin(user):
+            changed = self.patch_allowlist_text(name, edit)
+            return self.respond({"changed": changed, "message": messages[-1] if messages else ""})
+
+        change = {"kind": "lan", "op": op, "entry": pin, "flag": "", "address": address}
+        payload, status = self.member_edit(user, profile, edit, change, data.get("reason"))
+
+        return self.respond({**payload, "message": messages[-1] if messages else ""}, status)
+
+    def lan_edit(self, op: str, pin: str, address: str, messages: list[str]) -> Callable[[str, dict], str]:
+        """
+        The edit, as ``patch_allowlist_text`` takes it, that lets the name
+        *pin* reach *address* (``op`` add) or stops it (``op`` remove); what
+        it says about it is added to *messages*.
+        """
 
         def edit(current: str, profile: dict) -> str:
             if op == "remove":
@@ -1241,8 +1639,7 @@ class AdminApi:
             messages.append(message)
             return updated
 
-        changed = self.patch_allowlist_text(name, edit)
-        return self.respond({"changed": changed, "message": messages[-1] if messages else ""})
+        return edit
 
     def rotate_token(self, name: str):
         """
@@ -1254,8 +1651,8 @@ class AdminApi:
         minute at most), which restarts VS Code with it. A token the spec
         fixes (``vscodeToken``) is changed there instead.
         """
-        self.require("full")
-        profile = self.get_profile(name)
+        user = self.require("full")
+        profile = self.own_profile(user, name)
 
         if (profile.get("spec") or {}).get("vscodeToken"):
             raise HttpError(400, "this profile's token is fixed in its spec (vscodeToken): change it there")
@@ -1280,7 +1677,8 @@ class AdminApi:
         no restart. Read, edit, and write conditionally on the version read;
         when another edit landed in between, read again and edit on top of it.
         """
-        self.require("full")
+        user = self.require("full")
+        self.own_profile(user, name)
         data = self.body()
 
         op = data.get("op")
@@ -1361,7 +1759,8 @@ class AdminApi:
         pod. Read, edit, and write conditionally on the version read; when
         another edit landed in between, read again and edit on top of it.
         """
-        self.require("full")
+        user = self.require("full")
+        self.own_profile(user, name)
         data = self.body()
 
         op = data.get("op")
@@ -1394,7 +1793,7 @@ class AdminApi:
         """
         One allowlist edit applied to every profile, reported per profile.
         """
-        self.require("full")
+        self.require_admin()
         data = self.body()
         self.check_op(data)
 
@@ -1412,8 +1811,8 @@ class AdminApi:
         """
         What a profile's squid and DNS filter refused recently, from their logs.
         """
-        self.require("full")
-        profile = self.get_profile(name)
+        user = self.require("full")
+        profile = self.own_profile(user, name)
         since = SINCE.get(request.args.get("since", "30m"), 1800)
 
         selector = f"{manifests.LABEL_PROFILE}={profile['metadata']['name']}"
@@ -1431,26 +1830,170 @@ class AdminApi:
 
         return self.respond([item.as_dict() for item in blocked.parse(squid_log, dns_log)])
 
-    # -- admins ----------------------------------------------------------------
+    # -- members' requests -----------------------------------------------------
+
+    def request_views(self, requests: list[dict], profiles: list[dict]) -> list[dict]:
+        """
+        *requests* as the pages show them, for *profiles* (those there are):
+        ``profileGone`` marks one whose profile has been deleted since (by
+        kubectl: the admin's own deletions forget them), and ``notTheirs``
+        one whose profile now belongs to someone else. Either can only be
+        denied.
+        """
+        owners = {profile["metadata"]["name"]: self.owner_of(profile) for profile in profiles}
+
+        return [
+            {
+                **request,
+                "profileGone": request["profile"] not in owners,
+                "notTheirs": request["profile"] in owners and owners[request["profile"]] != request["by"],
+            }
+            for request in requests
+        ]
+
+    def list_requests(self):
+        """
+        The members' requests (``request_views``): every one to an admin, a
+        member's own to them; those waiting first, newest first, then those
+        decided, the latest decision first.
+        """
+        user = self.require("full")
+
+        visible = self.request_views(
+            [request for request in self.approvals.list() if is_admin(user) or request["by"] == user["email"]],
+            self.k8s.list(profiles_path(self.namespace)),
+        )
+        waiting = [request for request in visible if request["state"] == PENDING]
+        decided = [request for request in visible if request["state"] != PENDING]
+
+        waiting.sort(key=lambda request: request["createdAt"], reverse=True)
+        decided.sort(key=lambda request: request["decidedAt"], reverse=True)
+
+        return self.respond(waiting + decided)
+
+    def decide(self, request_id: str, state: str, admin: dict) -> dict:
+        """
+        Mark a request approved or denied by *admin*: 404 when there is no
+        such request, 409 when someone decided it already.
+        """
+        try:
+            return self.approvals.decide(request_id, state, admin["email"])
+        except NoSuchRequest as error:
+            raise HttpError(404, str(error)) from error
+        except ApprovalError as error:
+            raise HttpError(409, str(error)) from error
+
+    def approve_request(self, request_id: str):
+        """
+        Approve a member's request: the change it asks for is made, as an
+        admin would make it. It is marked approved first, so that a second
+        admin can't approve or deny it meanwhile, and pending again if the
+        change can't be made (its profile has gone meanwhile, say).
+
+        A request for a profile that has gone (404), or that no longer
+        belongs to the member who asked (409), is refused before anything
+        is marked: the admin was told it was for that member's profile.
+        """
+        admin = self.require_admin()
+
+        asked = self.approvals.find(request_id)
+        if asked is None:
+            raise HttpError(404, "no such request")
+
+        name = asked["profile"]
+        profile = self.k8s.get(self.profile_path(name))
+        if not profile:
+            raise HttpError(404, f"profile '{name}' has been deleted: deny the request")
+        if self.owner_of(profile) != asked["by"]:
+            raise HttpError(409, f"{name} no longer belongs to {asked['by']}: deny the request")
+
+        request = self.decide(request_id, APPROVED, admin)
+
+        try:
+            if request["kind"] == "lan":
+                messages: list[str] = []
+                changed = self.patch_allowlist_text(
+                    name,
+                    self.lan_edit(request["op"], request["entry"], request["address"], messages),
+                )
+            else:
+                data = {"op": request["op"], "entry": request["entry"], "flag": request["flag"]}
+                changed = self.patch_allowlist(name, data)
+
+        except (HttpError, ApiError):
+            self.approvals.reopen(request_id)
+            raise
+
+        return self.respond({"request": request, "changed": changed})
+
+    def deny_request(self, request_id: str):
+        """
+        Deny a member's request: nothing changes, and they see it denied.
+        """
+        admin = self.require_admin()
+        return self.respond({"request": self.decide(request_id, DENIED, admin)})
+
+    # -- accounts --------------------------------------------------------------
+
+    def account_view(self, user: dict, profiles: list[dict]) -> dict:
+        """
+        An account as the People page shows it: its role, a member's rights,
+        and how many of *profiles* it owns.
+        """
+        admin = is_admin(user)
+
+        return {
+            "email": user["email"],
+            "role": "admin" if admin else MEMBER,
+            "rights": rights_of(user),
+            "profiles": len(self.owned_profiles(user["email"], profiles)),
+            "totpEnrolled": bool(user.get("totpEnrolled")),
+            "createdAt": user.get("createdAt"),
+        }
 
     def list_users(self):
-        self.require("full")
+        self.require_admin()
+        profiles = self.k8s.list(profiles_path(self.namespace))
 
-        accounts = [
-            {"email": user["email"], "totpEnrolled": bool(user.get("totpEnrolled")), "createdAt": user.get("createdAt")}
-            for user in self.users.list()
-        ]
-        return self.respond(accounts)
+        return self.respond([self.account_view(user, profiles) for user in self.users.list()])
 
     def add_user(self):
-        self.require("full")
+        """
+        A new account: a member (with ``rights``, or ``RIGHTS``) unless
+        ``role`` says admin.
+        """
+        self.require_admin()
         data = self.body()
-        self.users.add(str(data.get("email") or ""), str(data.get("password") or ""))
+
+        self.users.add(
+            str(data.get("email") or ""),
+            str(data.get("password") or ""),
+            data.get("role") or MEMBER,
+            data.get("rights"),
+        )
 
         return self.respond({"ok": True}, 201)
 
+    def patch_user(self, email: str):
+        """
+        Change an account's ``role``, or a member's ``rights``, or both:
+        they apply at the account's next request. The last admin can't be
+        made a member.
+        """
+        self.require_admin()
+        data = self.body()
+
+        user = self.users.set_role(email, data.get("role"), data.get("rights"))
+        profiles = self.k8s.list(profiles_path(self.namespace))
+
+        return self.respond(self.account_view(user, profiles))
+
     def remove_user(self, email: str):
-        self.require("full")
+        """
+        Remove an account, ending its sessions. The profiles it owned stay,
+        for an admin to give to someone else or delete.
+        """
+        self.require_admin()
         self.users.remove(email)
         self.sessions.revoke(email)
 
@@ -1458,9 +2001,9 @@ class AdminApi:
 
     def reset_totp(self, email: str):
         """
-        Make an admin enrol in TOTP again at the next sign-in (yourself included).
+        Make an account enrol in TOTP again at the next sign-in (yourself included).
         """
-        self.require("full")
+        self.require_admin()
         self.users.reset_totp(email)
         self.sessions.revoke(email)
 
@@ -1468,10 +2011,14 @@ class AdminApi:
 
     def set_password(self, email: str):
         """
-        Set an admin's password, signing them out everywhere. Changing your
-        own keeps this session.
+        Set an account's password, signing it out everywhere: an admin may
+        set anyone's, a member only their own. Changing your own keeps this
+        session.
         """
         me = self.require("full")
+        if not is_admin(me) and canonical(email) != me["email"]:
+            raise HttpError(403, "only an admin can do that")
+
         user = self.users.set_password(email, str(self.body().get("password") or ""))
 
         if user["email"] == me["email"]:
@@ -1492,6 +2039,9 @@ def create_app(
     clock: Optional[Callable[[], float]] = None,
     trusted_proxies: Optional[list[str]] = None,
     resolve: lan.Resolver = lan.resolve,
+    approvals: Optional[Approvals] = None,
+    mailer: Optional[Mailer] = None,
+    portal_url: str = "",
 ) -> Flask:
     """
     The admin's Flask app.
@@ -1500,6 +2050,11 @@ def create_app(
     ``always`` or ``never``. *clock* stands in for the time in tests, and
     *trusted_proxies* lists the addresses or networks whose X-Forwarded-For
     is believed. *resolve* stands in for the pod's name lookups.
+
+    The members' requests are kept in the ``REQUESTS_SECRET`` Secret unless
+    *approvals* says otherwise; *mailer* emails the admins about new ones
+    (none without), with links into the portal at *portal_url* (its address
+    as the admins open it, ``https://admin.example.com``).
     """
     api = AdminApi(
         k8s,
@@ -1510,6 +2065,9 @@ def create_app(
         sessions=sessions or Sessions(),
         clock=clock,
         trusted_proxies=trusted_proxies or [],
+        approvals=approvals or Approvals(SecretStore(k8s, REQUESTS_SECRET, "requests.json")),
+        mailer=mailer or Mailer(None),
+        portal_url=portal_url,
         resolve=resolve,
     )
     return api.app

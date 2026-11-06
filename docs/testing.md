@@ -75,7 +75,7 @@ The pictures in `docs/images/` are generated, not hand-made:
 
 ```sh
 docs/tools/screenshots.sh                    # all of them
-docs/tools/screenshots.sh app-blocked admin-users
+docs/tools/screenshots.sh app-blocked admin-people
 ```
 
 The script serves the real pages (`app/src`, `admin/hardcode_admin/web`)

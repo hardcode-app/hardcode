@@ -15,7 +15,7 @@ from pathlib import Path
 from unittest import mock
 
 from hardcode_admin import manifests, totp, web
-from hardcode_admin.auth import Sessions, StoreConflict, Users
+from hardcode_admin.auth import ADMIN, Sessions, StoreConflict, Users
 from hardcode_admin.web import (
     ACCOUNT_CODE_ATTEMPTS,
     MAX_CODE_ATTEMPTS,
@@ -52,7 +52,7 @@ class WebTests(unittest.TestCase):
     def setUp(self):
         self.k8s = FakeK8s()
         self.users = Users(MemoryStore())
-        self.users.add(ROOT, ROOT_PASSWORD)
+        self.users.add(ROOT, ROOT_PASSWORD, ADMIN)
         self.now = [1_700_000_000.0]
 
         self.app = create_app(
@@ -95,7 +95,7 @@ class WebTests(unittest.TestCase):
         """
         A second admin, already enrolled in TOTP, signed in on a client of its own.
         """
-        self.users.add(SECOND, SECOND_PASSWORD, must_enrol=False)
+        self.users.add(SECOND, SECOND_PASSWORD, ADMIN, must_enrol=False)
         other = self.app.test_client()
         self.sign_in(other, SECOND, SECOND_PASSWORD)
         return other
@@ -151,7 +151,10 @@ class WebTests(unittest.TestCase):
         self.assertEqual(self.client.post("/api/totp", json={"code": "000000"}).status_code, 401)
         self.assertEqual(self.client.post("/api/totp", json={"code": self.code()}).status_code, 200)
         self.assertTrue(self.users.find(ROOT)["totpEnrolled"])
-        self.assertEqual(self.client.get("/api/me").json, {"email": ROOT, "namespace": "test"})
+        self.assertEqual(
+            self.client.get("/api/me").json,
+            {"email": ROOT, "namespace": "test", "role": "admin", "rights": None, "mail": False},
+        )
 
         self.assertEqual(self.login().json, {"next": "totp"}, "enrolled users just enter a code")
 
@@ -186,7 +189,7 @@ class WebTests(unittest.TestCase):
         self.assertEqual(self.login().status_code, 200, "the password stage isn't locked by code guesses")
 
     def test_the_code_budget_spans_challenges(self):
-        self.users.add("enrolled@example.com", SECOND_PASSWORD, must_enrol=False)
+        self.users.add("enrolled@example.com", SECOND_PASSWORD, ADMIN, must_enrol=False)
 
         rounds = ACCOUNT_CODE_ATTEMPTS // MAX_CODE_ATTEMPTS
         for _ in range(rounds):
@@ -1113,7 +1116,7 @@ class LanWebTests(unittest.TestCase):
     def setUp(self):
         self.k8s = FakeK8s()
         self.users = Users(MemoryStore())
-        self.users.add(ROOT, ROOT_PASSWORD, must_enrol=False)
+        self.users.add(ROOT, ROOT_PASSWORD, ADMIN, must_enrol=False)
         self.now = [1_700_000_000.0]
         self.looked_up = {"gitlab.example.com": ["192.168.71.200"], "moved.example.com": ["10.0.0.9"]}
 

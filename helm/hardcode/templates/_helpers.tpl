@@ -32,3 +32,17 @@ app.kubernetes.io/component: admin
 {{- define "hardcode.bootstrapSecret" -}}
 {{ .Values.admin.existingSecret | default (printf "%s-admin-bootstrap" (include "hardcode.fullname" .)) }}
 {{- end -}}
+
+{{- define "hardcode.smtpSecret" -}}
+{{ .Values.admin.smtp.existingSecret | default (printf "%s-admin-smtp" (include "hardcode.fullname" .)) }}
+{{- end -}}
+
+{{- /* The portal's address for the admins' emails: admin.url, or the
+     Ingress's host when there is one. */ -}}
+{{- define "hardcode.adminURL" -}}
+{{- if .Values.admin.url -}}
+{{ .Values.admin.url }}
+{{- else if .Values.admin.ingress.enabled -}}
+{{ if .Values.admin.ingress.tls }}https{{ else }}http{{ end }}://{{ .Values.admin.ingress.host }}
+{{- end -}}
+{{- end -}}

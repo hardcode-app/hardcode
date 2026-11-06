@@ -244,6 +244,47 @@ languages while the chart's `profileDefaults.languages` is empty.
   128 MiB and cuts a streamed line at 64 KiB. On Kubernetes the kubelet
   rotates logs, and the admin reads at most 16 MiB of one.
 
+### The admin UI
+
+- **A sandbox's policy is changed from outside it.** On Kubernetes, a
+  profile's allowlist changes only through the admin UI's accounts or the
+  Kubernetes API. The sandbox can't reach the admin: its policies let it
+  reach its own proxy and DNS server, nothing else (the end-to-end test
+  checks the admin among what it is refused).
+- **Two roles, checked on every request.** An admin can do everything. A
+  member works only on the profiles whose `spec.owner` is their email;
+  anyone else's is `404` to them, as if it weren't there. The account is
+  read on every request, so a change of role or rights applies at once,
+  and the last admin can't be removed or made a member.
+- **A member changes a policy only as their rights say**: not at all, by
+  asking an admin to approve each entry, or at once; and read-write
+  entries, ssh tunnels and names on the network each need a tick of their
+  own. What an edit opens is judged by the allowlist the proxy would get
+  before and after it, with the profile's languages, not by what the
+  request names: switching on an entry an admin switched off, or
+  `github:OWNER/REPO`, counts as the read-write entries it turns back on,
+  whichever languages are on at the time.
+  Taking something away is never held back.
+- **What weakens a sandbox stays an admin's**: the image, the privileged
+  Docker sidecar, the volumes and extra mounts, the environment, the
+  network policy settings and the Ingress host. A member's own profiles,
+  and their copies of them, get the chart's defaults for these, as many as
+  their rights allow; a copy keeps its source's allowlist, read-write
+  entries included.
+- **The requests can't crowd each other out.** Each is at most 2 KB as
+  stored, a member has at most 20 waiting and everyone 150, so the Secret
+  they are kept in stays under Kubernetes' size limit; an approval is
+  refused for a profile that no longer belongs to the member who asked.
+- **Approving takes a signed-in admin.** The email about a request links
+  to the portal and nothing more: approving is a request from the admin's
+  own page, with a session that passed the password and the code, so a
+  mail scanner that follows the link can't approve anything. The admin is
+  shown what the change would open, as worked out from the allowlist, and
+  the member's reason quoted as they wrote it.
+- **The SMTP login is a Secret's**, given to the admin's container as its
+  environment; with `starttls` or `tls` the server's certificate is
+  checked.
+
 ### HardCode's own releases
 
 - **The app installs only signed updates.** A release's app takes an
@@ -339,6 +380,16 @@ languages while the chart's `profileDefaults.languages` is empty.
   it off on profiles that don't need Docker (`hardcode docker off`).
 - **The token is the only protection for VS Code behind an Ingress** on
   Kubernetes. Put TLS and your own sign-in in front of it.
+- **Members can open what HardCode provides.** A member may switch
+  languages and tools on and off, whatever their allowlist rights, and
+  each opens the entries HardCode provides for it: Claude Code's and
+  Codex's include read-write entries for their own services. A member
+  whose rights say *edit* needs nobody's approval for what their ticks
+  allow.
+- **The Kubernetes API is above the admin UI's roles.** Anyone who can
+  edit `Profile` objects, or the `hardcode-admin-users` Secret, in the
+  release's namespace can change any sandbox's policy, or make themselves
+  an admin. Keep that access to the people who run HardCode.
 - **The admin's login throttle keys on the client address.** Behind a
   proxy, it believes `X-Forwarded-For` only from the addresses in
   `admin.trustedProxies`, read from the right, so a client can't pick its

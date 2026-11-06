@@ -349,3 +349,35 @@ table.own-extensions {
 table.own-extensions td {
     padding: 7px 0;
 }
+/* Requests: how many wait, beside Requests in the navigation, and the one
+   an admin's email linked to. */
+.nav-count {
+    margin-left: auto;
+    min-width: 20px;
+    padding: 1px 6px;
+    border-radius: 10px;
+    background: var(--warn);
+    color: #111;
+    font-size: 11.5px;
+    font-weight: 600;
+    text-align: center;
+}
+
+tr.highlight td {
+    background: rgba(251, 191, 36, .08);
+}
+
+tr.highlight td:first-child {
+    box-shadow: inset 2px 0 0 var(--warn);
+}
+
+/* A person's rights in the add-or-change dialog. */
+.rights-ticks {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px 16px;
+}
+
+.modal-card:has(#pm-role) {
+    width: 520px;
+}

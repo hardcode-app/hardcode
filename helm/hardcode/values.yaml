@@ -7,12 +7,33 @@ admin:
     repository: hardcode-admin
     tag: latest
     pullPolicy: IfNotPresent
-  # The first admin. Created on first start if no admins exist yet; they
+  # The first admin. Created on first start if no accounts exist yet; they
   # enrol their authenticator app at first sign-in. Either set both here or
   # point existingSecret at a Secret with keys "email" and "password".
   email: ""
   password: ""
   existingSecret: ""
+  # The admin portal's address as people open it, for the links in the
+  # admins' emails (https://hardcode-admin.example.com). Empty: the
+  # Ingress's host, when the Ingress is on.
+  url: ""
+  # Emails to every admin when a member asks for an allowlist entry, each
+  # with a link to the request in the portal (approving it still takes a
+  # signed-in admin). Without a host, requests are only shown in the portal.
+  smtp:
+    host: ""
+    # Empty: 587 for starttls, 465 for tls.
+    port: ""
+    # starttls (after connecting), tls (from the start) or none (a relay
+    # inside the cluster).
+    tls: starttls
+    # The address the emails come from.
+    from: ""
+    # The server's login, when it wants one. Either set both here or point
+    # existingSecret at a Secret with keys "username" and "password".
+    username: ""
+    password: ""
+    existingSecret: ""
   # The web UI. The operator part runs regardless.
   ui:
     enabled: true
@@ -147,6 +168,7 @@ profiles: []
 #    languages: [python, node, build_essentials, docker, claude_cli]
 #    extensions: []
 #    packages: []
+#    owner: ""              # an admin UI account's email: the member it belongs to
 #    image: ""
 #    vscodeHost: ""
 #    suspended: false

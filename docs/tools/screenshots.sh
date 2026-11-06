@@ -6,7 +6,7 @@
 # docs say.
 #
 #   docs/tools/screenshots.sh                        all of them
-#   docs/tools/screenshots.sh app-blocked admin-users   just these
+#   docs/tools/screenshots.sh app-blocked admin-people  just these
 #
 # The pages are served on 127.0.0.1:18771 (the app) and :18772 (the admin);
 # APP_PORT and ADMIN_PORT move them, so that two runs can't meet.
@@ -133,7 +133,10 @@ declare -A SHOTS=(
   [admin-profile-access]="$ADMIN?view=profile-access"
   [admin-profile-settings]="$ADMIN?view=profile-settings"
   [admin-bulk]="$ADMIN?view=bulk"
-  [admin-users]="$ADMIN?view=users"
+  [admin-people]="$ADMIN?view=people"
+  [admin-person]="$ADMIN?view=person"
+  [admin-requests]="$ADMIN?view=requests#request/r8Xk2pQ"
+  [admin-member-allowlist]="$ADMIN?view=member-allowlist"
   [admin-new-profile]="$ADMIN?view=new-profile"
   [admin-raw-allowlist]="$ADMIN?view=raw-allowlist"
   [admin-delete]="$ADMIN?view=delete"

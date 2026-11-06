@@ -6,7 +6,12 @@
  *
  *   login | enrol | totp | profiles | profile-languages | profile-extensions |
  *   profile-allowlist | profile-blocked | profile-access | profile-settings |
- *   bulk | users | new-profile | raw-allowlist | delete
+ *   bulk | people | person | requests | new-profile | raw-allowlist | delete |
+ *   member-allowlist
+ *
+ * The member- views are a member's (priya@example.com, who asks for
+ * entries); the others an admin's. `requests` is opened as an admin's email
+ * links to it, with `#request/<id>` after the address.
  */
 'use strict';
 
@@ -14,9 +19,10 @@
   const params = new URLSearchParams(location.search);
   const view = params.get('view') || 'profiles';
   const signedIn = !['login', 'enrol', 'totp'].includes(view);
+  const member = view.startsWith('member-');
   const fixture = fetch('/fixture-data.json').then((response) => response.json());
 
-  const you = { email: 'you@example.com', namespace: 'sandbox' };
+  const you = { email: 'you@example.com', namespace: 'sandbox', role: 'admin', rights: null, mail: true };
   let me = signedIn ? you : null;
 
   const json = (body, status = 200) =>
@@ -28,7 +34,12 @@
     const path = String(url).split('?')[0];
     const method = (options.method || 'GET').toUpperCase();
 
-    if (path === '/api/me') return json(me);
+    if (path === '/api/me') {
+      if (me && member) {
+        return json({ email: data.member.email, namespace: 'sandbox', role: 'member', rights: data.member.rights, mail: true });
+      }
+      return json(me);
+    }
 
     if (path === '/api/login') {
       const enrolment = { next: 'enrol', otpauth: data.otpauth, secret: data.secret, qr: data.qr };
@@ -45,7 +56,13 @@
       return json({ ok: true });
     }
 
-    if (path === '/api/profiles' && method === 'GET') return json(data.profiles);
+    if (path === '/api/profiles' && method === 'GET') {
+      return json(member ? data.profiles.filter((profile) => profile.owner === data.member.email) : data.profiles);
+    }
+    if (path === '/api/requests') {
+      return json(member ? data.requests.filter((request) => request.by === data.member.email) : data.requests);
+    }
+    if (path.startsWith('/api/requests/')) return json({ request: data.requests[0], changed: true });
     if (path === '/api/template') return json({ allowlist: data.template });
     if (path === '/api/languages') return json(data.catalogue);
     if (path.endsWith('/extensions')) return json({ changed: true, message: 'added extension' });
@@ -83,20 +100,29 @@
     $('#lg-code').value = '492817';
   }
 
+  /** All allowlists with an entry added everywhere; People; or People with a member's dialog open. */
   async function navigation() {
-    $(`.nav-item[data-view="${view}"]`).click();
+    $(`.nav-item[data-view="${view === 'bulk' ? 'bulk' : 'users'}"]`).click();
 
     if (view === 'bulk') {
       await waitFor(() => $('#bk-entry'));
       $('#bk-entry').value = 'github.com/ourcompany';
       $('[data-bulk="add"]').click();
       await waitFor(() => $('#bk-result').textContent);
-    } else {
-      await waitFor(() => $('[data-reset-totp]'));
+      return;
+    }
+
+    await waitFor(() => $('[data-reset-totp]'));
+    if (view === 'person') {
+      $('[data-edit-user="priya@example.com"]').click();
     }
   }
 
-  /** team-a, opened at the tab being documented, with its dialog open for raw-allowlist and delete. */
+  /**
+   * team-a, opened at the tab being documented, with its dialog open for
+   * raw-allowlist and delete; for member-allowlist, as its member sees it,
+   * with an entry being asked for.
+   */
   async function oneProfile() {
     $('[data-open="team-a"]').click();
     await waitFor(() => $('[data-tab]'));
@@ -123,6 +149,11 @@
 
     if (view === 'raw-allowlist') $('[data-act="al-raw"]').click();
     if (view === 'delete') $('[data-act="delete-profile"]').click();
+
+    if (view === 'member-allowlist') {
+      $('#al-entry').value = 'registry.terraform.io';
+      $('#al-reason').value = 'the providers our infrastructure code uses';
+    }
   }
 
   window.addEventListener('load', async () => {
@@ -131,10 +162,13 @@
       return;
     }
 
+    // The Requests page opens by itself, from the link in the address.
+    if (view === 'requests') return;
+
     await waitFor(() => $('[data-open]'));
     if (view === 'profiles') return;
 
-    if (view === 'bulk' || view === 'users') {
+    if (['bulk', 'people', 'person'].includes(view)) {
       await navigation();
       return;
     }

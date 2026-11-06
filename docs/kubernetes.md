@@ -5,9 +5,10 @@ sandbox is a **`Profile`** object, and an **operator** keeps everything the
 sandbox needs in step with it: its VS Code pod, its proxy, its DNS server,
 the network policies that keep it in. An **admin UI**, with sign-in by
 email, password and an authenticator app, lets you create and manage
-profiles without `kubectl` ([Admin UI and API](admin.md)). The operator
-and the admin UI are one small Deployment, from the `hardcode-admin`
-image.
+profiles without `kubectl` ([Admin UI and API](admin.md)), and lets the
+people who use them sign in too: a member sees and manages only their own
+profiles, and asks for what their sandbox should reach. The operator and
+the admin UI are one small Deployment, from the `hardcode-admin` image.
 
 ```
 kind: Profile                         what the operator builds from it
@@ -76,15 +77,18 @@ spec:                                 team-a-squid              Deployment + Ser
 
 4. **Sign in** with the first admin's email and password, and enrol an
    authenticator app as the page asks ([Signing in](admin.md#signing-in)).
-   The chart's admin is used only while there are no admins; after that,
-   admins are managed in the UI.
+   The chart's admin is used only while there are no accounts; after that,
+   everyone is added on the UI's **People** page.
 
 5. **Create a profile**: **＋ New profile** in the admin UI
    ([Profiles](admin.md#profiles)), a `Profile` object applied with
    `kubectl` ([below](#the-profile-resource)), or `profiles:` in the
    chart's values. The operator brings it up within seconds.
 
-6. **Give its user VS Code**: see [Reaching VS Code](#reaching-vs-code).
+6. **Give its user VS Code**: add them as a member on the **People** page
+   and make them the profile's owner (its **Settings** tab); they sign in
+   and open VS Code themselves. Or hand them its address: see
+   [Reaching VS Code](#reaching-vs-code).
 
 ## Reaching VS Code
 
@@ -115,6 +119,9 @@ then open `http://localhost:8000/?tkn=<token>`.
 | stop a sandbox, keeping its volumes | **■ Suspend** (and **▶ Resume**) | `spec.suspended: true` |
 | replace VS Code's token | **New token…** on the **Access** tab | `POST /api/profiles/{name}/token` |
 | delete a sandbox and its volumes | **Delete profile** on the **Settings** tab | `kubectl delete profile <name>` |
+| let someone sign in | **＋ Add person** on **People** | `POST /api/users` |
+| give a sandbox to a member | **Owner** on the **Settings** tab | `spec.owner` |
+| decide what a member asked for | **Approve** or **Deny** on **Requests** | `POST /api/requests/{id}/approve` |
 
 Allowlist changes are live within seconds: the operator rolls the
 profile's proxy and DNS five seconds after the profile's last change, so
@@ -154,6 +161,17 @@ On a cluster, also:
   `profileDefaults.networkPolicy.squidEgressExcept` keeps the proxy away
   from private, link-local and loopback addresses; relax it only for an
   internal registry, and narrow `internalRanges` to match.
+- **Give members the rights they need, no more.** A member's
+  allowlist rights start at *only an admin changes it*; *ask* has an admin
+  approve each entry, and read-write entries, ssh tunnels and names on
+  your network each need their own tick ([People](admin.md#people)). A
+  member can switch languages and tools on, which opens the entries
+  HardCode provides for them: Claude Code's and Codex's include
+  read-write ones for their own services.
+- **Give the admins' emails a real address.** With `admin.smtp`, every
+  admin is emailed about each request, with a link that only opens the
+  portal; set `admin.url` (or the admin's Ingress) so the link goes to
+  the right place.
 - **Names on your network are off.** A profile's *On your network* names
   are ignored until the chart sets `profileDefaults.lan.enabled: true`;
   a profile can't switch it on. When it is on, each name in use gets one
@@ -174,6 +192,10 @@ The [security model](security.md#not-covered) lists every limit.
 | `admin.image.repository`, `.tag`, `.pullPolicy` | `hardcode-admin`, `latest`, `IfNotPresent` (a released chart: the release's image on GHCR) | the operator/admin image |
 | `admin.email`, `admin.password` | empty | the first admin (12+ character password). Either both, or `admin.existingSecret` |
 | `admin.existingSecret` | empty | a Secret with keys `email` and `password` instead of the two above |
+| `admin.url` | empty: the Ingress's host, when `admin.ingress` is on | the admin UI's address as people open it, for the links in the admins' emails |
+| `admin.smtp.host`, `.port`, `.tls` | empty (no emails), empty (587, or 465 with `tls`), `starttls` | the SMTP server the admins are emailed through about members' requests; `tls` is `starttls`, `tls` (from the start) or `none` |
+| `admin.smtp.from` | empty | the address the emails come from; needed with `admin.smtp.host` |
+| `admin.smtp.username`, `.password`, `.existingSecret` | empty | the server's login, when it wants one: both, kept in a Secret the chart makes, or a Secret with keys `username` and `password` |
 | `admin.ui.enabled` | `true` | serve the web UI and API; the operator runs regardless |
 | `admin.service.type`, `.port` | `ClusterIP`, `80` | |
 | `admin.ingress.enabled`, `.className`, `.annotations`, `.host`, `.tls` | off | an Ingress for the admin UI; put TLS on it |
@@ -194,7 +216,7 @@ The [security model](security.md#not-covered) lists every limit.
 | `profileDefaults.internalRanges`, `.clientRanges` | empty (squid's defaults) | address ranges an allowlisted name must never resolve to (squid refuses the request); who may use a profile's proxy. Space-separated; narrow the first for a registry on an internal address, widen the second for an unusual pod network |
 | `profileDefaults.lan.enabled`, `.lan.clusterRanges` | `false`, empty | whether profiles' *On your network* names are used at all; the cluster's own pod and service ranges, which they may not point into (until they're listed, every pin is ignored) |
 | `profileDefaults.ingressClassName`, `.ingressAnnotations`, `.ingressTLSSecret` | empty | the Ingress a profile with `vscodeHost` gets |
-| `profiles[]` | `[]` | profiles to create with the chart: `name`, and optionally `allowlist` (default: the bundled `files/allowlist.txt`; `--set-file 'profiles[0].allowlist=template/allowlist.txt'` for the repository's), `languages` (empty: `profileDefaults.languages`), `extensions`, `image`, `vscodeHost`, `suspended`, `home`, `docker`, `resources`, `env`. The allowlist is the profile's own part, as it is: the operator adds the entries HardCode provides to the profile's languages, its own or the default |
+| `profiles[]` | `[]` | profiles to create with the chart: `name`, and optionally `allowlist` (default: the bundled `files/allowlist.txt`; `--set-file 'profiles[0].allowlist=template/allowlist.txt'` for the repository's), `languages` (empty: `profileDefaults.languages`), `extensions`, `owner`, `image`, `vscodeHost`, `suspended`, `home`, `docker`, `resources`, `env`. The allowlist is the profile's own part, as it is: the operator adds the entries HardCode provides to the profile's languages, its own or the default |
 
 ### The `Profile` resource
 
@@ -219,6 +241,7 @@ spec:
 | `allowlist` | empty (the admin UI starts new profiles from the template) | the profile's own allowlist: its own entries, and an `off <entry>` line for each provided entry it switches off ([format](allowlist.md#entry-format)). The operator adds the entries HardCode provides |
 | `languages` | `profileDefaults.languages`, or all of them | the languages and tools the profile is built around: `python`, `node`, `java`, `android`, `dotnet`, `go`, `rust`, `cpp`, `ruby`, `perl`, `build_essentials`, `docker`, `kubernetes`, `claude_cli`, `codex_cli` (an empty list: none). They decide the VS Code container's extensions and the allowlist entries HardCode provides. See [below](#languages-on-kubernetes) |
 | `extensions` | `[]` | VS Code extensions of the profile's own (`publisher.name`, up to 100), kept installed besides those every VS Code container has and those of its languages; a change is installed or removed in the running container, without a restart; only publishers with a domain the Marketplace has verified |
+| `owner` | empty | the email of the admin UI account the profile belongs to: that member sees and manages it there. Empty: only admins see it. The operator doesn't use it |
 | `packages` | `[]` | Ubuntu packages of the profile's own (up to 200). The VS Code container installs them through its proxy each time it starts, which makes starting slower; a change restarts it. For more than packages, use `image` |
 | `image`, `squidImage`, `docker.image`, `coredns.image`, `imagePullPolicy`, `imagePullSecrets` | `profileDefaults` | images |
 | `suspended` | `false` | scale the VS Code container, squid and CoreDNS to 0; volumes stay |
@@ -245,7 +268,8 @@ admin shows `Deleting` while Kubernetes removes a deleted profile),
 `allowlist changes apply a few seconds after the last one`), `observedGeneration`,
 `dnsClusterIP`, `proxyURL`, `vscodeService`, `tokenSecret` and
 `lastReconciled`. `kubectl get profiles` (short name `hcp`) shows the
-phase, image, whether it is suspended, the DNS ClusterIP and its age.
+phase, the owner, the image, whether it is suspended, the DNS ClusterIP
+and its age.
 
 ### Languages on Kubernetes
 

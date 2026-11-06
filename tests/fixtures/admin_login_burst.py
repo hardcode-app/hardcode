@@ -20,14 +20,14 @@ from pathlib import Path
 checkout = Path(sys.argv[1])
 sys.path.insert(0, str(checkout / "admin"))
 
-from hardcode_admin.auth import Users  # noqa: E402
+from hardcode_admin.auth import ADMIN, Users  # noqa: E402
 from hardcode_admin.web import create_app  # noqa: E402
 from tests.helpers import FakeK8s, MemoryStore  # noqa: E402
 
 SIGN_INS = 8
 
 users = Users(MemoryStore())
-users.add("root@example.com", "bootstrap-password")
+users.add("root@example.com", "bootstrap-password", ADMIN)
 
 app = create_app(
     FakeK8s(),

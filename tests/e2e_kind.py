@@ -4,7 +4,8 @@ End to end on a local kind cluster.
 
 Installs the chart with the admin image built from this checkout, signs in
 through the API (password and TOTP), creates profiles through it and checks
-that the operator builds them. The VS Code image isn't loaded (it is 12 GB),
+that the operator builds them, and that a member sees only their own and
+asks for an entry an admin then approves. The VS Code image isn't loaded (it is 12 GB),
 so vscode pods stay Pending, but squid and CoreDNS come up for real, and a
 small probe pod in a VS Code container's network position checks that the
 NetworkPolicies are enforced (kind's own network plugin enforces them).
@@ -47,6 +48,8 @@ PROBE_IMAGE = "hardcode-probe:test"
 
 ADMIN_EMAIL = "admin@example.com"
 ADMIN_PASSWORD = "e2e-bootstrap-password"
+MEMBER_EMAIL = "member@example.com"
+MEMBER_PASSWORD = "e2e-member-password"
 API_PORT = 18081
 API = f"http://127.0.0.1:{API_PORT}"
 
@@ -275,19 +278,22 @@ def install_chart(suite: Suite, kubectl: Kubectl) -> None:
     suite.require("the admin is running", rolled_out.ok, rolled_out.text)
 
 
-def sign_in(suite: Suite, kubectl: Kubectl, api: AdminApi) -> None:
+def sign_in(
+    suite: Suite, kubectl: Kubectl, api: AdminApi, email: str = ADMIN_EMAIL, password: str = ADMIN_PASSWORD
+) -> None:
     """
-    Sign in as the bootstrap admin: the password first, then enrol in TOTP
-    with the secret the admin stored, as an authenticator app would.
+    Sign in as *email* (the bootstrap admin, unless said otherwise): the
+    password first, then enrol in TOTP with the secret the admin stored, as
+    an authenticator app would.
     """
-    suite.section("signing in (password + TOTP)")
+    suite.section(f"signing in as {email} (password + TOTP)")
     suite.require("the admin answers through the port-forward", harness.wait_until(api.healthy, timeout=30))
 
-    reply = api.call("POST", "/api/login", {"email": ADMIN_EMAIL, "password": ADMIN_PASSWORD})
+    reply = api.call("POST", "/api/login", {"email": email, "password": password})
     suite.require("the password is accepted and enrolment is next", reply.get("next") == "enrol", str(reply))
 
-    users = kubectl.field("secret/hardcode-admin-users", r"{.data.users\.json}")
-    secret = json.loads(base64.b64decode(users))[0]["totpSecret"]
+    users = json.loads(base64.b64decode(kubectl.field("secret/hardcode-admin-users", r"{.data.users\.json}")))
+    secret = next(user["totpSecret"] for user in users if user["email"] == email)
 
     # The admin's own TOTP code, imported here because this file first runs
     # outside the build image, where only the standard library is assumed.
@@ -416,6 +422,53 @@ def check_profiles_through_api(suite: Suite, kubectl: Kubectl, api: AdminApi) ->
     suite.check("clearing the host removes the Ingress", removed)
 
 
+def check_members(suite: Suite, kubectl: Kubectl, api: AdminApi) -> None:
+    """
+    A member, given team-b: they see it and nothing else, and an entry they
+    ask for waits in the requests Secret until the admin approves it.
+    """
+    rights = {"profiles": 1, "allowlist": "ask", "rw": False, "ssh": False, "lan": False}
+    reply = api.call("POST", "/api/users", {"email": MEMBER_EMAIL, "password": MEMBER_PASSWORD, "rights": rights})
+    suite.require("the admin adds a member", reply.get("ok") is True, str(reply))
+
+    reply = api.call("PATCH", "/api/profiles/team-b", {"owner": MEMBER_EMAIL})
+    suite.require("and gives them team-b", reply.get("owner") == MEMBER_EMAIL, str(reply))
+
+    member = AdminApi()
+    sign_in(suite, kubectl, member, MEMBER_EMAIL, MEMBER_PASSWORD)
+
+    suite.section("a member's profiles and requests")
+    names = [profile["name"] for profile in member.call("GET", "/api/profiles")["reply"]]
+    suite.check("the member sees team-b and nothing else", names == ["team-b"], str(names))
+    suite.check(
+        "another's profile isn't there for them",
+        member.call("GET", "/api/profiles/e2e").get("error") == "no profile 'e2e'",
+    )
+
+    body = {"op": "add", "entry": "docs.example.com", "reason": "e2e"}
+    reply = member.call("POST", "/api/profiles/team-b/allowlist", body)
+    suite.require("an entry the member asks for becomes a request", reply.get("requested") is True, str(reply))
+    suite.check(
+        "...kept in the requests Secret",
+        kubectl.exists("secret/hardcode-admin-requests"),
+    )
+    suite.check(
+        "...and not in the profile yet",
+        "docs.example.com" not in kubectl.field("profile/team-b", "{.spec.allowlist}"),
+    )
+
+    request_id = reply["request"]["id"]
+    reply = api.call("POST", f"/api/requests/{request_id}/approve", {})
+    suite.check("the admin approves it", reply.get("changed") is True, str(reply))
+    suite.check(
+        "...and the entry is in the profile",
+        "docs.example.com" in kubectl.field("profile/team-b", "{.spec.allowlist}"),
+    )
+
+    states = [request["state"] for request in member.call("GET", "/api/requests")["reply"]]
+    suite.check("the member sees it approved", states == ["approved"], str(states))
+
+
 def check_policies_enforced(suite: Suite, kubectl: Kubectl, docker: Docker) -> None:
     """
     A pod in a VS Code container's network position reaches its profile's squid and
@@ -537,6 +590,7 @@ def run_checks(suite: Suite) -> None:
             sign_in(suite, kubectl, api)
             check_reconciled(suite, kubectl)
             check_profiles_through_api(suite, kubectl, api)
+            check_members(suite, kubectl, api)
             check_policies_enforced(suite, kubectl, docker)
             check_suspend_and_delete(suite, kubectl, api)
 

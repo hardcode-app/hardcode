@@ -117,8 +117,8 @@ allowlist entry by entry, container logs and the console.
 ## Kubernetes
 
 For a team, the Helm chart installs an operator that turns `Profile`
-resources into sandboxes, and an admin UI (sign-in with TOTP) to manage
-them:
+resources into sandboxes, and an admin UI (sign-in with TOTP) where admins
+manage them, and members work on their own and ask for what they need:
 
 ```sh
 helm install hardcode oci://ghcr.io/hardcode-app/charts/hardcode --version <version> \

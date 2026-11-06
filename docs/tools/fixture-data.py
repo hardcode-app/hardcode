@@ -19,7 +19,7 @@ from types import SimpleNamespace
 ROOT = Path(__file__).resolve().parents[2]
 sys.path[:0] = [str(ROOT / "cli"), str(ROOT / "admin")]
 
-from hardcode_admin import manifests, totp  # noqa: E402
+from hardcode_admin import auth, manifests, totp  # noqa: E402
 from hardcode_cli import allowlist, blocked, devices, dockerfile, langs  # noqa: E402
 
 # A few refusals of each kind: repeated URLs, an upload, refused tunnels.
@@ -51,10 +51,76 @@ DEFAULTS = {
 TOKEN = "k3Zb7Qp1xJ9vL2mN8rT4wY6aC0eF5gH"
 TOTP_SECRET = "JBSWY3DPEHPK3PXPJBSWY3DPEHPK3PXP"
 
-ADMINS = [
-    {"email": "you@example.com", "totpEnrolled": True, "createdAt": "2026-06-01T09:00:00Z"},
-    {"email": "sam@example.com", "totpEnrolled": True, "createdAt": "2026-08-14T13:30:00Z"},
-    {"email": "new.admin@example.com", "totpEnrolled": False, "createdAt": "2026-10-07T16:45:00Z"},
+# The people: two admins, a member who asks for entries (read-write ones
+# too) and owns team-a, and a newer member whose allowlist is the admins'.
+MEMBER = "priya@example.com"
+MEMBER_RIGHTS = {"profiles": 2, "allowlist": "ask", "rw": True, "ssh": False, "lan": False}
+PEOPLE = [
+    {
+        "email": "you@example.com",
+        "role": "admin",
+        "rights": auth.RIGHTS,
+        "profiles": 0,
+        "totpEnrolled": True,
+        "createdAt": "2026-06-01T09:00:00Z",
+    },
+    {
+        "email": "sam@example.com",
+        "role": "admin",
+        "rights": auth.RIGHTS,
+        "profiles": 0,
+        "totpEnrolled": True,
+        "createdAt": "2026-08-14T13:30:00Z",
+    },
+    {
+        "email": MEMBER,
+        "role": "member",
+        "rights": MEMBER_RIGHTS,
+        "profiles": 1,
+        "totpEnrolled": True,
+        "createdAt": "2026-09-12T07:55:00Z",
+    },
+    {
+        "email": "lee@example.com",
+        "role": "member",
+        "rights": {**auth.RIGHTS, "profiles": 1},
+        "profiles": 1,
+        "totpEnrolled": False,
+        "createdAt": "2026-10-07T16:45:00Z",
+    },
+]
+
+
+def request(number: int, entry: str, access: str, reason: str, state: str = "pending", by: str = "") -> dict:
+    """
+    One of the member's requests for team-a, as GET /api/requests answers
+    with it: waiting, or decided by *by*.
+    """
+    return {
+        "id": f"r{number}Xk2pQ",
+        "profile": "team-a",
+        "by": MEMBER,
+        "kind": "entry",
+        "op": "add",
+        "entry": entry,
+        "flag": access,
+        "access": access,
+        "address": "",
+        "reason": reason,
+        "createdAt": f"2026-10-0{number}T10:15:00+00:00",
+        "state": state,
+        "decidedBy": by,
+        "decidedAt": f"2026-10-0{number}T11:02:00+00:00" if by else "",
+        "profileGone": False,
+        "notTheirs": False,
+    }
+
+
+REQUESTS = [
+    request(8, "pkg.go.dev", "", "the Go module docs"),
+    request(7, "github.com/ourcompany/infra", "rw", "we push the deploy scripts there"),
+    request(5, "docs.python.org", "", "the standard library's docs", "approved", "you@example.com"),
+    request(3, "pastebin.com", "", "", "denied", "sam@example.com"),
 ]
 
 
@@ -105,6 +171,7 @@ def summarise(obj: dict) -> dict:
         "rw": sum(1 for entry in enabled if entry.flag == "rw"),
         "ssh": sum(1 for entry in enabled if entry.flag == "ssh"),
         "vscodeHost": spec["vscodeHost"],
+        "owner": obj["spec"].get("owner", ""),
     }
 
 
@@ -237,6 +304,7 @@ def main(stage: Path) -> None:
             "extensions": ["eamodio.gitlens", "golang.go"],
             "vscodeHost": "team-a.code.example.com",
             "home": {"size": "50Gi"},
+            "owner": MEMBER,
         },
         "Ready",
         "",
@@ -259,6 +327,7 @@ def main(stage: Path) -> None:
             "languages": research_languages,
             "suspended": True,
             "docker": {"enabled": False},
+            "owner": "lee@example.com",
         },
         "Suspended",
         "vscode scaled to 0",
@@ -290,6 +359,7 @@ def main(stage: Path) -> None:
             "portForward": "kubectl -n sandbox port-forward svc/team-a-vscode 8000:8000",
             "host": "team-a.code.example.com",
         },
+        "requests": [item for item in REQUESTS if item["state"] == "pending"],
     }
     catalogue = [
         {key: value for key, value in langs.describe(lang, False).items() if key != "enabled"}
@@ -305,7 +375,9 @@ def main(stage: Path) -> None:
         "catalogue": catalogue,
         "blocked": blocked_items,
         "template": template,
-        "users": ADMINS,
+        "users": PEOPLE,
+        "requests": REQUESTS,
+        "member": {"email": MEMBER, "rights": MEMBER_RIGHTS},
         "otpauth": otpauth,
         "secret": TOTP_SECRET,
         "qr": qr,

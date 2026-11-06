@@ -1,12 +1,19 @@
 /**
  * The admin UI's page.
  *
- * It talks to the admin API (web.py) with fetch, and shows four views: the
+ * It talks to the admin API (web.py) with fetch, and shows five views: the
  * profiles, one profile (its languages and tools first, then its
- * extensions, allowlist, blocked traffic, access and settings), every
- * profile's allowlist at once, and the admins. Each view is a function
- * returning its HTML and the buttons for the header; `render()` puts the
- * current one on the page and `bind()` wires up its controls.
+ * extensions, allowlist, blocked traffic, access and settings), the
+ * members' requests, every profile's allowlist at once, and the people.
+ * Each view is a function returning its HTML and the buttons for the
+ * header; `render()` puts the current one on the page and `bind()` wires
+ * up its controls.
+ *
+ * Who is signed in decides what there is: an admin sees everything; a
+ * member sees only the profiles they own, and the allowlist's controls as
+ * their rights have them (none, ask or edit, and rw, ssh and names on the
+ * network). The API checks the same; the page only leaves out what would
+ * be refused.
  *
  * A profile is built around languages and tools: each opens its block of
  * the allowlist and brings its VS Code extensions, which the running
@@ -34,7 +41,14 @@ const state = {
   catalogue: [],
   blocked: [],
   since: '30m',
+  // The accounts (People), which an admin's page also reads for the owner a
+  // profile can be given.
   users: [],
+  // The members' requests: every one for an admin, a member's own for them.
+  requests: [],
+  // The request an admin's email linked to (#request/<id>), marked on the
+  // Requests page.
+  highlight: '',
   query: '',
   bulkEntry: '',
   bulkFlag: '',
@@ -50,7 +64,17 @@ const state = {
   poller: null,
 };
 
-const TITLES = { profiles: 'Profiles', bulk: 'All allowlists', users: 'Admins', profile: 'Profile' };
+const TITLES = { profiles: 'Profiles', requests: 'Requests', bulk: 'All allowlists', users: 'People', profile: 'Profile' };
+
+// A member's allowlist rights, in the People page's words.
+const ALLOWLIST_RIGHTS = {
+  none: 'only an admin changes the allowlist',
+  ask: 'asks for entries; an admin approves each',
+  edit: 'changes the allowlist at once',
+};
+
+// An entry's access, in words.
+const ACCESS_WORDS = { '': 'read-only', rw: 'read-write', ssh: 'ssh tunnel' };
 const TAB_TITLES = {
   languages: 'Languages / Tools',
   extensions: 'Extensions',
@@ -139,6 +163,51 @@ function languageName(key) {
 function languageKind(key) {
   const lang = state.catalogue.find((entry) => entry.key === key);
   return lang ? lang.kind : 'language';
+}
+
+/** Whether an admin is signed in; a member otherwise. */
+function isAdmin() {
+  return Boolean(state.me && state.me.role === 'admin');
+}
+
+/**
+ * What the signed-in account may do with a profile's allowlist: "edit" for
+ * an admin, and a member's own right ("none", "ask" or "edit").
+ */
+function allowlistRight() {
+  return isAdmin() ? 'edit' : state.me.rights.allowlist;
+}
+
+/**
+ * Whether the signed-in account may add what *access* names: "" a
+ * read-only entry, "rw", "ssh", or "lan" (a name on the network).
+ */
+function mayOpen(access) {
+  if (isAdmin()) {
+    return true;
+  }
+  if (allowlistRight() === 'none') {
+    return false;
+  }
+
+  return access === '' || state.me.rights[access] === true;
+}
+
+/** Whether the Requests page is there for the signed-in account: an admin's, or a member's who asks. */
+function hasRequests() {
+  return isAdmin() || allowlistRight() === 'ask';
+}
+
+/** How many requests wait for an admin. */
+function pendingCount() {
+  return state.requests.filter((request) => request.state === 'pending').length;
+}
+
+/** The count of requests waiting, beside Requests in the navigation. */
+function showRequestCount() {
+  const count = $('#nav-requests');
+  count.textContent = String(pendingCount());
+  count.classList.toggle('hidden', !pendingCount());
 }
 
 // ---------------------------------------------------------------------------
@@ -242,7 +311,9 @@ function render() {
     button.classList.toggle('active', current);
   });
 
-  const views = { profiles: profilesView, bulk: bulkView, users: usersView, profile: profileView };
+  showRequestCount();
+
+  const views = { profiles: profilesView, requests: requestsView, bulk: bulkView, users: peopleView, profile: profileView };
   const { html, actions } = views[state.view]();
   $('#view').innerHTML = html;
   $('#top-actions').innerHTML = actions || '';
@@ -303,15 +374,40 @@ function languageBadges(keys) {
   return `<div class="language-badges">${badges}</div>`;
 }
 
-/** The list of profiles, with the search box and the button that makes a new one. */
+/**
+ * The header's New profile button: always an admin's; a member's while
+ * they have fewer profiles than their rights allow, and otherwise greyed
+ * out, saying why.
+ */
+function newProfileButton() {
+  if (isAdmin()) {
+    return '<button class="btn primary" data-act="new-profile">＋ New profile</button>';
+  }
+
+  // Those being deleted are going away, and don't count, as the API has it.
+  const limit = state.me.rights.profiles;
+  const owned = state.profiles.filter((profile) => profile.phase !== 'Deleting').length;
+  if (owned < limit) {
+    return '<button class="btn primary" data-act="new-profile">＋ New profile</button>';
+  }
+
+  const why = limit ? `Your account may have ${limit} profiles, and has them` : "Your account can't create profiles: an admin gives you yours";
+  return `<button class="btn primary" disabled title="${esc(why)}">＋ New profile</button>`;
+}
+
+/** The list of profiles, with the search box and the button that makes a new one; an admin also sees whose each is, under its name. */
 function profilesView() {
   const query = state.query.toLowerCase();
-  const matching = state.profiles.filter((profile) => !query || profile.name.includes(query) || (profile.image || '').includes(query));
+  const matching = state.profiles.filter(
+    (profile) => !query || profile.name.includes(query) || (profile.image || '').includes(query) || (profile.owner || '').includes(query),
+  );
+
+  const owner = (profile) => (isAdmin() && profile.owner ? `<div class="muted small">${esc(profile.owner)}</div>` : '');
 
   const rows = matching
     .map(
       (profile) => `<tr class="clickable" data-open="${esc(profile.name)}">
-    <td class="mono"><b>${esc(profile.name)}</b></td><td>${phasePill(profile)}<div class="muted small">${esc(profile.message)}</div></td>
+    <td><b class="mono">${esc(profile.name)}</b>${owner(profile)}</td><td>${phasePill(profile)}<div class="muted small">${esc(profile.message)}</div></td>
     <td>${languageBadges(profile.languages)}</td>
     <td class="mono small nowrap">${esc(profile.image)}</td><td class="nowrap">${profile.entries} <span class="muted small">(${profile.rw} rw · ${profile.ssh} ssh)</span></td>
     <td class="muted small nowrap">${esc((profile.createdAt || '').slice(0, 10))}</td></tr>`,
@@ -319,8 +415,10 @@ function profilesView() {
     .join('');
 
   const ready = state.profiles.filter((profile) => profile.phase === 'Ready').length;
-  const empty =
-    '<tr><td colspan="6" class="empty">No profiles yet. Create one: each is a complete sandbox (VS Code, Docker, proxy, DNS) built around the languages and tools you choose, with its own allowlist.</td></tr>';
+  let empty = 'No profiles yet. Create one: each is a complete sandbox (VS Code, Docker, proxy, DNS) built around the languages and tools you choose, with its own allowlist.';
+  if (!isAdmin() && !state.me.rights.profiles) {
+    empty = 'No profiles yet. An admin gives you yours: ask one.';
+  }
 
   const toolbar =
     `<div class="toolbar"><input type="text" id="q" placeholder="Search profiles…" value="${esc(state.query)}">` +
@@ -328,11 +426,11 @@ function profilesView() {
     `<button class="btn small" data-act="refresh">Refresh</button></div>`;
 
   return {
-    actions: `<button class="btn primary" data-act="new-profile">＋ New profile</button>`,
+    actions: newProfileButton(),
     html: `
       ${toolbar}
       <div class="card" style="padding:0"><table><thead><tr><th>Name</th><th>Status</th><th>Languages</th><th>Image</th><th>Allowlist</th><th>Created</th></tr></thead>
-      <tbody>${rows || empty}</tbody></table></div>`,
+      <tbody>${rows || `<tr><td colspan="6" class="empty">${esc(empty)}</td></tr>`}</tbody></table></div>`,
   };
 }
 
@@ -515,15 +613,115 @@ function allowlistSectionTitle(entry) {
 }
 
 /**
- * The allowlist tab: the add form, and every entry by section: the
- * profile's own, which one just added joins, then those HardCode provides
- * (every profile's, then the languages' and tools').
+ * The allowlist form's Access choices: read-only always, read-write and
+ * ssh where the signed-in account may add them.
+ */
+function accessOptions() {
+  let options = '<option value="">read-only (GET, clone/pull)</option>';
+  if (mayOpen('rw')) {
+    options += '<option value="rw">read-write (uploads, push)</option>';
+  }
+  if (mayOpen('ssh')) {
+    options += `<option value="ssh" ${state.prefillFlag === 'ssh' ? 'selected' : ''}>ssh tunnel</option>`;
+  }
+
+  return options;
+}
+
+/**
+ * The allowlist tab's form: an admin's adds an entry; a member's adds one
+ * or asks for it, as their rights say, with what an admin is told why. A
+ * member whose allowlist is an admin's has a note in its place.
+ */
+function allowlistForm() {
+  const right = allowlistRight();
+  if (right === 'none') {
+    return '<div class="callout info">An admin decides what this profile may reach: ask one when it needs something more. <b>Blocked traffic</b> shows what it was refused.</div>';
+  }
+
+  const asking = right === 'ask';
+  const reason = asking
+    ? '<div class="field grow"><label>Why (for the admin)</label><input type="text" id="al-reason" placeholder="the docs for our build tool"></div>'
+    : '';
+
+  let note =
+    'The entries HardCode provides (every profile\'s, and those of the languages and tools that are on) can be switched off but not deleted: one switched off stays off through updates, and one an update adds arrives switched on. ' +
+    'The running proxy is given changes a few seconds after the last one (squid and CoreDNS restart with the new rules, and the profile is <i>Pending</i> until they have).';
+  if (asking) {
+    note =
+      'What you ask for waits until an admin approves it; switching an entry off, or deleting one of the profile\'s own, happens at once. ' +
+      'The entries HardCode provides can be switched off but not deleted.';
+  }
+  if (isAdmin()) {
+    note += ' To change many profiles at once use <b>All allowlists</b>. <button class="btn ghost small" data-act="al-raw">Edit as text…</button>';
+  }
+
+  return `<div class="card" style="margin-bottom:14px"><div class="form-row">
+        <div class="field grow"><label>Entry</label><input type="text" class="mono" id="al-entry" placeholder="example.com · .example.com · github.com/team · host:22 (ssh)" value="${esc(state.prefill)}"></div>
+        <div class="field"><label>Access</label><select id="al-flag">${accessOptions()}</select></div>
+        ${reason}<button class="btn primary" data-act="al-add">${asking ? 'Ask' : 'Add'}</button></div>
+        <div class="form-error" id="al-error"></div>
+        <p class="muted small" style="margin:0">${note}</p></div>`;
+}
+
+/** What a request asks for, in a few words: the entry and its access, or a name and its address. */
+function requestedChange(request) {
+  if (request.kind === 'lan') {
+    return `<span class="mono">${esc(request.entry)}</span> <span class="muted small">to reach</span> <span class="mono">${esc(request.address)}</span>`;
+  }
+
+  const verb = request.op === 'enable' ? '<span class="muted small">switched on:</span> ' : '';
+  return `${verb}<span class="mono">${esc(request.entry)}</span> ${accessBadge(request.access)}`;
+}
+
+/**
+ * The requests waiting for this profile, above its entries: an admin
+ * approves or denies each here too; a member sees theirs waiting. Nothing
+ * when none wait.
+ */
+function waitingRequestsCard(profile) {
+  if (!profile.requests.length) {
+    return '';
+  }
+
+  const rows = profile.requests
+    .map((request) => {
+      const decide = isAdmin() ? requestButtons(request) : '<span class="muted small">waiting for an admin</span>';
+      const who = isAdmin() ? `<td class="small">${esc(request.by)}</td>` : '';
+
+      return `<tr><td>${requestedChange(request)}</td>${who}<td class="muted small">${esc(request.reason)}</td><td class="actions">${decide}</td></tr>`;
+    })
+    .join('');
+
+  return `<div class="card" style="margin-bottom:14px;padding:0"><table><thead><tr><th>Asked for</th>${isAdmin() ? '<th>By</th>' : ''}<th>Why</th><th></th></tr></thead><tbody>${rows}</tbody></table></div>`;
+}
+
+/** An admin's Approve and Deny buttons for a request; Deny alone, saying why, when its profile has gone or isn't theirs any more. */
+function requestButtons(request) {
+  const deny = `<button class="btn small" data-deny="${esc(request.id)}">Deny</button>`;
+  if (request.profileGone) {
+    return `<span class="muted small">its profile was deleted</span> ${deny}`;
+  }
+  if (request.notTheirs) {
+    return `<span class="muted small">the profile isn't theirs any more</span> ${deny}`;
+  }
+
+  return `<button class="btn primary small" data-approve="${esc(request.id)}">Approve</button> ${deny}`;
+}
+
+/**
+ * The allowlist tab: the add form, the requests waiting, and every entry
+ * by section: the profile's own, which one just added joins, then those
+ * HardCode provides (every profile's, then the languages' and tools').
  *
  * A provided entry carries a badge where the delete button would be: it
  * comes with every profile, or with its language (Languages / Tools). It
- * can still be switched off, and stays off through updates.
+ * can still be switched off, and stays off through updates. A member whose
+ * allowlist is an admin's sees the entries without their switches and
+ * delete buttons.
  */
 function allowlistTab(profile) {
+  const readOnly = allowlistRight() === 'none';
   let rows = '';
   let lastSection = null;
 
@@ -544,7 +742,7 @@ function allowlistTab(profile) {
 
     // Where the delete button would be, a provided entry has a badge
     // instead, saying where it comes from.
-    let remove = `<button class="btn ghost small icon" data-remove="${name}" data-flag="${flag}" title="Delete">✕</button>`;
+    let remove = readOnly ? '' : `<button class="btn ghost small icon" data-remove="${name}" data-flag="${flag}" title="Delete">✕</button>`;
     if (entry.provided && entry.language) {
       const language = languageName(entry.language);
       const why = `Comes with ${language}: switch it off here, or the language off under Languages / Tools`;
@@ -554,9 +752,12 @@ function allowlistTab(profile) {
       remove = `<span class="badge language" title="${esc(why)}">every profile</span>`;
     }
 
+    // A member can't switch on what their rights don't let them add.
+    const disabled = readOnly || (!entry.enabled && !mayOpen(entry.flag)) ? 'disabled' : '';
+
     rows +=
       `<tr class="${entry.enabled ? '' : 'disabled'}">` +
-      `<td style="width:48px"><label class="switch"><input type="checkbox" data-toggle="${name}" data-flag="${flag}" ${checked}><span></span></label></td>` +
+      `<td style="width:48px"><label class="switch"><input type="checkbox" data-toggle="${name}" data-flag="${flag}" ${checked} ${disabled}><span></span></label></td>` +
       `<td class="entry mono">${name}</td>` +
       `<td class="nowrap"><span class="badge">${esc(entry.kind)}</span> ${accessBadge(entry.flag)}</td>` +
       `<td class="muted small">${esc(entry.comment)}</td>` +
@@ -564,12 +765,8 @@ function allowlistTab(profile) {
   }
 
   return `
-      <div class="card" style="margin-bottom:14px"><div class="form-row">
-        <div class="field grow"><label>Entry</label><input type="text" class="mono" id="al-entry" placeholder="example.com · .example.com · github.com/team · host:22 (ssh)" value="${esc(state.prefill)}"></div>
-        <div class="field"><label>Access</label><select id="al-flag"><option value="">read-only (GET, clone/pull)</option><option value="rw">read-write (uploads, push)</option><option value="ssh" ${state.prefillFlag === 'ssh' ? 'selected' : ''}>ssh tunnel</option></select></div>
-        <button class="btn primary" data-act="al-add">Add</button></div>
-        <div class="form-error" id="al-error"></div>
-        <p class="muted small" style="margin:0">The entries HardCode provides (every profile's, and those of the languages and tools that are on) can be switched off but not deleted: one switched off stays off through updates, and one an update adds arrives switched on. The running proxy is given changes a few seconds after the last one (squid and CoreDNS restart with the new rules, and the profile is <i>Pending</i> until they have). To change many profiles at once use <b>All allowlists</b>. <button class="btn ghost small" data-act="al-raw">Edit as text…</button></p></div>
+      ${allowlistForm()}
+      ${waitingRequestsCard(profile)}
       ${lanCard(profile)}
       <div class="card" style="padding:0"><table><thead><tr><th></th><th>Entry</th><th>Type / access</th><th>Note</th><th></th></tr></thead><tbody>${rows}</tbody></table></div>`;
 }
@@ -643,10 +840,13 @@ function lanCard(profile) {
           ? `<button class="btn small" data-lan-move="${esc(pin.name)}" data-address="${esc(pin.resolves[0])}">Move…</button> `
           : '';
 
+      const remove = allowlistRight() === 'none' ? '' : `<button class="btn ghost small icon" data-lan-remove="${esc(pin.name)}" title="Remove">✕</button>`;
+      const moveHere = mayOpen('lan') ? move : '';
+
       return (
         `<tr><td class="entry mono">${esc(pin.name)}</td><td class="mono">${esc(pin.address)}</td>` +
         `<td class="muted small">${esc(lanStatus(pin))}</td>` +
-        `<td class="actions">${move}<button class="btn ghost small icon" data-lan-remove="${esc(pin.name)}" title="Remove">✕</button></td></tr>`
+        `<td class="actions">${moveHere}${remove}</td></tr>`
       );
     })
     .join('');
@@ -659,12 +859,30 @@ function lanCard(profile) {
 
   return `<div class="card" id="lan-card" style="margin-bottom:14px"><h2>On your network</h2>${off}
       <p class="muted small">The proxy refuses names that point inside your own network. A name listed here may reach the address shown, and nothing else on your network.</p>
-      <div class="form-row">
+      ${lanForm()}
+      <table><thead><tr><th>Name</th><th>Address</th><th>State</th><th class="actions">${check}</th></tr></thead><tbody>${rows || empty}</tbody></table></div>`;
+}
+
+/**
+ * The On your network card's form, for an account that may let names
+ * reach the network: a member who asks can say why, and asks. Nothing
+ * for anyone else.
+ */
+function lanForm() {
+  if (!mayOpen('lan')) {
+    return '';
+  }
+
+  const asking = allowlistRight() === 'ask';
+  const reason = asking
+    ? '<div class="field grow"><label>Why (for the admin)</label><input type="text" id="lan-reason" placeholder="our git server"></div>'
+    : '';
+
+  return `<div class="form-row">
         <div class="field grow"><label>Name</label><input type="text" class="mono" id="lan-name" placeholder="gitlab.example.com" value="${esc(state.lanPrefill.name)}"></div>
         <div class="field"><label>Address</label><input type="text" class="mono" id="lan-address" placeholder="192.168.71.200" value="${esc(state.lanPrefill.address)}"></div>
-        <button class="btn" data-act="lan-add">Let it reach that address</button></div>
-      <div class="form-error" id="lan-error"></div>
-      <table><thead><tr><th>Name</th><th>Address</th><th>State</th><th class="actions">${check}</th></tr></thead><tbody>${rows || empty}</tbody></table></div>`;
+        ${reason}<button class="btn" data-act="lan-add">${asking ? 'Ask to let it reach that address' : 'Let it reach that address'}</button></div>
+      <div class="form-error" id="lan-error"></div>`;
 }
 
 // Why the proxy refused, when it said, as Blocked traffic shows it.
@@ -677,13 +895,16 @@ const REFUSED_BECAUSE = { 'internal-address': 'resolves to an internal address' 
  * it through.
  */
 function blockedActions(target) {
+  // A member who asks asks for them; one who can't, has no buttons.
+  const verb = allowlistRight() === 'ask' ? 'Ask for' : 'Allow';
+
   if (target.reason === 'internal-address') {
-    return `<button class="btn small" data-allow-lan="${esc(target.host)}">Allow on your network</button>`;
+    return mayOpen('lan') ? `<button class="btn small" data-allow-lan="${esc(target.host)}">${verb} on your network</button>` : '';
   }
 
   // "Allow URL" offers the URL's directory, without its scheme.
   const directory = target.url ? target.url.replace(/^https?:\/\//, '').replace(/\/[^/]*$/, '') : '';
-  const allowUrl = target.url ? `<button class="btn small" data-allow="${esc(directory)}">Allow URL</button>` : '';
+  const allowUrl = target.url && mayOpen('') ? `<button class="btn small" data-allow="${esc(directory)}">${verb} URL</button>` : '';
 
   let host = target.host;
   let flag = '';
@@ -692,7 +913,24 @@ function blockedActions(target) {
     flag = 'ssh';
   }
 
-  return `<button class="btn small" data-allow="${esc(host)}" data-flag="${esc(flag)}">Allow host</button>${allowUrl}`;
+  if (!mayOpen(flag)) {
+    return allowUrl;
+  }
+
+  return `<button class="btn small" data-allow="${esc(host)}" data-flag="${esc(flag)}">${verb} host</button>${allowUrl}`;
+}
+
+/** What the Blocked traffic tab's buttons do, in a line above its rows. */
+function blockedCallout() {
+  const right = allowlistRight();
+  if (right === 'none') {
+    return 'This is what the sandbox was refused. An admin decides what it may reach: tell one what it needs.';
+  }
+  if (right === 'ask') {
+    return '"Ask for host" and "Ask for URL" pre-fill the allowlist form; nothing is allowed until you ask there and an admin approves it.';
+  }
+
+  return '"Allow host" and "Allow URL" pre-fill the allowlist form; nothing is allowed until you add it there.';
 }
 
 /** The blocked-traffic tab: what the proxy and DNS filter refused, and why when it said. */
@@ -720,7 +958,7 @@ function blockedTab() {
     `<button class="btn small" data-act="refresh-blocked">Refresh</button></div>`;
 
   return `${toolbar}
-      <div class="callout info">"Allow host" and "Allow URL" pre-fill the allowlist form; nothing is allowed until you add it there.</div>
+      <div class="callout info">${esc(blockedCallout())}</div>
       <div class="card" style="padding:0"><table><thead><tr><th>What</th><th>Target</th><th>Count</th><th></th></tr></thead><tbody>${rows || empty}</tbody></table></div>`;
 }
 
@@ -759,15 +997,56 @@ function settingsTab(profile) {
   const spec = profile.spec;
   const effective = spec.effective;
 
+  const settings = isAdmin() ? adminSettings(profile) : memberSettings(profile);
+
   return `<div class="card"><h2>Settings</h2><div class="kv">
-      <div class="k">Image</div><div><input type="text" class="mono" id="st-image" value="${esc(spec.image || '')}" placeholder="${esc(effective.image)}" style="width:100%"></div>
-      <div class="k">VS Code host (Ingress)</div><div><input type="text" class="mono" id="st-host" value="${esc(spec.vscodeHost || '')}" placeholder="none: use port-forward" style="width:100%"></div>
-      <div class="k">Home volume</div><div><input type="text" class="mono" id="st-home" value="${esc((spec.home && spec.home.size) || '')}" placeholder="${esc(effective.home.size)}" style="width:120px"> <span class="muted small">(an existing volume is grown when its StorageClass allows; it can't shrink)</span></div>
-      <div class="k">Docker sidecar</div><div><label class="check"><input type="checkbox" id="st-docker" ${effective.docker.enabled ? 'checked' : ''}> enabled (privileged container)</label></div>
+      ${settings}
       <div class="k">Suspended</div><div><label class="check"><input type="checkbox" id="st-suspended" ${effective.suspended ? 'checked' : ''}> scale the VS Code container to 0 (keeps its volumes)</label></div>
       </div><div style="margin-top:14px"><button class="btn primary" data-act="save-settings" data-version="${esc(profile.version)}">Save</button></div></div>
       <div class="card" style="margin-top:14px"><h2>Status</h2><pre class="mono small" style="white-space:pre-wrap">${esc(JSON.stringify(profile.status, null, 2))}</pre></div>
       <div class="card" style="margin-top:14px;border-color:rgba(248,113,113,.35)"><h2>Delete profile</h2><p class="muted small">Removes the pods, services, policies, secrets and every volume (home directory included).</p><button class="btn danger" data-act="delete-profile">Delete ${esc(profile.name)}…</button></div>`;
+}
+
+/**
+ * The owner choice: nobody, or one of the accounts, with *selected* chosen.
+ * An owner who has no account (removed since, or the accounts couldn't be
+ * read) is there too, chosen, so the form says who it is and saving it
+ * leaves them as they are.
+ */
+function ownerOptions(selected) {
+  const nobody = `<option value="" ${selected ? '' : 'selected'}>nobody (admins only)</option>`;
+  const people = state.users
+    .map((user) => `<option value="${esc(user.email)}" ${user.email === selected ? 'selected' : ''}>${esc(user.email)}${user.role === 'admin' ? ' (admin)' : ''}</option>`)
+    .join('');
+
+  const known = state.users.some((user) => user.email === selected);
+  const gone = selected && !known ? `<option value="${esc(selected)}" selected>${esc(selected)} (no account)</option>` : '';
+
+  return nobody + gone + people;
+}
+
+/** An admin's settings of a profile: who owns it, its image, its host, its home volume and its Docker sidecar. */
+function adminSettings(profile) {
+  const spec = profile.spec;
+  const effective = spec.effective;
+
+  return `<div class="k">Owner</div><div><select id="st-owner">${ownerOptions(profile.owner)}</select> <span class="muted small">(they see and manage it in this portal)</span></div>
+      <div class="k">Image</div><div><input type="text" class="mono" id="st-image" value="${esc(spec.image || '')}" placeholder="${esc(effective.image)}" style="width:100%"></div>
+      <div class="k">VS Code host (Ingress)</div><div><input type="text" class="mono" id="st-host" value="${esc(spec.vscodeHost || '')}" placeholder="none: use port-forward" style="width:100%"></div>
+      <div class="k">Home volume</div><div><input type="text" class="mono" id="st-home" value="${esc((spec.home && spec.home.size) || '')}" placeholder="${esc(effective.home.size)}" style="width:120px"> <span class="muted small">(an existing volume is grown when its StorageClass allows; it can't shrink)</span></div>
+      <div class="k">Docker sidecar</div><div><label class="check"><input type="checkbox" id="st-docker" ${effective.docker.enabled ? 'checked' : ''}> enabled (privileged container)</label></div>`;
+}
+
+/** A member's view of the settings an admin decides, as they are. */
+function memberSettings(profile) {
+  const effective = profile.spec.effective;
+  const host = effective.vscodeHost || 'none: reached with a port-forward';
+
+  return `<div class="k">Image</div><div class="mono small">${esc(effective.image)}</div>
+      <div class="k">VS Code host</div><div class="mono small">${esc(host)}</div>
+      <div class="k">Home volume</div><div class="mono small">${esc(effective.home.size)}</div>
+      <div class="k">Docker sidecar</div><div class="small">${effective.docker.enabled ? 'on' : 'off'}</div>
+      <div class="k"></div><div class="muted small">An admin decides these.</div>`;
 }
 
 /** One profile: its tabs, and in the header its phase and what can be done with it. */
@@ -849,31 +1128,116 @@ function bulkView() {
   };
 }
 
-function usersView() {
+/** A request's state, in words: waiting, or who approved or denied it and when. */
+function requestState(request) {
+  if (request.state === 'pending') {
+    return '<span class="badge rw">waiting</span>';
+  }
+
+  const badge = request.state === 'approved' ? '<span class="badge ro">approved</span>' : '<span class="badge">denied</span>';
+  return `${badge} <span class="muted small">${esc(request.decidedBy)} · ${esc((request.decidedAt || '').slice(0, 10))}</span>`;
+}
+
+/**
+ * The members' requests: an admin's page has those waiting, each to
+ * approve or deny, then the latest decided; a member's has their own, with
+ * what became of each. The request an email linked to is marked.
+ */
+function requestsView() {
+  const waiting = state.requests.filter((request) => request.state === 'pending');
+  const decided = state.requests.filter((request) => request.state !== 'pending');
+
+  /** One request's row; *last* is its decision, or (waiting, for an admin) its buttons. */
+  const row = (request, last) => {
+    const marked = request.id === state.highlight ? 'highlight' : '';
+    const who = isAdmin() ? `<td class="small">${esc(request.by)}</td>` : '';
+
+    return (
+      `<tr class="${marked}" id="request-${esc(request.id)}"><td class="mono">${esc(request.profile)}</td>${who}` +
+      `<td>${requestedChange(request)}</td><td class="muted small">${esc(request.reason)}</td>` +
+      `<td class="muted small nowrap">${esc((request.createdAt || '').slice(0, 10))}</td><td class="actions">${last}</td></tr>`
+    );
+  };
+
+  const whoHead = isAdmin() ? '<th>By</th>' : '';
+  const head = `<thead><tr><th>Profile</th>${whoHead}<th>Asked for</th><th>Why</th><th>Asked</th><th></th></tr></thead>`;
+  const columns = isAdmin() ? 6 : 5;
+
+  const waitingRows = waiting.map((request) => row(request, isAdmin() ? requestButtons(request) : requestState(request))).join('');
+  const decidedRows = decided.map((request) => row(request, requestState(request))).join('');
+  const none = `<tr><td colspan="${columns}" class="empty">Nothing is waiting.</td></tr>`;
+
+  let callout = 'What you ask for in a profile\'s allowlist waits here until an admin approves or denies it.';
+  if (isAdmin()) {
+    callout = state.me.mail
+      ? 'Members ask for entries here. Every admin is emailed about each new request, with a link to it here.'
+      : 'Members ask for entries here. To have every admin emailed about each one too, give the chart an SMTP server (<code>admin.smtp</code>).';
+  }
+
+  const history = decided.length
+    ? `<div class="group-head"><h2>Decided</h2></div><div class="card" style="padding:0"><table>${head}<tbody>${decidedRows}</tbody></table></div>`
+    : '';
+
+  return {
+    html: `<div class="callout info">${callout}</div>
+      <div class="group-head"><h2>Waiting</h2><span class="muted small">${waiting.length}</span></div>
+      <div class="card" style="padding:0"><table>${head}<tbody>${waitingRows || none}</tbody></table></div>
+      ${history}`,
+  };
+}
+
+/** A person's rights, in a few words: an admin's are everything; a member's are listed. */
+function rightsSummary(person) {
+  if (person.role === 'admin') {
+    return '<span class="muted small">everything</span>';
+  }
+
+  const rights = person.rights;
+  const extras = [];
+  if (rights.allowlist !== 'none') {
+    if (rights.rw) {
+      extras.push('read-write');
+    }
+    if (rights.ssh) {
+      extras.push('ssh');
+    }
+    if (rights.lan) {
+      extras.push('your network');
+    }
+  }
+
+  const profiles = `${rights.profiles} ${rights.profiles === 1 ? 'profile' : 'profiles'} of their own`;
+  const also = extras.length ? `, with ${extras.join(', ')}` : '';
+  return `<span class="small">${esc(profiles)} · ${esc(ALLOWLIST_RIGHTS[rights.allowlist])}${esc(also)}</span>`;
+}
+
+/** The people: everyone who signs in here, with their role and rights, and how to add, change or remove one. */
+function peopleView() {
   const rows = state.users
     .map((user) => {
       const you = user.email === state.me.email ? ' <span class="badge">you</span>' : '';
+      const role = user.role === 'admin' ? '<span class="badge rw">admin</span>' : '<span class="badge">member</span>';
       const twoFactor = user.totpEnrolled ? '<span class="badge ro">enrolled</span>' : '<span class="badge rw">pending</span>';
 
       return (
-        `<tr><td>${esc(user.email)}${you}</td><td>${twoFactor}</td>` +
-        `<td class="muted small">${esc((user.createdAt || '').slice(0, 10))}</td>` +
-        `<td class="actions"><button class="btn small" data-reset-totp="${esc(user.email)}">Reset 2FA</button> ` +
+        `<tr><td>${esc(user.email)}${you}</td><td>${role}</td><td>${rightsSummary(user)}</td>` +
+        `<td>${esc(user.profiles)}</td><td>${twoFactor}</td>` +
+        `<td class="muted small nowrap">${esc((user.createdAt || '').slice(0, 10))}</td>` +
+        `<td class="actions"><button class="btn small" data-edit-user="${esc(user.email)}">Edit…</button> ` +
+        `<button class="btn small" data-reset-totp="${esc(user.email)}">Reset 2FA</button> ` +
         `<button class="btn ghost small icon" data-del-user="${esc(user.email)}" title="Remove">✕</button></td></tr>`
       );
     })
     .join('');
 
-  const form =
-    '<div class="card" style="margin-bottom:14px"><div class="form-row">' +
-    '<div class="field grow"><label>Email</label><input type="email" id="us-email"></div>' +
-    '<div class="field grow"><label>Temporary password (12+ characters)</label><input type="text" id="us-password" class="mono"></div>' +
-    '<button class="btn primary" data-act="add-user">Add admin</button></div><div class="form-error" id="us-error"></div>' +
-    '<p class="muted small" style="margin:0">Every admin can do everything here. New admins enrol their authenticator at first sign-in; accounts live in the <code>hardcode-admin-users</code> Secret.</p></div>';
+  const note =
+    '<div class="callout info">Admins can do everything here. A member signs in here too, and sees only the profiles they own: an admin gives them one (its <b>Settings</b>), or they create their own, as many as their rights allow. ' +
+    'Everyone enrols an authenticator at their first sign-in; accounts live in the <code>hardcode-admin-users</code> Secret.</div>';
 
   return {
-    html: `${form}
-      <div class="card" style="padding:0"><table><thead><tr><th>Email</th><th>2FA</th><th>Added</th><th></th></tr></thead><tbody>${rows}</tbody></table></div>`,
+    actions: '<button class="btn primary" data-act="add-person">＋ Add person</button>',
+    html: `${note}
+      <div class="card" style="padding:0"><table><thead><tr><th>Email</th><th>Role</th><th>Rights</th><th>Profiles</th><th>2FA</th><th>Added</th><th></th></tr></thead><tbody>${rows}</tbody></table></div>`,
   };
 }
 
@@ -922,8 +1286,24 @@ function languagePicker(kind) {
 }
 
 /**
+ * The new-profile dialog's admin-only fields: who owns it, and optionally
+ * an image and a host name. A member's profile is their own, with the
+ * defaults.
+ */
+function newProfileAdminFields() {
+  if (!isAdmin()) {
+    return '';
+  }
+
+  return `<div class="field"><label>Owner</label><select id="np-owner">${ownerOptions('')}</select></div>
+    <div class="field"><label>VS Code image (optional)</label><input type="text" class="mono" id="np-image" placeholder="registry.example.com/hardcode/vscode:1.0"></div>
+    <div class="field"><label>VS Code host for an Ingress (optional)</label><input type="text" class="mono" id="np-host" placeholder="team-a.code.example.com"></div>`;
+}
+
+/**
  * The new-profile dialog: a name, where it starts from, the languages and
- * tools it is built around, and optionally an image and a host name.
+ * tools it is built around, and for an admin who owns it, and optionally an
+ * image and a host name.
  */
 function newProfileModal() {
   const sources = state.profiles.map((profile) => `<option value="${esc(profile.name)}">copy of ${esc(profile.name)}</option>`).join('');
@@ -934,8 +1314,7 @@ function newProfileModal() {
     <div class="field"><label>Languages</label>${languagePicker('language')}</div>
     <div class="field"><label>Tools</label>${languagePicker('tool')}</div>
     <p class="muted small" style="margin:0">A language or tool opens its allowlist entries and brings its VS Code extensions, installed in the background; the image decides which toolchains there are.</p>
-    <div class="field"><label>VS Code image (optional)</label><input type="text" class="mono" id="np-image" placeholder="registry.example.com/hardcode/vscode:1.0"></div>
-    <div class="field"><label>VS Code host for an Ingress (optional)</label><input type="text" class="mono" id="np-host" placeholder="team-a.code.example.com"></div>
+    ${newProfileAdminFields()}
     <div class="form-error" id="np-error"></div>
     <div class="modal-actions"><button class="btn" data-close>Cancel</button><button class="btn primary" id="np-create">Create</button></div>`;
 
@@ -957,12 +1336,12 @@ function newProfileModal() {
 
     field('#np-create').onclick = async () => {
       const source = field('#np-from').value;
-      const body = {
-        name: field('#np-name').value.trim(),
-        from: source,
-        image: field('#np-image').value.trim(),
-        vscodeHost: field('#np-host').value.trim(),
-      };
+      const body = { name: field('#np-name').value.trim(), from: source };
+      if (isAdmin()) {
+        body.owner = field('#np-owner').value;
+        body.image = field('#np-image').value.trim();
+        body.vscodeHost = field('#np-host').value.trim();
+      }
 
       // A copy left with its source's languages keeps its source's allowlist
       // as it is; other languages, or the template, bring the blocks in step.
@@ -990,6 +1369,80 @@ function newProfileModal() {
     };
 
     field('#np-name').focus();
+  });
+}
+
+/**
+ * The add-or-change dialog for a person: their email and a temporary
+ * password when they are new, their role, and a member's rights. With
+ * *person*, it changes theirs.
+ */
+function personModal(person) {
+  const rights = person ? person.rights : { profiles: 1, allowlist: 'none', rw: false, ssh: false, lan: false };
+  const role = person ? person.role : 'member';
+
+  const allowlistChoices = Object.entries(ALLOWLIST_RIGHTS)
+    .map(([key, words]) => `<option value="${key}" ${rights.allowlist === key ? 'selected' : ''}>${esc(words)}</option>`)
+    .join('');
+
+  /** A tick for one of the rights that come on top of asking or editing. */
+  const tick = (key, words) =>
+    `<label class="check"><input type="checkbox" id="pm-${key}" ${rights[key] ? 'checked' : ''}> ${esc(words)}</label>`;
+
+  const identity = person
+    ? `<p class="muted small">${esc(person.email)}</p>`
+    : `<div class="field"><label>Email</label><input type="email" id="pm-email"></div>
+    <div class="field"><label>Temporary password (12+ characters)</label><input type="text" id="pm-password" class="mono"></div>`;
+
+  const html = `<h2>${person ? 'Change a person' : 'Add a person'}</h2>
+    ${identity}
+    <div class="field"><label>Role</label><select id="pm-role"><option value="member" ${role === 'member' ? 'selected' : ''}>Member: their own profiles</option><option value="admin" ${role === 'admin' ? 'selected' : ''}>Admin: everything</option></select></div>
+    <div id="pm-rights">
+      <div class="field"><label>Profiles they may create</label><input type="number" id="pm-profiles" min="0" max="100" value="${esc(rights.profiles)}" style="width:100px"></div>
+      <div class="field"><label>Their profiles' allowlists</label><select id="pm-allowlist">${allowlistChoices}</select></div>
+      <div class="field"><label>When they ask or change, they may also have</label><div class="rights-ticks">${tick('rw', 'read-write entries (uploads, push)')}${tick('ssh', 'ssh tunnels')}${tick('lan', 'names on your network')}</div></div>
+    </div>
+    <div class="form-error" id="pm-error"></div>
+    <div class="modal-actions"><button class="btn" data-close>Cancel</button><button class="btn primary" id="pm-save">${person ? 'Save' : 'Add'}</button></div>`;
+
+  modal(html, (card) => {
+    const field = (id) => card.querySelector(id);
+
+    // A member's rights are for members: an admin has every one.
+    const showRights = () => field('#pm-rights').classList.toggle('hidden', field('#pm-role').value === 'admin');
+    field('#pm-role').onchange = showRights;
+    showRights();
+
+    field('#pm-save').onclick = async () => {
+      const body = {
+        role: field('#pm-role').value,
+        rights: {
+          profiles: Number(field('#pm-profiles').value),
+          allowlist: field('#pm-allowlist').value,
+          rw: field('#pm-rw').checked,
+          ssh: field('#pm-ssh').checked,
+          lan: field('#pm-lan').checked,
+        },
+      };
+
+      try {
+        if (person) {
+          await api('PATCH', `/api/users/${encodeURIComponent(person.email)}`, body);
+        } else {
+          await api('POST', '/api/users', { ...body, email: field('#pm-email').value.trim(), password: field('#pm-password').value });
+        }
+      } catch (error) {
+        field('#pm-error').textContent = error.message;
+        return;
+      }
+
+      closeModal();
+      await reloadUsers();
+      toast(person ? 'Saved; it applies at once' : 'Added; they enrol their authenticator at first sign-in', 'ok');
+    };
+
+    const first = field('#pm-email') || field('#pm-role');
+    first.focus();
   });
 }
 
@@ -1116,6 +1569,61 @@ async function reloadUsers() {
   render();
 }
 
+/**
+ * The requests, fetched again for the count in the navigation and the
+ * Requests page, which is redrawn unless a form in it holds input. *poll*
+ * marks the background refresh's request. Nothing for a member who doesn't
+ * ask.
+ */
+async function loadRequests(poll = false) {
+  if (!hasRequests()) {
+    return;
+  }
+
+  state.requests = await call('GET', '/api/requests', undefined, { poll });
+  showRequestCount();
+
+  if (state.view === 'requests' && !formDirty()) {
+    render();
+  }
+}
+
+/**
+ * Approve or deny a request (*decision*), then show what it did: the
+ * requests again, and the profile when one is open.
+ */
+async function decideRequest(id, decision) {
+  const answer = await call('POST', `/api/requests/${encodeURIComponent(id)}/${decision}`, {});
+  const request = answer.request;
+
+  if (decision === 'approve') {
+    toast(`Approved ${request.entry} on ${request.profile} · the proxy reloads in a few seconds`, 'ok');
+  } else {
+    toast(`Denied ${request.entry} on ${request.profile}`, 'ok');
+  }
+
+  await loadRequests();
+  if (state.view === 'profile' && state.profile) {
+    await openProfile(state.profile.name);
+  } else {
+    render();
+  }
+}
+
+/**
+ * What an allowlist edit's answer means, as a toast: a request made, or
+ * the change made (*done*, its words).
+ */
+function allowlistOutcome(answer, done) {
+  if (answer.requested) {
+    toast(`Asked for ${answer.request.entry}: it waits until an admin approves it`, 'ok');
+    loadRequests();
+    return;
+  }
+
+  toast(done, 'ok');
+}
+
 // ---------------------------------------------------------------------------
 // Actions, by the data-act of the button that starts them
 // ---------------------------------------------------------------------------
@@ -1170,9 +1678,11 @@ const actions = {
   async 'al-add'() {
     const entry = $('#al-entry').value.trim();
     const flag = $('#al-flag').value;
+    const reason = $('#al-reason') ? $('#al-reason').value.trim() : '';
 
+    let answer;
     try {
-      await api('POST', profilePath('/allowlist'), { op: 'add', entry, flag });
+      answer = await api('POST', profilePath('/allowlist'), { op: 'add', entry, flag, reason });
     } catch (error) {
       $('#al-error').textContent = error.message;
       return;
@@ -1181,16 +1691,17 @@ const actions = {
     state.prefill = '';
     state.prefillFlag = '';
     await openProfile(state.profile.name);
-    toast(`Added ${entry} · the proxy reloads in a few seconds`, 'ok');
+    allowlistOutcome(answer, `Added ${entry} · the proxy reloads in a few seconds`);
   },
 
   async 'lan-add'() {
     const name = $('#lan-name').value.trim();
     const address = $('#lan-address').value.trim();
+    const reason = $('#lan-reason') ? $('#lan-reason').value.trim() : '';
 
     let answer;
     try {
-      answer = await api('POST', profilePath('/lan'), { op: 'add', name, address });
+      answer = await api('POST', profilePath('/lan'), { op: 'add', name, address, reason });
     } catch (error) {
       $('#lan-error').textContent = error.message;
       return;
@@ -1198,7 +1709,7 @@ const actions = {
 
     state.lanPrefill = { name: '', address: '' };
     await openProfile(state.profile.name);
-    toast(answer.message, 'ok');
+    allowlistOutcome(answer, answer.message);
   },
 
   // Look the open profile's names on the network up, which the refresh
@@ -1251,13 +1762,29 @@ const actions = {
 
   async 'save-settings'() {
     const body = {
-      image: $('#st-image').value.trim(),
-      vscodeHost: $('#st-host').value.trim(),
       suspended: $('#st-suspended').checked,
       // The version the form was rendered at, kept in the DOM: the poll moves
       // state.profile on while the form is being filled in.
       version: $('[data-act="save-settings"]').dataset.version,
     };
+
+    // A member's form has the one setting that is theirs.
+    if (!isAdmin()) {
+      await call('PATCH', profilePath(), body);
+      await openProfile(state.profile.name);
+      toast('Saved', 'ok');
+      return;
+    }
+
+    body.image = $('#st-image').value.trim();
+    body.vscodeHost = $('#st-host').value.trim();
+
+    // The owner, sent only when it changed: saving the form after another
+    // admin gave the profile to someone doesn't take it back.
+    const owner = $('#st-owner');
+    if (owner.value !== (state.profile.owner || '')) {
+      body.owner = owner.value;
+    }
 
     // The sidecar's box is drawn from the effective value, which may be the
     // chart's default. Sent only when it was changed, so saving the form
@@ -1296,16 +1823,8 @@ const actions = {
     });
   },
 
-  async 'add-user'() {
-    try {
-      await api('POST', '/api/users', { email: $('#us-email').value.trim(), password: $('#us-password').value });
-    } catch (error) {
-      $('#us-error').textContent = error.message;
-      return;
-    }
-
-    await reloadUsers();
-    toast('Admin added', 'ok');
+  'add-person'() {
+    personModal(null);
   },
 };
 
@@ -1318,10 +1837,18 @@ function each(selector, handler) {
   $('#view').querySelectorAll(selector).forEach(handler);
 }
 
-/** One allowlist edit to the open profile, then show the result. */
+/**
+ * One allowlist edit to the open profile, then show the result: for a
+ * member who asks, switching an entry on is a request, and the switch is
+ * drawn off again until an admin approves it.
+ */
 async function editAllowlist(op, entry, flag) {
-  await call('POST', profilePath('/allowlist'), { op, entry, flag });
+  const answer = await call('POST', profilePath('/allowlist'), { op, entry, flag });
   await openProfile(state.profile.name);
+
+  if (answer.requested) {
+    allowlistOutcome(answer, '');
+  }
 }
 
 /** The language switches, the package form and ✕ buttons, and the extension form and buttons of a profile's view. */
@@ -1512,6 +2039,18 @@ function bind() {
     };
   });
 
+  each('[data-approve]', (button) => {
+    button.onclick = () => decideRequest(button.dataset.approve, 'approve');
+  });
+
+  each('[data-deny]', (button) => {
+    button.onclick = () => decideRequest(button.dataset.deny, 'deny');
+  });
+
+  each('[data-edit-user]', (button) => {
+    button.onclick = () => personModal(state.users.find((user) => user.email === button.dataset.editUser));
+  });
+
   each('[data-reset-totp]', (button) => {
     button.onclick = async () => {
       await call('POST', `/api/users/${encodeURIComponent(button.dataset.resetTotp)}/reset-totp`, {});
@@ -1535,11 +2074,21 @@ function bind() {
 document.querySelectorAll('.nav-item').forEach((button) => {
   button.onclick = async () => {
     state.view = button.dataset.view;
-    if (state.view === 'users') state.users = await call('GET', '/api/users');
-    if (state.view !== 'profile') state.profile = null;
+    state.highlight = '';
+    if (state.view === 'users') {
+      state.users = await call('GET', '/api/users');
+    }
+    if (state.view === 'requests') {
+      state.requests = await call('GET', '/api/requests');
+    }
+    if (state.view !== 'profile') {
+      state.profile = null;
+    }
 
     render();
-    if (state.view === 'profiles' || state.view === 'bulk') loadProfiles();
+    if (state.view === 'profiles' || state.view === 'bulk') {
+      loadProfiles();
+    }
   };
 });
 
@@ -1557,6 +2106,11 @@ $('#modal').onclick = (event) => {
  * is redrawn.
  */
 function poll() {
+  // A change of role or rights an admin made, and the requests' count in
+  // the navigation, on every page.
+  refreshMe().catch(() => {});
+  loadRequests(true).catch(() => {});
+
   if (state.view === 'profiles') {
     loadProfiles(true);
     return;
@@ -1600,6 +2154,53 @@ function poll() {
 }
 
 /**
+ * The navigation and the corner for the signed-in account: who it is, and
+ * what an admin has that a member doesn't (the API would refuse it anyway).
+ */
+function showNavigation() {
+  $('#me').textContent = state.me.email;
+  $('#ns').textContent = `namespace ${state.me.namespace} · ${isAdmin() ? 'admin' : 'member'}`;
+
+  document.querySelectorAll('.admin-only').forEach((element) => element.classList.toggle('hidden', !isAdmin()));
+  document.querySelector('[data-view="requests"]').classList.toggle('hidden', !hasRequests());
+}
+
+/**
+ * The signed-in account as the API has it now, for the refresh: a role or
+ * rights an admin changed meanwhile show at once, with the navigation and
+ * the view to match (a page that isn't theirs any more leaves for the
+ * profiles); signed out, the sign-in form.
+ */
+async function refreshMe() {
+  const me = await api('GET', '/api/me', undefined, { poll: true });
+  if (!me) {
+    showLogin();
+    return;
+  }
+
+  const changed = JSON.stringify([me.role, me.rights]) !== JSON.stringify([state.me.role, state.me.rights]);
+  state.me = me;
+  if (!changed) {
+    return;
+  }
+
+  showNavigation();
+
+  const adminsOnly = state.view === 'users' || state.view === 'bulk';
+  if ((adminsOnly && !isAdmin()) || (state.view === 'requests' && !hasRequests())) {
+    state.view = 'profiles';
+    state.profile = null;
+  }
+  if (isAdmin()) {
+    state.users = await call('GET', '/api/users').catch(() => []);
+  }
+
+  if (!formDirty()) {
+    render();
+  }
+}
+
+/**
  * Start up, or start again after signing in: the sign-in form, or the
  * profiles and a refresh every ten seconds. Only one refresh ever runs.
  */
@@ -1610,17 +2211,33 @@ async function boot() {
   }
 
   showApp();
-  $('#me').textContent = state.me.email;
-  $('#ns').textContent = `namespace ${state.me.namespace}`;
+  showNavigation();
 
   // The languages and tools never change while the admin runs: read once.
   // Without them (the toast says why) the page still works, with nothing to
-  // pick from when making a profile.
+  // pick from when making a profile. An admin also reads the accounts, for
+  // the owner a profile can be given.
   state.catalogue = await call('GET', '/api/languages').catch(() => []);
+  if (isAdmin()) {
+    state.users = await call('GET', '/api/users').catch(() => []);
+  }
+  await loadRequests().catch(() => {});
 
-  state.view = 'profiles';
+  // An admin's email links to one request (#request/<id>): the Requests
+  // page, with it marked, once signed in.
+  const linked = location.hash.match(/^#request\/([A-Za-z0-9_-]+)$/);
+  state.view = linked && hasRequests() ? 'requests' : 'profiles';
+  state.highlight = linked ? linked[1] : '';
+
   render();
   await loadProfiles();
+
+  if (state.highlight) {
+    const row = document.getElementById(`request-${state.highlight}`);
+    if (row) {
+      row.scrollIntoView({ block: 'center' });
+    }
+  }
 
   clearInterval(state.poller);
   state.poller = setInterval(poll, 10000);

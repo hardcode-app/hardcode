@@ -79,23 +79,28 @@ helm upgrade --install hardcode helm/hardcode -n sandbox --create-namespace \
 Then (the chart's notes repeat this): port-forward or Ingress to the admin
 service, sign in with the bootstrap admin, scan the QR code with your
 authenticator app, and you're in. The bootstrap account is only used when no
-admins exist yet; add the rest from the **Admins** page. Accounts (scrypt
-password hashes and TOTP secrets) live in the `hardcode-admin-users` Secret;
-sessions are in memory.
+accounts exist yet; add the rest, admins and members, from the **People**
+page. Accounts (scrypt password hashes, TOTP secrets, roles and rights)
+live in the `hardcode-admin-users` Secret, members' requests in
+`hardcode-admin-requests`; sessions are in memory.
 
 ## The admin UI
 
-- **Profiles**: status, languages, image, allowlist size; create (choosing
+- **Profiles**: status, owner, languages, image, allowlist size; create (choosing
   its languages first, from the template or as a copy of another profile,
-  with an optional image and VS Code host), open one.
+  with an optional owner, image and VS Code host), open one.
 - **A profile**: its languages (what each opens and brings), its extensions
   (the languages' and its own), its allowlist (toggle, add, delete, or edit
   as text), blocked traffic from its squid and CoreDNS pods with one-click
   allow, the VS Code URL and token, settings (image, host, volume size,
   Docker sidecar, suspend), delete.
+- **Requests**: members' requests for allowlist entries, to approve or deny
+  (emailed to every admin when `admin.smtp` is set).
 - **All allowlists**: add, remove, enable or disable an entry in every profile
   at once, with a per-profile result.
-- **Admins**: add, remove, reset someone's 2FA.
+- **People**: admins and members; add, change a member's rights, remove,
+  reset someone's 2FA. A member signs in too, and sees only the profiles
+  they own.
 
 Every change is a patch to the Profile object; the operator applies it within
 seconds (squid and CoreDNS restart on an allowlist change). `kubectl` works
@@ -105,7 +110,8 @@ just as well: `kubectl edit profile team-a`.
 
 See [values.yaml](hardcode/values.yaml); every key is commented. The main
 ones: `admin.email`/`admin.password` (or `admin.existingSecret`),
-`admin.image`, `admin.ingress`, `profileDefaults.*` (images, sizes, docker,
+`admin.image`, `admin.ingress`, `admin.url` and `admin.smtp` (the admins'
+emails about members' requests), `profileDefaults.*` (images, sizes, docker,
 network policy, Ingress class for profiles with a `vscodeHost`), and
 `profiles[]` to create profiles with the chart.
 
@@ -114,7 +120,8 @@ network policy, Ingress class for profiles with a `vscodeHost`), and
 `tests/helm.py` lints and renders the chart; `tests/admin.py` runs the
 operator and the API against an in-memory Kubernetes API; `tests/e2e_kind.py`
 installs the chart on a local kind cluster, signs in with TOTP through the
-API, and checks the operator builds, changes and deletes profiles for real
+API, checks a member's view and an approved request, and checks the
+operator builds, changes and deletes profiles for real
 (squid and CoreDNS pods come up; the VS Code image isn't loaded, so those pods
 stay Pending).
 

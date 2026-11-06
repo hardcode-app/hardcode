@@ -85,6 +85,19 @@ stringData:
   password: {{ required "admin.password is required with admin.email" .Values.admin.password | quote }}
 ---
 {{- end }}
+{{- if and .Values.admin.smtp.host .Values.admin.smtp.username (not .Values.admin.smtp.existingSecret) }}
+apiVersion: v1
+kind: Secret
+metadata:
+  name: {{ $name }}-admin-smtp
+  labels:
+    {{- include "hardcode.labels" . | nindent 4 }}
+type: Opaque
+stringData:
+  username: {{ .Values.admin.smtp.username | quote }}
+  password: {{ required "admin.smtp.password is required with admin.smtp.username" .Values.admin.smtp.password | quote }}
+---
+{{- end }}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -141,6 +154,40 @@ spec:
               value: {{ .Values.admin.trustedProxies | join "," | quote }}
             - name: PROFILE_DEFAULTS_JSON
               value: {{ .Values.profileDefaults | toJson | quote }}
+            {{- with .Values.admin.url }}
+            {{- if not (regexMatch "^https?://[^/]" .) }}
+            {{- fail "admin.url is the admin UI's address, starting with https://" }}
+            {{- end }}
+            {{- end }}
+            - name: ADMIN_URL
+              value: {{ include "hardcode.adminURL" . | quote }}
+            {{- with .Values.admin.smtp }}
+            {{- if .host }}
+            {{- if not (has .tls (list "starttls" "tls" "none")) }}
+            {{- fail "admin.smtp.tls is starttls, tls or none" }}
+            {{- end }}
+            - name: SMTP_HOST
+              value: {{ .host | quote }}
+            - name: SMTP_PORT
+              value: {{ .port | toString | quote }}
+            - name: SMTP_TLS
+              value: {{ .tls | quote }}
+            - name: SMTP_FROM
+              value: {{ required "admin.smtp.from is required with admin.smtp.host" .from | quote }}
+            {{- if or .username .existingSecret }}
+            - name: SMTP_USERNAME
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "hardcode.smtpSecret" $ }}
+                  key: username
+            - name: SMTP_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "hardcode.smtpSecret" $ }}
+                  key: password
+            {{- end }}
+            {{- end }}
+            {{- end }}
             {{- if or .Values.admin.existingSecret .Values.admin.email }}
             - name: ADMIN_EMAIL
               valueFrom:

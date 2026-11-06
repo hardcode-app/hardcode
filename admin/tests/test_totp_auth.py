@@ -10,7 +10,7 @@ import unittest
 from unittest import mock
 
 from hardcode_admin import auth, totp
-from hardcode_admin.auth import AuthError, Sessions, StoreConflict, Throttle, Users
+from hardcode_admin.auth import ADMIN, MEMBER, AuthError, Sessions, StoreConflict, Throttle, Users
 
 from .helpers import MemoryStore
 
@@ -128,30 +128,30 @@ class UsersTests(unittest.TestCase):
 
     def test_add_validation(self):
         with self.assertRaisesRegex(AuthError, "email"):
-            self.users.add("not-an-email", PASSWORD)
+            self.users.add("not-an-email", PASSWORD, ADMIN)
         with self.assertRaisesRegex(AuthError, "12 characters"):
-            self.users.add("a@b.co", "short")
+            self.users.add("a@b.co", "short", ADMIN)
 
-        user = self.users.add("A@B.co", PASSWORD)
+        user = self.users.add("A@B.co", PASSWORD, ADMIN)
         self.assertEqual(user["email"], "a@b.co")
         self.assertFalse(user["totpEnrolled"])
         self.assertTrue(user["totpSecret"])
         self.assertEqual((user["sessionVersion"], user["totpLastStep"]), (0, -1))
 
         with self.assertRaisesRegex(AuthError, "exists"):
-            self.users.add("a@b.co", PASSWORD)
+            self.users.add("a@b.co", PASSWORD, ADMIN)
 
-        self.assertTrue(self.users.add("c@d.co", PASSWORD, must_enrol=False)["totpEnrolled"])
+        self.assertTrue(self.users.add("c@d.co", PASSWORD, ADMIN, must_enrol=False)["totpEnrolled"])
 
     def test_find_remove_update(self):
-        self.users.add("a@b.co", PASSWORD)
+        self.users.add("a@b.co", PASSWORD, ADMIN)
         self.assertEqual(self.users.find(" A@b.co ")["email"], "a@b.co")
         self.assertIsNone(self.users.find("nope@b.co"))
 
         with self.assertRaisesRegex(AuthError, "last admin"):
             self.users.remove("a@b.co")
 
-        self.users.add("c@d.co", "anotherlongpassword")
+        self.users.add("c@d.co", "anotherlongpassword", ADMIN)
         with self.assertRaisesRegex(AuthError, "no such user"):
             self.users.remove("x@y.z")
         self.users.remove(" A@B.co ")
@@ -162,8 +162,48 @@ class UsersTests(unittest.TestCase):
         with self.assertRaisesRegex(AuthError, "12 characters"):
             self.users.set_password("c@d.co", "short")
 
+    def test_roles_and_rights(self):
+        member = self.users.add("m@b.co", PASSWORD, MEMBER, {"allowlist": "ask", "rw": True})
+        self.assertEqual(member["rights"], {**auth.RIGHTS, "allowlist": "ask", "rw": True})
+        self.assertFalse(auth.is_admin(member))
+        self.assertEqual(auth.rights_of({"role": MEMBER}), auth.RIGHTS, "a member's rights start as RIGHTS")
+
+        self.assertTrue(auth.is_admin(self.users.add("a@b.co", PASSWORD, ADMIN)))
+        self.assertEqual([user["email"] for user in self.users.admins()], ["a@b.co"])
+
+        for role, rights, words in [
+            ("owner", None, "role must be admin or member"),
+            (MEMBER, {"profiles": True}, "profiles is a number"),
+            (MEMBER, {"profiles": auth.MAX_PROFILES + 1}, "profiles is a number"),
+            (MEMBER, {"allowlist": "always"}, "allowlist is none, ask or edit"),
+            (MEMBER, {"rw": "yes"}, "rw is true or false"),
+            (MEMBER, {"everything": True}, "no such right everything"),
+            (MEMBER, ["edit"], "an object"),
+        ]:
+            with self.assertRaisesRegex(AuthError, words):
+                self.users.add("x@y.co", PASSWORD, role, rights)
+
+        changed = self.users.set_role("m@b.co", rights={"profiles": 3, "allowlist": "edit"})
+        self.assertEqual(changed["rights"], {**auth.RIGHTS, "profiles": 3, "allowlist": "edit"}, "a whole set")
+        self.assertEqual(self.users.set_role("m@b.co", role=ADMIN)["role"], ADMIN)
+
+    def test_there_is_always_an_admin(self):
+        self.users.add("a@b.co", PASSWORD, ADMIN)
+        self.users.add("m@b.co", PASSWORD, MEMBER)
+
+        with self.assertRaisesRegex(AuthError, "the last admin can't be removed"):
+            self.users.remove("a@b.co")
+        with self.assertRaisesRegex(AuthError, "the last admin can't be made a member"):
+            self.users.set_role("a@b.co", role=MEMBER)
+
+        self.users.add("c@d.co", PASSWORD, ADMIN)
+        self.users.set_role("a@b.co", role=MEMBER)
+        self.users.remove("m@b.co")
+        self.users.remove("a@b.co")
+        self.assertEqual([user["email"] for user in self.users.list()], ["c@d.co"])
+
     def test_credential_changes_bump_the_session_version(self):
-        self.users.add("c@d.co", PASSWORD)
+        self.users.add("c@d.co", PASSWORD, ADMIN)
         before = self.users.find("c@d.co")
 
         self.users.consume_totp_step("c@d.co", 1234, 0)
@@ -183,7 +223,7 @@ class UsersTests(unittest.TestCase):
         self.assertEqual(self.users.find("c@d.co")["sessionVersion"], 2)
 
     def test_a_code_step_is_consumed_once(self):
-        self.users.add("a@b.co", PASSWORD)
+        self.users.add("a@b.co", PASSWORD, ADMIN)
         self.users.consume_totp_step("a@b.co", 500, 0)
 
         with self.assertRaisesRegex(AuthError, "already used"):
@@ -196,7 +236,7 @@ class UsersTests(unittest.TestCase):
         self.users.consume_totp_step("a@b.co", 501, 0)
 
     def test_concurrent_requests_cannot_both_consume_a_code(self):
-        self.users.add("a@b.co", PASSWORD)
+        self.users.add("a@b.co", PASSWORD, ADMIN)
         outcomes: list[str] = []
         start_together = threading.Barrier(8)
 
@@ -217,8 +257,8 @@ class UsersTests(unittest.TestCase):
         self.assertEqual(outcomes.count("ok"), 1, outcomes)
 
     def test_writes_through_one_store_are_serialised_and_versioned(self):
-        self.users.add("a@b.co", PASSWORD)
-        self.users.add("b@b.co", PASSWORD)
+        self.users.add("a@b.co", PASSWORD, ADMIN)
+        self.users.add("b@b.co", PASSWORD, ADMIN)
         started, release = threading.Event(), threading.Event()
 
         def slow(users):
@@ -246,7 +286,7 @@ class UsersTests(unittest.TestCase):
         self.assertEqual(b["sessionVersion"], 1)
 
     def test_a_writer_elsewhere_is_noticed_and_the_edit_reapplied(self):
-        self.users.add("a@b.co", PASSWORD)
+        self.users.add("a@b.co", PASSWORD, ADMIN)
         calls = []
 
         def mutate(users):
@@ -267,10 +307,10 @@ class UsersTests(unittest.TestCase):
         self.assertEqual(self.users.find("a@b.co")["totpLastStep"], 7)
 
     def test_updates_retry_when_the_store_moved(self):
-        self.users.add("a@b.co", PASSWORD)
+        self.users.add("a@b.co", PASSWORD, ADMIN)
 
         self.store.conflicts = 2
-        self.users.add("c@d.co", PASSWORD)
+        self.users.add("c@d.co", PASSWORD, ADMIN)
         self.assertEqual(len(self.users.list()), 2)
         self.assertEqual(self.store.saves, 4, "two refusals, then the write that counted")
 

@@ -64,6 +64,7 @@ def render() -> harness.Output:
         f"profiles[1].languages={{{','.join(TEAM_A_LANGUAGES)}}}",
         "profiles[1].extensions={eamodio.gitlens}",
         "profiles[1].packages={jq,postgresql-client}",
+        "profiles[1].owner=member@example.com",
     ]
     allowlist = ROOT / "template" / "allowlist.txt"
 
@@ -141,7 +142,8 @@ def check_rendered_objects(suite: Suite, documents: list[dict]) -> None:
         team_a.get("suspended") is True
         and team_a.get("vscodeHost") == "a.example.com"
         and team_a.get("extensions") == ["eamodio.gitlens"]
-        and team_a.get("packages") == ["jq", "postgresql-client"],
+        and team_a.get("packages") == ["jq", "postgresql-client"]
+        and team_a.get("owner") == "member@example.com",
         json.dumps(team_a, indent=2),
     )
     check_profile_allowlists(suite, team_a)
@@ -154,6 +156,13 @@ def check_rendered_objects(suite: Suite, documents: list[dict]) -> None:
         "the admin's bootstrap account comes from the Secret",
         environment["ADMIN_EMAIL"]["valueFrom"]["secretKeyRef"]["name"] == "hc-hardcode-admin-bootstrap",
     )
+
+    suite.check(
+        "the links in the admins' emails go to the admin's Ingress",
+        environment["ADMIN_URL"]["value"] == "http://hardcode-admin.example.com",
+        json.dumps(environment["ADMIN_URL"]),
+    )
+    suite.check("no emails without an SMTP server", "SMTP_HOST" not in environment, str(sorted(environment)))
 
     defaults = json.loads(environment["PROFILE_DEFAULTS_JSON"]["value"])
     suite.check(
@@ -212,6 +221,124 @@ def check_rendered_objects(suite: Suite, documents: list[dict]) -> None:
     )
 
 
+def render_admin(*settings: str) -> tuple[harness.Output, list[dict]]:
+    """
+    The admin's Deployment and Secrets the chart renders with *settings*
+    (``--set`` values): the output, and the documents.
+    """
+    import yaml
+
+    command = ["helm", "template", "hc", CHART, "--namespace", "sandbox", "--show-only", "templates/operator.yaml"]
+    for setting in settings:
+        command += ["--set", setting]
+
+    rendered = harness.run(command)
+    documents = [document for document in yaml.safe_load_all(rendered.text) if document] if rendered.ok else []
+
+    return rendered, documents
+
+
+def check_admin_email(suite: Suite) -> None:
+    """
+    The SMTP server the admins' emails go out through: its settings in the
+    admin's environment, its login from a Secret, and the portal's address
+    for the links.
+    """
+    rendered, documents = render_admin(
+        "admin.url=https://admin.example.com",
+        "admin.smtp.host=smtp.example.com",
+        "admin.smtp.from=hardcode@example.com",
+        "admin.smtp.username=hardcode",
+        "admin.smtp.password=smtp-secret",
+    )
+    suite.require("the admin renders with an SMTP server", rendered.ok, rendered.text)
+
+    deployment = next(document for document in documents if document["kind"] == "Deployment")
+    container = deployment["spec"]["template"]["spec"]["containers"][0]
+    environment = {variable["name"]: variable for variable in container["env"]}
+
+    values = {name: environment[name].get("value") for name in ("SMTP_HOST", "SMTP_PORT", "SMTP_TLS", "SMTP_FROM")}
+    suite.check(
+        "the server's settings are in the admin's environment",
+        values
+        == {
+            "SMTP_HOST": "smtp.example.com",
+            "SMTP_PORT": "",
+            "SMTP_TLS": "starttls",
+            "SMTP_FROM": "hardcode@example.com",
+        },
+        json.dumps(values),
+    )
+    suite.check(
+        "the portal's address is the one given",
+        environment["ADMIN_URL"]["value"] == "https://admin.example.com",
+    )
+
+    secrets = {document["metadata"]["name"]: document for document in documents if document["kind"] == "Secret"}
+    login = environment["SMTP_PASSWORD"]["valueFrom"]["secretKeyRef"]
+    suite.check(
+        "the login comes from a Secret of its own, never the environment's values",
+        login == {"name": "hc-hardcode-admin-smtp", "key": "password"}
+        and secrets["hc-hardcode-admin-smtp"]["stringData"] == {"username": "hardcode", "password": "smtp-secret"},
+        json.dumps(login),
+    )
+
+    rendered, documents = render_admin(
+        "admin.smtp.host=smtp.example.com",
+        "admin.smtp.from=hardcode@example.com",
+        "admin.smtp.existingSecret=our-smtp",
+    )
+    names = [document["metadata"]["name"] for document in documents if document["kind"] == "Secret"]
+    deployment = next(document for document in documents if document["kind"] == "Deployment")
+    environment = {
+        variable["name"]: variable for variable in deployment["spec"]["template"]["spec"]["containers"][0]["env"]
+    }
+    suite.check(
+        "an existing Secret's login is used, and no Secret is made",
+        environment["SMTP_USERNAME"]["valueFrom"]["secretKeyRef"]["name"] == "our-smtp" and names == [],
+        str(names),
+    )
+    suite.check("without an Ingress or an address, the emails have no link", environment["ADMIN_URL"]["value"] == "")
+
+    rendered, _ = render_admin("admin.smtp.host=smtp.example.com")
+    suite.check(
+        "a server without a sender is refused",
+        not rendered.ok and "admin.smtp.from is required" in rendered.text,
+        rendered.text,
+    )
+
+    rendered, _ = render_admin(
+        "admin.smtp.host=smtp.example.com",
+        "admin.smtp.from=hardcode@example.com",
+        "admin.smtp.username=hardcode",
+    )
+    suite.check(
+        "a login without a password is refused",
+        not rendered.ok and "admin.smtp.password is required" in rendered.text,
+        rendered.text,
+    )
+
+    # What the admin would refuse as it starts, operator and all, is refused
+    # at helm's time instead.
+    rendered, _ = render_admin(
+        "admin.smtp.host=smtp.example.com",
+        "admin.smtp.from=hardcode@example.com",
+        "admin.smtp.tls=ssl",
+    )
+    suite.check(
+        "a protection that isn't one is refused",
+        not rendered.ok and "admin.smtp.tls is starttls, tls or none" in rendered.text,
+        rendered.text,
+    )
+
+    rendered, _ = render_admin("admin.url=admin.example.com")
+    suite.check(
+        "an address without its scheme is refused",
+        not rendered.ok and "admin.url is the admin UI's address" in rendered.text,
+        rendered.text,
+    )
+
+
 def run_checks(suite: Suite) -> None:
     # PyYAML comes from the build image; imported here rather than at the top
     # because this file first runs on the workstation, to get into the image.
@@ -227,6 +354,9 @@ def run_checks(suite: Suite) -> None:
     documents = [document for document in yaml.safe_load_all(rendered.text) if document]
     suite.note(f"{len(documents)} documents")
     check_rendered_objects(suite, documents)
+
+    suite.section("the admins' emails")
+    check_admin_email(suite)
 
 
 if __name__ == "__main__":
