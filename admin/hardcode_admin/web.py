@@ -31,11 +31,13 @@ import secrets
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from concurrent.futures import wait as wait_for
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Optional
 from urllib.parse import urlsplit
 
 from flask import Flask, g, jsonify, request, send_file
+from werkzeug.exceptions import RequestEntityTooLarge
 
 from hardcode_cli import allowlist, blocked, lan, langs, packages
 
@@ -127,6 +129,13 @@ ACCOUNT_ATTEMPTS = 40
 # Read-and-reapply attempts when a profile changed under an edit.
 PATCH_RETRIES = 4
 
+# The largest request body the API reads, signing in included: anyone who
+# can reach the sign-in page could otherwise have the admin, and the operator
+# in the same process, read and parse as much as they send, in a container
+# of 256 MiB. A profile's whole allowlist as text, the largest body there
+# is, is a few kilobytes; one Kubernetes object can't exceed 1.5 MiB.
+MAX_BODY_BYTES = 1024 * 1024
+
 # How long the On your network card's Check waits for its names' lookups,
 # all of them together. The pod resolves names with the cluster's DNS,
 # which often can't see them, and a lookup that gets no answer waits out
@@ -170,6 +179,11 @@ MEMBER_COPIED = ("allowlist", "languages", "extensions", "packages")
 
 # What a member may not give a new profile, in the words of the refusal.
 ADMIN_ONLY_ON_CREATE = {"image": "the image", "vscodeHost": "the VS Code host", "owner": "the owner"}
+
+# Where a profile records when a new VS Code token was last asked for: the
+# write that asks for it, made on the version of the profile checked to be
+# the user's (rotate_token).
+TOKEN_ROTATED_ANNOTATION = "hardcode-app.github.io/token-rotated-at"
 
 # The Secret holding the members' requests (approvals.py), beside the
 # accounts' (``USERS_SECRET``).
@@ -408,6 +422,7 @@ class AdminApi:
 
         self.app = Flask("hardcode_admin", static_folder=None)
         self.app.config["JSON_SORT_KEYS"] = False
+        self.app.config["MAX_CONTENT_LENGTH"] = MAX_BODY_BYTES
         self._register()
 
     def _register(self) -> None:
@@ -419,6 +434,7 @@ class AdminApi:
         app.register_error_handler(AuthError, self.auth_error)
         app.register_error_handler(StoreConflict, self.store_conflict)
         app.register_error_handler(ApiError, self.api_error)
+        app.register_error_handler(RequestEntityTooLarge, self.too_large)
 
         routes = [
             ("GET", "/healthz", self.healthz),
@@ -564,14 +580,26 @@ class AdminApi:
         """
         return is_admin(user) or self.owner_of(profile) == user["email"]
 
+    def check_use(self, user: dict, profile: dict) -> None:
+        """
+        Refuse (404) *profile* to *user* when they may not use it
+        (``may_use``), as if it weren't there.
+        """
+        if not self.may_use(user, profile):
+            raise HttpError(404, f"no profile '{profile['metadata']['name']}'")
+
     def own_profile(self, user: dict, name: str) -> dict:
         """
         A profile *user* may work on (``may_use``). Another's is 404 to a
         member, as if it weren't there.
+
+        A write is made on the snapshot that was checked, conditionally on
+        its version: one that finds the profile changed reads it again with
+        this, so a profile given to someone else meanwhile is refused, not
+        written.
         """
         profile = self.get_profile(name)
-        if not self.may_use(user, profile):
-            raise HttpError(404, f"no profile '{name}'")
+        self.check_use(user, profile)
 
         return profile
 
@@ -938,13 +966,15 @@ class AdminApi:
         """
         return manifests.effective_languages(profile.get("spec") or {}, self.defaults)
 
-    def patch_allowlist(self, name: str, data: dict) -> bool:
+    def patch_allowlist(self, name: str, data: dict, check: Optional[Callable[[dict], None]] = None) -> bool:
         """
         Apply one edit to a profile's allowlist; whether anything changed.
+        *check* is ``patch_allowlist_text``'s.
         """
         return self.patch_allowlist_text(
             name,
             lambda current, profile: self.apply_op(current, data, self.languages_of(profile)),
+            check,
         )
 
     def member_edit(
@@ -995,7 +1025,7 @@ class AdminApi:
 
             return made
 
-        return {"changed": self.patch_allowlist_text(name, checked)}, 200
+        return {"changed": self.patch_allowlist_text(name, checked, lambda latest: self.check_use(user, latest))}, 200
 
     def ask(self, user: dict, change: dict, reason: object) -> tuple[dict, int]:
         """
@@ -1014,10 +1044,17 @@ class AdminApi:
 
         return {"changed": False, "requested": True, "request": request}, 202
 
-    def patch_allowlist_text(self, name: str, edit: Callable[[str, dict], str]) -> bool:
+    def patch_allowlist_text(
+        self,
+        name: str,
+        edit: Callable[[str, dict], str],
+        check: Optional[Callable[[dict], None]] = None,
+    ) -> bool:
         """
         Apply *edit* (given the allowlist's text and the profile) to a
-        profile's allowlist; whether anything changed.
+        profile's allowlist; whether anything changed. *check*, when given,
+        refuses a snapshot the edit mustn't be made on (by raising): every
+        snapshot read is checked, the one the write is made on included.
 
         Read, edit, and write conditionally on the version read. If another
         edit landed in between, read again and apply ours on top of it, so
@@ -1025,6 +1062,9 @@ class AdminApi:
         """
         for attempt in range(PATCH_RETRIES):
             profile = self.get_profile(name)
+            if check:
+                check(profile)
+
             current = (profile.get("spec") or {}).get("allowlist") or ""
 
             updated = edit(current, profile)
@@ -1049,8 +1089,10 @@ class AdminApi:
         response.status_code = status
 
         if cookie is not None:
-            behind_https = request.headers.get("X-Forwarded-Proto") == "https"
-            secure = self.cookie_secure == "always" or (self.cookie_secure == "auto" and behind_https)
+            # HTTPS to the admin itself, or to a proxy in front of it that
+            # says so (X-Forwarded-Proto).
+            over_https = request.is_secure or request.headers.get("X-Forwarded-Proto") == "https"
+            secure = self.cookie_secure == "always" or (self.cookie_secure == "auto" and over_https)
 
             if cookie:
                 response.set_cookie("hc_session", cookie, httponly=True, samesite="Strict", secure=secure, path="/")
@@ -1113,6 +1155,13 @@ class AdminApi:
 
     def store_conflict(self, error: StoreConflict):
         return self.respond({"error": "the admin list changed meanwhile; try again"}, 409)
+
+    def too_large(self, error: RequestEntityTooLarge):
+        """
+        A request body over ``MAX_BODY_BYTES``, refused before it is read.
+        """
+        limit = MAX_BODY_BYTES // 1024
+        return self.respond({"error": f"the request is too large: at most {limit} KiB"}, 413)
 
     def api_error(self, error: ApiError):
         """
@@ -1445,7 +1494,7 @@ class AdminApi:
         attempts = PATCH_RETRIES if languages_only else 1
 
         for attempt in range(attempts):
-            profile = self.get_profile(name)
+            profile = self.own_profile(user, name)
             self.check_version(profile, data)
 
             patch = dict(spec)
@@ -1466,12 +1515,30 @@ class AdminApi:
     def delete_profile(self, name: str):
         """
         Delete a profile, and forget the requests still waiting for it.
+
+        The deletion is conditional on the version of the profile that was
+        checked to be the user's: one given to someone else meanwhile, or
+        deleted and made again, is refused by the API server (409), read
+        again and checked again. The operator's status writes move the
+        version too, so a conflict is tried again a few times.
         """
         user = self.require("full")
-        self.own_profile(user, name)
-        self.k8s.delete(self.profile_path(name))
-        self.approvals.drop_profile(name)
 
+        for attempt in range(PATCH_RETRIES):
+            profile = self.own_profile(user, name)
+            preconditions = {
+                "uid": profile["metadata"].get("uid"),
+                "resourceVersion": profile["metadata"].get("resourceVersion"),
+            }
+
+            try:
+                self.k8s.delete(self.profile_path(name), preconditions=preconditions)
+                break
+            except ApiError as error:
+                if error.status != 409 or attempt == PATCH_RETRIES - 1:
+                    raise
+
+        self.approvals.drop_profile(name)
         return self.respond({"ok": True})
 
     def edit_allowlist(self, name: str):
@@ -1649,21 +1716,53 @@ class AdminApi:
         The token is the profile's token Secret, which the operator made; a
         new one written there reaches the pod at the operator's next pass (a
         minute at most), which restarts VS Code with it. A token the spec
-        fixes (``vscodeToken``) is changed there instead.
+        fixes (``vscodeToken``) is changed there instead. The profile records
+        when it was last asked for (``TOKEN_ROTATED_ANNOTATION``).
         """
         user = self.require("full")
-        profile = self.own_profile(user, name)
-
-        if (profile.get("spec") or {}).get("vscodeToken"):
-            raise HttpError(400, "this profile's token is fixed in its spec (vscodeToken): change it there")
-
         names = manifests.Names(name)
         path = f"/api/v1/namespaces/{self.namespace}/secrets/{names.token}"
-        if not self.k8s.get(path):
-            raise HttpError(409, "the profile has no token yet; the operator makes one as it brings the profile up")
 
+        for attempt in range(PATCH_RETRIES):
+            profile = self.own_profile(user, name)
+
+            if (profile.get("spec") or {}).get("vscodeToken"):
+                raise HttpError(400, "this profile's token is fixed in its spec (vscodeToken): change it there")
+
+            secret = self.k8s.get(path)
+            if not secret:
+                raise HttpError(409, "the profile has no token yet; the operator makes one as it brings the profile up")
+
+            # The Secret of the profile that was checked, which owns it: not
+            # one left by an earlier profile of the same name.
+            owners = {reference.get("uid") for reference in secret["metadata"].get("ownerReferences") or []}
+            if profile["metadata"].get("uid") not in owners:
+                raise HttpError(409, "the profile's token isn't ready yet; try again in a moment")
+
+            # The new token is asked for on the profile first, on the version
+            # that was checked to be the user's: given to someone else
+            # meanwhile, the write is refused, and the profile read and
+            # checked again. The Secret is another object, which no write on
+            # it could tie to the profile's owner; once this has been
+            # written, the user had the right to ask.
+            asked = {
+                "metadata": {
+                    "resourceVersion": profile["metadata"].get("resourceVersion"),
+                    "annotations": {TOKEN_ROTATED_ANNOTATION: datetime.now(timezone.utc).isoformat()},
+                },
+            }
+
+            try:
+                self.k8s.merge_patch(self.profile_path(name), asked)
+                break
+            except ApiError as error:
+                if error.status != 409 or attempt == PATCH_RETRIES - 1:
+                    raise
+
+        # The write names the Secret's version read, so one made again
+        # meanwhile is refused.
         token = base64.b64encode(secrets.token_urlsafe(24).encode()).decode()
-        self.k8s.merge_patch(path, {"data": {"token": token}})
+        self.k8s.merge_patch(path, self.versioned(secret, {"data": {"token": token}}))
 
         return self.respond({"message": "new token; VS Code restarts with it within a minute"})
 
@@ -1691,7 +1790,7 @@ class AdminApi:
             raise HttpError(400, str(error)) from error
 
         for attempt in range(PATCH_RETRIES):
-            profile = self.get_profile(name)
+            profile = self.own_profile(user, name)
             spec = manifests.effective_spec(profile, self.defaults)
 
             updated, message = self.extension_edit(op, extension_id, spec)
@@ -1770,7 +1869,7 @@ class AdminApi:
         names = self.package_names(data.get("names"))
 
         for attempt in range(PATCH_RETRIES):
-            profile = self.get_profile(name)
+            profile = self.own_profile(user, name)
             current = manifests.effective_spec(profile, self.defaults)["packages"]
 
             updated, message = self.package_edit(op, names, current)
@@ -1909,16 +2008,23 @@ class AdminApi:
 
         request = self.decide(request_id, APPROVED, admin)
 
+        def still_theirs(latest: dict) -> None:
+            # Checked again on the snapshot the change is made on: the
+            # profile may have been given to someone else since.
+            if self.owner_of(latest) != asked["by"]:
+                raise HttpError(409, f"{name} no longer belongs to {asked['by']}: deny the request")
+
         try:
             if request["kind"] == "lan":
                 messages: list[str] = []
                 changed = self.patch_allowlist_text(
                     name,
                     self.lan_edit(request["op"], request["entry"], request["address"], messages),
+                    still_theirs,
                 )
             else:
                 data = {"op": request["op"], "entry": request["entry"], "flag": request["flag"]}
-                changed = self.patch_allowlist(name, data)
+                changed = self.patch_allowlist(name, data, still_theirs)
 
         except (HttpError, ApiError):
             self.approvals.reopen(request_id)

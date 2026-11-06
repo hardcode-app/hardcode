@@ -6,6 +6,7 @@ requests they make, the admins' emails about them and the admins' approvals,
 and the People page's accounts.
 """
 
+import json
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -620,6 +621,168 @@ class RequestsTests(MemberTestCase):
         self.assertEqual([item["entry"] for item in member.get("/api/requests").json], ["example.com"])
         self.assertEqual([item["entry"] for item in second.get("/api/requests").json], ["example.org"])
         self.assertEqual(len(self.admin.get("/api/profiles/theirs").json["requests"]), 1)
+
+
+class GivenAwayMeanwhileTests(MemberTestCase):
+    """
+    A profile given to someone else while a member's write is on its way:
+    the write is made on the version that was checked to be theirs, finds
+    the profile changed, and is refused when it is read again. Nothing of
+    theirs lands on someone else's profile.
+    """
+
+    NEW_OWNER = "second.member@example.com"
+
+    def setUp(self):
+        super().setUp()
+        self.users.add(self.NEW_OWNER, PASSWORD, MEMBER, must_enrol=False)
+        self.path = f"{PROFILE_PATH}/mine"
+
+    def give_away(self) -> None:
+        """
+        Give the profile to the new owner, as another admin would: a new
+        resource version.
+        """
+        stored = self.k8s.store[self.path]
+        stored["spec"]["owner"] = self.NEW_OWNER
+        self.k8s._stamp(stored)
+
+    def given_away_on_the_first_write(self) -> None:
+        """
+        Give the profile away just before the first write to it is checked.
+        """
+        done = []
+
+        def hook(path, patch):
+            if path == self.path and not done:
+                done.append(path)
+                self.give_away()
+
+        self.k8s.before_patch = hook
+
+    def test_a_members_edits_are_refused_once_it_is_someone_elses(self):
+        member = self.member(allowlist="edit", lan=True)
+
+        edits = {
+            "suspend": lambda: member.patch("/api/profiles/mine", json={"suspended": True}),
+            "an extension": lambda: member.post(
+                "/api/profiles/mine/extensions", json={"op": "add", "id": "eamodio.gitlens"}
+            ),
+            "a package": lambda: member.post("/api/profiles/mine/packages", json={"op": "add", "names": ["jq"]}),
+            "an entry": lambda: self.allowlist(member, "mine", op="add", entry="example.com"),
+            "a name on the network": lambda: member.post(
+                "/api/profiles/mine/lan",
+                json={"op": "add", "name": "git.lan", "address": "192.168.1.20"},
+            ),
+        }
+
+        for what, edit in edits.items():
+            self.profile("mine", owner=MEMBER_EMAIL)
+            before = self.stored_spec("mine")
+            self.given_away_on_the_first_write()
+
+            response = edit()
+
+            self.k8s.before_patch = None
+            after = self.stored_spec("mine")
+            self.assertIn(response.status_code, (404, 409), what)
+            self.assertEqual(
+                {**after, "owner": MEMBER_EMAIL}, before, f"{what}: nothing written to the new owner's profile"
+            )
+            self.k8s.delete(self.path)
+
+    def test_deleting_one_given_away_meanwhile_is_refused(self):
+        member = self.member()
+        self.profile("mine", owner=MEMBER_EMAIL)
+
+        def hook(path):
+            self.k8s.before_delete = None
+            self.give_away()
+
+        self.k8s.before_delete = hook
+
+        self.assertEqual(member.delete("/api/profiles/mine", headers=JSON).status_code, 404)
+        self.assertEqual(self.stored_spec("mine")["owner"], self.NEW_OWNER, "it is still there, the new owner's")
+
+    def test_an_approval_as_it_is_given_away_is_refused(self):
+        member = self.member(allowlist="ask")
+        self.profile("mine", owner=MEMBER_EMAIL)
+        request = self.allowlist(member, "mine", op="add", entry="example.com").json["request"]
+        self.given_away_on_the_first_write()
+
+        refused = self.admin.post(f"/api/requests/{request['id']}/approve", json={})
+
+        self.assertEqual(refused.status_code, 409)
+        self.assertIn("no longer belongs to", refused.json["error"])
+        self.assertNotIn("example.com", self.own_lines("mine"))
+        self.assertEqual(self.admin.get("/api/requests").json[0]["state"], "pending", "it waits, to be denied")
+
+    def test_a_new_token_only_for_the_profiles_own_secret(self):
+        member = self.member()
+        self.profile("mine", owner=MEMBER_EMAIL)
+        secret = {
+            "metadata": {
+                "name": "mine-vscode-token",
+                "ownerReferences": [{"kind": "Profile", "name": "mine", "uid": "an-earlier-profile"}],
+            }
+        }
+        self.k8s.create("/api/v1/namespaces/test/secrets", {**secret, "data": {"token": "b2xk"}})
+
+        refused = member.post("/api/profiles/mine/token", json={})
+        self.assertEqual(refused.status_code, 409, "a Secret an earlier profile of the name left")
+        self.assertEqual(self.k8s.get("/api/v1/namespaces/test/secrets/mine-vscode-token")["data"]["token"], "b2xk")
+
+        uid = self.k8s.get(self.path)["metadata"]["uid"]
+        self.k8s.merge_patch(
+            "/api/v1/namespaces/test/secrets/mine-vscode-token",
+            {"metadata": {"ownerReferences": [{"kind": "Profile", "name": "mine", "uid": uid}]}},
+        )
+        self.assertEqual(member.post("/api/profiles/mine/token", json={}).status_code, 200)
+
+    def test_a_new_token_as_it_is_given_away_is_refused(self):
+        # Given away just before the first write, whichever object that is:
+        # the token is asked for on the profile, and that write is refused.
+        member = self.member()
+        self.profile("mine", owner=MEMBER_EMAIL)
+        owner = {"kind": "Profile", "name": "mine", "uid": self.k8s.get(self.path)["metadata"]["uid"]}
+        secret = {"metadata": {"name": "mine-vscode-token", "ownerReferences": [owner]}, "data": {"token": "b2xk"}}
+        self.k8s.create("/api/v1/namespaces/test/secrets", secret)
+
+        done = []
+
+        def hook(path, patch):
+            if not done:
+                done.append(path)
+                self.give_away()
+
+        self.k8s.before_patch = hook
+
+        self.assertEqual(member.post("/api/profiles/mine/token", json={}).status_code, 404)
+        self.assertEqual(self.k8s.get("/api/v1/namespaces/test/secrets/mine-vscode-token")["data"]["token"], "b2xk")
+        self.assertNotIn("annotations", self.k8s.get(self.path)["metadata"], "nothing asked for on their behalf")
+
+        # Asked for while it is theirs, the profile says when.
+        self.k8s.before_patch = None
+        self.k8s.merge_patch(self.path, {"spec": {"owner": MEMBER_EMAIL}})
+        self.assertEqual(member.post("/api/profiles/mine/token", json={}).status_code, 200)
+        self.assertIn("hardcode-app.github.io/token-rotated-at", self.k8s.get(self.path)["metadata"]["annotations"])
+
+    def test_the_same_change_asked_by_the_new_owner_is_their_own_request(self):
+        member = self.member(allowlist="ask")
+        self.profile("mine", owner=MEMBER_EMAIL)
+        first = self.allowlist(member, "mine", op="add", entry="example.com", reason="the first member's reason").json[
+            "request"
+        ]
+
+        self.users.set_role(self.NEW_OWNER, rights={"allowlist": "ask"})
+        self.give_away()
+        second = self.signed_in(self.NEW_OWNER)
+        answer = self.allowlist(second, "mine", op="add", entry="example.com", reason="mine").json
+
+        self.assertTrue(answer["requested"])
+        self.assertNotEqual(answer["request"]["id"], first["id"])
+        self.assertEqual((answer["request"]["by"], answer["request"]["reason"]), (self.NEW_OWNER, "mine"))
+        self.assertNotIn("the first member's reason", json.dumps(answer))
 
 
 class PeopleTests(MemberTestCase):

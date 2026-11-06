@@ -223,12 +223,23 @@ class K8s:
 
         return body
 
-    def delete(self, path: str, propagation: str = "Foreground") -> Optional[dict]:
+    def delete(
+        self,
+        path: str,
+        propagation: str = "Foreground",
+        preconditions: Optional[dict] = None,
+    ) -> Optional[dict]:
         """
         Delete an object and, by default, wait for what it owns to go first;
-        ``None`` if it was already gone.
+        ``None`` if it was already gone. With *preconditions* (``uid``,
+        ``resourceVersion``), only the object as it was then: the API server
+        refuses the deletion (409) when it has changed, or been made again.
         """
-        status, body = self.request("DELETE", path, {"propagationPolicy": propagation})
+        options: dict = {"propagationPolicy": propagation}
+        if preconditions:
+            options["preconditions"] = preconditions
+
+        status, body = self.request("DELETE", path, options)
 
         if status == 404:
             return None

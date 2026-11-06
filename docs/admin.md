@@ -403,6 +403,17 @@ only while that list is empty.
   `languages`, `extensions`, `packages`), so an admin's settings for one
   profile (the Docker sidecar, a mount, the environment) stay that
   profile's.
+- **A profile given away meanwhile** isn't written to. Every write about a
+  member's profile is made on the version that was checked to be theirs,
+  conditionally on it: when the profile changed (given to someone else,
+  say), the write is refused, the profile read again and checked again,
+  and so it is `404` to them. Deleting is conditional the same way, on the
+  profile's uid and version. A new token is asked for on the profile
+  first, as the `hardcode-app.github.io/token-rotated-at` annotation
+  written on the version checked to be theirs, and only then written into
+  the token Secret the profile owns (not one an earlier profile of the
+  name left). An approval checks the profile is still the asker's on the
+  version it writes.
 - **What an allowlist edit opens** is judged by what the proxy would be
   given, not by what the request says: the profile's own allowlist before
   and after the edit, with its languages' entries. Each entry the edit
@@ -423,7 +434,8 @@ only while that list is empty.
   (`requests.json`), versioned as the accounts are. A request records the
   edit to make (`op`, `entry`, `flag`, or a name and `address`) and what
   it would open (`access`), which is what the admins are shown. Asking for
-  the same change again is the request already waiting. A member has at
+  the same change again, as the same person, is the request already
+  waiting; someone else's for it is a request of their own. A member has at
   most 20 waiting and everyone 150; a request is at most 2 KB as stored
   (its reason at most 500 characters), and the latest 100 decided
   requests are kept, so the Secret stays well under the 1 MiB Kubernetes
@@ -443,8 +455,10 @@ only while that list is empty.
 All paths are relative to the admin Service. Request and response bodies
 are JSON; every `POST`, `PATCH` and `DELETE` must send `Content-Type:
 application/json` (`415` otherwise, even without a body) and, from a
-browser, come from the admin's own origin (`403` otherwise). Errors are
-`{"error": "…"}` with the status codes below. Everything except
+browser, come from the admin's own origin (`403` otherwise). A body is
+at most 1 MiB, signing in included (`413` otherwise: anyone who can reach
+the sign-in page could otherwise have the admin read as much as they
+send). Errors are `{"error": "…"}` with the status codes below. Everything except
 `/healthz`, `/api/login`, `/api/totp` and `/api/me` needs a fully
 signed-in session; a session whose account was removed or had its
 credentials changed gets `401`. A member gets `403` for a route that is
@@ -505,7 +519,7 @@ yourself.
 | `ADMIN_EMAIL`, `ADMIN_PASSWORD` | | the bootstrap admin, used only while no accounts exist |
 | `USERS_SECRET` | `hardcode-admin-users` | where accounts are kept |
 | `PROFILE_DEFAULTS_JSON` | `{}` | the chart's `profileDefaults` |
-| `COOKIE_SECURE` | `auto` | `auto` / `always` / `never` |
+| `COOKIE_SECURE` | `auto` | `auto` (`Secure` when the request came over HTTPS, to the admin itself or to a proxy that says so with `X-Forwarded-Proto`) / `always` / `never` |
 | `TRUSTED_PROXIES` | empty | comma-separated addresses or CIDRs whose `X-Forwarded-For` is believed |
 | `ADMIN_URL` | the chart's `admin.url`, or its Ingress's host | the portal's address, for the links in the admins' emails |
 | `SMTP_HOST` | empty: no emails | the SMTP server members' requests are emailed through |

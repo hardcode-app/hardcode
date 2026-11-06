@@ -76,10 +76,14 @@ def _now() -> str:
 
 def same_change(one: dict, other: dict) -> bool:
     """
-    Whether two requests ask for the same change of the same profile.
+    Whether two requests are one person's for the same change of the same
+    profile. Someone else's for it is another request: its reason is
+    theirs, and an approval is made for whoever asked.
     """
     fields = ("profile", "kind", "op", "entry", "flag", "address")
-    return all(one.get(field) == other.get(field) for field in fields)
+    same_person = canonical(one.get("by")) == canonical(other.get("by"))
+
+    return same_person and all(one.get(field) == other.get(field) for field in fields)
 
 
 class Approvals:
@@ -117,19 +121,20 @@ class Approvals:
     def ask(self, change: dict, reason: str = "") -> tuple[dict, bool]:
         """
         A member's request for *change* (the fields from ``profile`` to
-        ``address``), and whether it is new: a request for the same change
-        that is still pending is that one, not another.
+        ``address``, and ``by``), and whether it is new: their request for
+        the same change that is still pending is that one, not another.
         """
         reason = str(reason or "").strip()
         if len(reason) > REASON_LENGTH:
             raise ApprovalError(f"the reason is at most {REASON_LENGTH} characters")
 
         by = canonical(change["by"])
+        asked = {**change, "by": by}
 
         def mutate(requests: list[dict]) -> tuple[dict, bool]:
             pending = [request for request in requests if request["state"] == PENDING]
 
-            waiting = next((request for request in pending if same_change(request, change)), None)
+            waiting = next((request for request in pending if same_change(request, asked)), None)
             if waiting:
                 return waiting, False
 

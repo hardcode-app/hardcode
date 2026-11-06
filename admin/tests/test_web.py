@@ -8,6 +8,7 @@ signing out.
 """
 
 import base64
+import json
 import threading
 import time
 import unittest
@@ -18,6 +19,7 @@ from hardcode_admin import manifests, totp, web
 from hardcode_admin.auth import ADMIN, Sessions, StoreConflict, Users
 from hardcode_admin.web import (
     ACCOUNT_CODE_ATTEMPTS,
+    MAX_BODY_BYTES,
     MAX_CODE_ATTEMPTS,
     MAX_EXTENSIONS,
     MAX_PACKAGES,
@@ -379,6 +381,46 @@ class WebTests(unittest.TestCase):
         )
 
     # -- cross-site requests ---------------------------------------------------
+
+    def test_auto_marks_the_cookie_secure_for_https(self):
+        app = create_app(self.k8s, self.users, {"image": "img:1"}, cookie_secure="auto", template_allowlist=TEMPLATE)
+        body = {"email": ROOT, "password": ROOT_PASSWORD}
+
+        def cookie(**options) -> str:
+            return app.test_client().post("/api/login", json=body, **options).headers.get("Set-Cookie", "")
+
+        self.assertIn("Secure", cookie(base_url="https://admin.example.com"), "HTTPS to the admin itself")
+        self.assertIn("Secure", cookie(headers={"X-Forwarded-Proto": "https"}), "HTTPS to the proxy in front of it")
+        self.assertNotIn("Secure", cookie(), "plain HTTP, a port-forward")
+
+    def test_request_bodies_are_capped(self):
+        # Anyone who can reach the sign-in page could otherwise have the
+        # admin read and parse as much as they send.
+        huge = json.dumps({"email": "x" * MAX_BODY_BYTES, "password": "not this one"})
+        refused = self.client.post("/api/login", data=huge, headers=JSON)
+        self.assertEqual(refused.status_code, 413)
+        self.assertIn("too large: at most 1024 KiB", refused.json["error"])
+
+        # Refused on the length a request declares, before any of it is read.
+        declared = self.client.post(
+            "/api/login",
+            data="{}",
+            headers=JSON,
+            environ_overrides={"CONTENT_LENGTH": str(1 << 30)},
+        )
+        self.assertEqual(declared.status_code, 413)
+
+        self.sign_in()
+        self.client.post("/api/profiles", json={"name": "team-a"})
+
+        entries = "a.example.com\n"
+        too_many = self.client.patch(
+            "/api/profiles/team-a", json={"allowlist": entries * (MAX_BODY_BYTES // len(entries))}
+        )
+        self.assertEqual(too_many.status_code, 413, "signed in too")
+
+        thousand = self.client.patch("/api/profiles/team-a", json={"allowlist": entries * 1000})
+        self.assertEqual(thousand.status_code, 200, "an allowlist of a thousand entries is well within it")
 
     def test_writes_need_json_and_the_same_origin(self):
         self.sign_in()
@@ -888,9 +930,12 @@ class WebTests(unittest.TestCase):
         # The operator hasn't made the token yet.
         self.assertEqual(self.client.post("/api/profiles/team-a/token", json={}).status_code, 409)
 
+        # The token Secret as the operator makes it: the profile owns it.
         old = base64.b64encode(b"old-token").decode()
+        owner = {"kind": "Profile", "name": "team-a", "uid": self.k8s.get(f"{PROFILE_PATH}/team-a")["metadata"]["uid"]}
         self.k8s.create(
-            "/api/v1/namespaces/test/secrets", {"metadata": {"name": "team-a-vscode-token"}, "data": {"token": old}}
+            "/api/v1/namespaces/test/secrets",
+            {"metadata": {"name": "team-a-vscode-token", "ownerReferences": [owner]}, "data": {"token": old}},
         )
 
         response = self.client.post("/api/profiles/team-a/token", json={})

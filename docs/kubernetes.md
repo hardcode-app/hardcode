@@ -199,7 +199,7 @@ The [security model](security.md#not-covered) lists every limit.
 | `admin.ui.enabled` | `true` | serve the web UI and API; the operator runs regardless |
 | `admin.service.type`, `.port` | `ClusterIP`, `80` | |
 | `admin.ingress.enabled`, `.className`, `.annotations`, `.host`, `.tls` | off | an Ingress for the admin UI; put TLS on it |
-| `admin.cookieSecure` | `auto` | `auto`: the session cookie is `Secure` when the request came over HTTPS (`X-Forwarded-Proto`); `always`; `never` (plain-HTTP port-forward) |
+| `admin.cookieSecure` | `auto` | `auto`: the session cookie is `Secure` when the request came over HTTPS, to the admin itself or to a proxy that says so (`X-Forwarded-Proto`); `always`; `never` (plain-HTTP port-forward) |
 | `admin.trustedProxies` | `[]` | addresses/CIDRs (the Ingress controller's pods or nodes) whose `X-Forwarded-For` the login throttle believes, read from the right (the first address none of them added is the client); from anyone else the header is ignored |
 | `admin.resources`, `.nodeSelector`, `.tolerations` | 96Mi request / 256Mi limit | |
 | `imagePullSecrets` | `[]` | for the admin image |

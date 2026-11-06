@@ -51,7 +51,8 @@ class FakeK8s:
     (``logs_by_pod``, which tests set as they like).
 
     ``before_patch(path, patch)`` is a hook for concurrency tests: it runs
-    just before a merge patch is checked. ``refuse`` maps a kind to the
+    just before a merge patch is checked; ``before_delete(path)`` the same
+    for a deletion. ``refuse`` maps a kind to the
     status its applies fail with.
     """
 
@@ -65,6 +66,7 @@ class FakeK8s:
         self.deleted: list[str] = []
         self.patched: list[str] = []
         self.before_patch = None
+        self.before_delete = None
         self.refuse: dict[str, int] = {}
         self._ips = 10
         self._uids = 0
@@ -189,10 +191,21 @@ class FakeK8s:
 
         return copy.deepcopy(obj)
 
-    def delete(self, path: str, propagation: str = "Foreground"):
+    def delete(self, path: str, propagation: str = "Foreground", preconditions: dict | None = None):
         """
-        Delete an object, and everything a deleted Profile owned.
+        Delete an object, and everything a deleted Profile owned. With
+        *preconditions*, refused with 409 when the object's uid or resource
+        version is another, as the real API does. ``before_delete(path)`` is
+        a hook for concurrency tests, run just before they are checked.
         """
+        if self.before_delete:
+            self.before_delete(path)
+
+        current = self.store.get(path)
+        for field, expected in (preconditions or {}).items():
+            if current is not None and expected is not None and current["metadata"].get(field) != expected:
+                raise ApiError(409, f"Precondition failed: {field} in precondition: {expected}")
+
         obj = self.store.pop(path, None)
         if obj is None:
             return None

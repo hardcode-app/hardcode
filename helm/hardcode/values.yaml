@@ -49,7 +49,8 @@ admin:
     #  - secretName: hardcode-admin-tls
     #    hosts: [hardcode-admin.example.com]
   # "auto": the session cookie is marked Secure when the request arrived over
-  # HTTPS (X-Forwarded-Proto); "always" or "never" to force.
+  # HTTPS, to the admin itself or to a proxy that says so (X-Forwarded-Proto);
+  # "always" or "never" to force.
   cookieSecure: auto
   # Addresses or CIDRs of the proxies in front of the admin (the Ingress
   # controller's pods or nodes). Only their X-Forwarded-For is believed when
