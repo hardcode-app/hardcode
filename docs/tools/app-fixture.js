@@ -68,6 +68,7 @@
     { service: 'pki', state: 'exited', status: 'Exited (0) 2 hours ago', health: '' },
     { service: 'coredns', state: 'running', status: 'Up 2 hours', health: '' },
     { service: 'squid', state: 'running', status: 'Up 2 hours (healthy)', health: 'healthy' },
+    { service: 'allowlist-watch', state: 'running', status: 'Up 2 hours', health: '' },
     { service: 'docker', state: 'running', status: 'Up 2 hours (healthy)', health: 'healthy' },
     { service: 'vscode', state: 'running', status: 'Up 2 hours', health: '' },
     { service: 'gateway', state: 'running', status: 'Up 2 hours', health: '' },
@@ -147,12 +148,27 @@
     };
   }
 
-  /** What stack:status answers: the containers, and how far the extensions have got. */
+  /**
+   * What waits to restart containers: on the Port forwards screenshot, a
+   * forward just added, its gateway restart a few seconds away; nothing on
+   * the others.
+   */
+  function changesWaiting() {
+    const none = { changes: [], services: [], token: false, due: 0, applying: false, undone: [], error: '' };
+    if (view !== 'forwards') {
+      return none;
+    }
+
+    return { ...none, changes: ['forwarding localhost:5173 -> vscode:5173'], services: ['gateway'], due: Date.now() / 1000 + 4 };
+  }
+
+  /** What stack:status answers: the containers, how far the extensions have got, and what waits to restart. */
   async function stackStatus() {
     const status = await extensionStatus();
     const extensions = { state: status.state, installed: status.installed, total: status.total };
+    const proxy = { reloading: false, due: null, behind: false, error: '' };
 
-    return { services, docker: true, error: '', extensions };
+    return { services, docker: true, error: '', extensions, proxy, changes: changesWaiting() };
   }
 
   /** Another profile's languages: the catalogue, switched on as that profile has it. */
@@ -180,7 +196,7 @@
     'state:get': stateWithFixture,
     'stack:status': stackStatus,
     'vscode:url': () => 'http://localhost:11111/?tkn=k3Zb7Qp1xJ9vL2mN8rT4wY6aC0eF5gH',
-    'vscode:rotate': () => [],
+    'vscode:rotate': () => null,
     'traffic:blocked': async () => (await fixture).blocked,
     'image:get': async () => (await fixture).imageSteps,
     // The names on your network, each still resolving where it was approved.

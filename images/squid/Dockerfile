@@ -2,8 +2,9 @@
 # the one that can inspect TLS (ssl-bump); Canonical's ubuntu/squid image is
 # the GnuTLS build, which can't.
 #
-# Also carries the allowlist renderer; Compose, the CLI and the Kubernetes
-# operator all run it from this one image.
+# Also carries the allowlist renderer, its watch and the check of a policy
+# with squid's own parser; Compose, the CLI and the Kubernetes operator all
+# run them from this one image.
 # Ubuntu 26.04 (resolute), one dated build of it, by digest: Dependabot moves
 # it to the next dated build once that is a week old (docs/development.md,
 # "Dependencies").
@@ -17,6 +18,8 @@ COPY --chmod=0644 squid.conf /etc/squid/squid.conf
 COPY --chmod=0755 entrypoint.sh /usr/local/bin/squid-entrypoint
 COPY --chmod=0755 make-ca.sh /usr/local/bin/squid-make-ca
 COPY --chmod=0755 allowlist-render.sh /usr/local/bin/allowlist-render
+COPY --chmod=0755 allowlist-watch.sh /usr/local/bin/allowlist-watch
+COPY --chmod=0755 check-policy.sh /usr/local/bin/squid-check-policy
 COPY --chmod=0755 own-networks.sh /usr/local/bin/squid-own-networks
 
 USER proxy

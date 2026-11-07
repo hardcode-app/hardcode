@@ -10,8 +10,8 @@ import json
 import unittest
 from contextlib import redirect_stderr
 
-from hardcode_cli import cli, devices, dockerfile, envfile, profiles, stack, yamlio
-from hardcode_cli.compose import Compose, ComposeError
+from hardcode_cli import applier, cli, devices, dockerfile, envfile, profiles, stack, yamlio
+from hardcode_cli.compose import Compose
 from hardcode_cli.devices import DeviceError
 from hardcode_cli.ops import Ops
 
@@ -307,6 +307,7 @@ class OpsTests(HomeTestCase):
             sleep=lambda _: None,
             warn=self.warnings.append,
             host=fake_host(EVERY_NODE if nodes is None else nodes, platform),
+            start_applier=lambda root, profile: None,
         )
 
     def stored(self, ops):
@@ -333,10 +334,13 @@ class OpsTests(HomeTestCase):
 
         result = ops.set_device("gpu", True, lambda _: True)
 
-        self.assertTrue(result.applied)
+        self.assertEqual((result.applied, result.restarts), (True, ["vscode"]), "a few seconds later")
+        self.assertEqual(self.runner.commands(" up -d"), [])
+
+        ops.apply_waiting(now=True)
         recreated = self.runner.commands(" up -d")
         self.assertEqual(len(recreated), 1)
-        self.assertTrue(recreated[0].endswith(" up -d vscode"), "the Docker daemon gets no devices")
+        self.assertTrue(recreated[0].endswith(" up -d --no-deps vscode"), "the Docker daemon gets no devices")
 
     def test_off_asks_nothing_and_the_last_one_takes_the_file_away(self):
         ops = self.ops()
@@ -407,14 +411,17 @@ class OpsTests(HomeTestCase):
     def test_a_change_the_container_cannot_take_is_undone(self):
         ops = self.ops(running=True)
 
-        self.runner.fail_on.add("up -d vscode")
-        with self.assertRaisesRegex(ComposeError, "the change was undone"):
-            ops.set_device("kvm", True, lambda _: True)
+        self.runner.fail_on.add("up -d --no-deps vscode")
+        ops.set_device("kvm", True, lambda _: True)
+        made = ops.apply_waiting(now=True)
 
+        self.assertEqual(made.undone, ["device kvm on"])
         self.assertIsNone(self.stored(ops))
         self.assertFalse(ops.profile.devices_file.exists(), "a file that wasn't there goes again")
-        self.assertEqual(len(self.runner.commands("up -d vscode")), 2, "recreated from the files as they were")
-        self.assertIn("couldn't be started again as before", self.warnings[0])
+        self.assertEqual(
+            len(self.runner.commands("up -d --no-deps vscode")), 2, "recreated from the files as they were"
+        )
+        self.assertIn("couldn't be started again as before", applier.log(ops.profile))
 
     def test_the_state_lists_every_device(self):
         ops = self.ops(nodes=KVM_NODES, runtimes=None)
@@ -566,8 +573,8 @@ class CliTests(CliTestCase):
     def test_a_running_vscode_container_is_recreated_with_it(self):
         code, out, _ = self.run_cli("device", "on", "kvm", "--yes", running=True)
 
-        self.assertEqual((code, out), (0, "device kvm on (applied)"))
-        self.assertEqual(len(self.runner.commands(" up -d vscode")), 1)
+        self.assertEqual((code, out), (0, "device kvm on (vscode restarts in 5 seconds; hardcode apply: now)"))
+        self.assertEqual(self.appliers, ["default"])
 
     def test_a_device_this_computer_lacks_is_refused_without_asking(self):
         code, _, err = self.run_cli("device", "on", "nvidia", answers=[])

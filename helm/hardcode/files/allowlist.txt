@@ -44,7 +44,7 @@
 #
 # Apply changes:  `hardcode allow` / `hardcode deny`, `hardcode allowlist
 #                 enable|disable` or the HardCode app do it for you; after
-#                 editing this file by hand: hardcode reload
+#                 editing this file by hand: hardcode apply
 
 # --- Custom ----------------------------------------------------------------
 # Entries added by `hardcode allow` or the HardCode app land here.

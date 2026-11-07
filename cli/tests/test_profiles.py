@@ -2,6 +2,7 @@
 Tests for creating, finding and removing profiles (hardcode_cli.profiles).
 """
 
+import hashlib
 import os
 import subprocess
 import sys
@@ -31,7 +32,12 @@ class NamingTests(unittest.TestCase):
 
         self.assertEqual(profile.env_file, Path("/r/profiles/x/.env"))
         self.assertEqual(profile.allowlist_file, Path("/r/profiles/x/allowlist.txt"))
-        self.assertEqual(profile.proxy_allowlist_file, Path("/r/profiles/x/proxy-allowlist.txt"))
+        self.assertEqual(profile.proxy_dir, Path("/r/profiles/x/proxy"))
+        self.assertEqual(profile.proxy_allowlist_file, Path("/r/profiles/x/proxy/allowlist.txt"))
+        self.assertEqual(profile.proxy_applied_file, Path("/r/profiles/x/proxy/applied"))
+        self.assertEqual(profile.proxy_failed_file, Path("/r/profiles/x/proxy/failed"))
+        self.assertEqual(profile.changes_file, Path("/r/profiles/x/changes.json"))
+        self.assertEqual(profile.applier_log, Path("/r/profiles/x/applier.log"))
         self.assertEqual(profile.override_file, Path("/r/profiles/x/compose.override.yaml"))
         self.assertEqual(profile.image_dir, Path("/r/profiles/x/image"))
         self.assertEqual(profile.dockerfile, Path("/r/profiles/x/image/Dockerfile"))
@@ -102,8 +108,8 @@ class ProfileTests(HomeTestCase):
         default.proxy_allowlist_file.unlink()
         self.assertEqual(self.profile("default").proxy_allowlist_file.read_text(encoding="utf-8"), given)
 
-        # ...but one that is there stays what the running proxy was given,
-        # until something gives the proxy the new one too.
+        # ...but one that is there is written by a change, a start or
+        # hardcode apply alone: a hand edit of allowlist.txt reaches it then.
         default.allowlist_file.write_text(
             default.allowlist_file.read_text(encoding="utf-8") + "hand.example\n", encoding="utf-8"
         )
@@ -524,11 +530,11 @@ class ProfileTests(HomeTestCase):
 
         self.assertFalse(profile.dir.exists(), "released, the lock files go, and the folder with it")
 
-    def test_a_profile_removed_while_its_reloader_waits_goes_when_it_ends(self):
+    def test_a_profile_removed_while_its_applier_waits_goes_when_it_ends(self):
         self.make("x")
         profile = self.profile("x")
 
-        with profiles.try_lock(profile, profiles.RELOADER_LOCK_FILE) as held:
+        with profiles.try_lock(profile, profiles.APPLIER_LOCK_FILE) as held:
             self.assertTrue(held)
             with profiles.lock(profile):
                 profiles.remove(self.root, "x")
@@ -542,8 +548,8 @@ class ProfileTests(HomeTestCase):
         self.make("default")
         profile = self.profile("default")
 
-        # A reload of the proxy holds the containers' lock alone: an edit
-        # of the allowlist goes ahead, any other change waits.
+        # The applier holds the containers' lock alone as it recreates
+        # them: an edit of the allowlist goes ahead, any other change waits.
         with profiles.containers_lock(profile):
             with profiles.files_lock(profile, timeout=0.5):
                 pass
@@ -571,20 +577,27 @@ class ProfileTests(HomeTestCase):
         with profiles.try_lock(profile, profiles.CONTAINERS_LOCK_FILE) as again:
             self.assertTrue(again, "free once let go")
 
-    def test_what_the_proxy_loaded_is_compared_with_what_the_files_say(self):
+    def test_what_the_renderer_published_is_compared_with_what_the_files_say(self):
         self.make("default")
         profile = self.profile("default")
+        digest = hashlib.sha256(profile.proxy_allowlist_file.read_bytes()).hexdigest()
 
-        self.assertFalse(profiles.proxy_allowlist_current(profile), "nothing is recorded yet")
+        self.assertFalse(profiles.proxy_allowlist_current(profile), "nothing is published yet")
 
-        profiles.write_proxy_allowlist(profile)
-        profiles.record_proxy_reload_failure(profile, "it failed\n")
-        self.assertEqual(profiles.proxy_reload_failure(profile), "it failed")
+        # The renderer refused it, and says why.
+        profile.proxy_failed_file.write_text(f"{digest}\nline 3: it failed\n", encoding="utf-8")
+        self.assertEqual(profiles.proxy_refusal(profile), "line 3: it failed")
 
-        profiles.mark_proxy_allowlist_applied(profile)
+        # It published it.
+        profile.proxy_applied_file.write_text(digest + "\n", encoding="utf-8")
+        profile.proxy_failed_file.unlink()
         self.assertTrue(profiles.proxy_allowlist_applied(profile))
         self.assertTrue(profiles.proxy_allowlist_current(profile))
-        self.assertEqual(profiles.proxy_reload_failure(profile), "", "a proxy given the allowlist forgets the failure")
+        self.assertEqual(profiles.proxy_refusal(profile), "")
+
+        # A refusal of another allowlist isn't this one's.
+        profile.proxy_failed_file.write_text("0123\nan older one\n", encoding="utf-8")
+        self.assertEqual(profiles.proxy_refusal(profile), "")
 
         # An edit the file hasn't been written for: the proxy is behind the
         # files, though not behind the file.

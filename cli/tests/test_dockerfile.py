@@ -116,16 +116,23 @@ class StackFileTests(unittest.TestCase):
 
 class NothingInTheSandboxReachesTheStepsTests(unittest.TestCase):
     """
-    The profile's folder is never mounted into a container, but for two of
-    its files, each alone and read-only: a rebuild runs the steps in
-    image/ on this computer, so nothing in the sandbox may write them.
+    The profile's folder is never mounted into a container, but for its
+    extension list, alone and read-only, and its proxy folder, given only to
+    the allowlist's renderer, which has no network and writes there what it
+    did: a rebuild runs the steps in image/ on this computer, so nothing in
+    the sandbox may write them.
     """
 
-    # What compose.yaml mounts from the profile's folder, and where.
-    MOUNTED = {
-        "proxy-allowlist.txt": "allowlist",
-        "vscode-extensions.txt": "vscode",
-    }
+    # What compose.yaml mounts from the profile's folder, where, and whether
+    # read-only.
+    MOUNTED = [
+        ("proxy", "allowlist", False),
+        ("proxy", "allowlist-watch", False),
+        ("vscode-extensions.txt", "vscode", True),
+    ]
+
+    # The services that may write in the profile's folder: none with a network.
+    WRITERS = ("allowlist", "allowlist-watch")
 
     def setUp(self):
         if not yaml_available():
@@ -152,12 +159,17 @@ class NothingInTheSandboxReachesTheStepsTests(unittest.TestCase):
 
         return found
 
-    def test_compose_yaml_mounts_two_files_alone_read_only(self):
+    def test_compose_yaml_mounts_the_extension_list_and_the_proxy_folder_alone(self):
         mounts = self.mounts("compose.yaml")
 
-        self.assertEqual(sorted((path, service) for service, path, _ in mounts), sorted(self.MOUNTED.items()))
-        self.assertTrue(all(read_only for _, _, read_only in mounts), mounts)
+        self.assertEqual(
+            sorted((path, service, read_only) for service, path, read_only in mounts), sorted(self.MOUNTED)
+        )
         self.assertFalse(any(path == "" or path.startswith(dockerfile.FOLDER) for _, path, _ in mounts), mounts)
+
+        services = yamlio.load((REPO / "compose.yaml").read_text(encoding="utf-8"))["services"]
+        for name in self.WRITERS:
+            self.assertEqual(services[name]["network_mode"], "none", f"{name} writes there, so has no network")
 
     def test_the_steps_file_mounts_nothing_of_its_own(self):
         self.assertEqual(self.mounts(stack.IMAGE_STEPS), [])

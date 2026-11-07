@@ -86,28 +86,57 @@ x-logging: &logging
     max-file: "3"
 
 services:
-  # One-shot: renders the profile's allowlist into the CoreDNS and squid rule
-  # files. It is given proxy-allowlist.txt, which the hardcode command
-  # writes: the profile's own allowlist.txt with the entries HardCode
-  # provides (every profile's, and its languages' and tools').
+  # One-shot, at every start: renders the profile's allowlist into the
+  # CoreDNS and squid rule files, checked with squid's own parser. It is
+  # given the profile's proxy folder, where the hardcode command writes
+  # allowlist.txt (the profile's own allowlist.txt with the entries HardCode
+  # provides: every profile's, and its languages' and tools'), and where it
+  # says what it published, or refused and why. Nothing else of the
+  # profile's folder, and no network.
   allowlist:
     build: &squid-build ./images/squid
     image: hardcode-squid:${HARDCODE_SQUID_TAG:-latest}
     logging: *logging
     entrypoint: ["/usr/local/bin/allowlist-render"]
     user: root
-    environment:
+    environment: &render-environment
       UPSTREAM_DNS: ${UPSTREAM_DNS:-/etc/resolv.conf}
       CLIENT_RANGES: ${SQUID_CLIENT_RANGES:-}
       INTERNAL_RANGES: ${EGRESS_INTERNAL_RANGES:-}
       # The sandbox's own network, devnet below: no name may be pinned into it.
       DEVNET_SUBNET: ${DEVNET_SUBNET:-172.31.253.0/24}
-    volumes:
-      - ${HARDCODE_PROFILE_DIR:?run docker compose through hardcode}/proxy-allowlist.txt:/config/allowlist.txt:ro
+      STATUS_DIR: /config
+    volumes: &render-volumes
+      - ${HARDCODE_PROFILE_DIR:?run docker compose through hardcode}/proxy:/config
       - egress-config:/out
     network_mode: none
-    deploy: { resources: { limits: { memory: 128m } } }
+    deploy: { resources: { limits: { memory: 256m } } }
     restart: "no"
+
+  # Gives the running proxy each change of the allowlist, in place: renders
+  # it again five seconds after the last change, as the one-shot above
+  # does; squid and CoreDNS reload with what it publishes, without a restart.
+  allowlist-watch:
+    image: hardcode-squid:${HARDCODE_SQUID_TAG:-latest}
+    logging: *logging
+    entrypoint: ["/usr/local/bin/allowlist-watch"]
+    user: root
+    environment: *render-environment
+    volumes: *render-volumes
+    network_mode: none
+    depends_on:
+      allowlist:
+        condition: service_completed_successfully
+    # Root in the container for the policy volume, and with DAC_OVERRIDE for
+    # the proxy folder, which is yours: the rest of root's powers dropped,
+    # nothing to gain, and nothing written but those two and /tmp.
+    cap_drop: [ALL]
+    cap_add: [DAC_OVERRIDE]
+    security_opt: [no-new-privileges:true]
+    read_only: true
+    tmpfs: [/tmp]
+    deploy: { resources: { limits: { memory: 256m } } }
+    restart: unless-stopped
 
   # One-shot: creates the proxy CA (once) and publishes its certificate.
   pki:
@@ -178,8 +207,10 @@ services:
     cap_drop: [ALL]
     security_opt: [no-new-privileges:true]
     healthcheck:
-      # A real (refused) request: a bare TCP connect would be logged as an error.
-      test: ["CMD", "bash", "-c", "exec 3<>/dev/tcp/127.0.0.1/3128 && printf 'GET http://squid/ HTTP/1.0\\r\\n\\r\\n' >&3 && head -c 12 <&3 | grep -q HTTP"]
+      # A real (refused) request: a bare TCP connect would be logged as an
+      # error. Unhealthy too while the allowlist's newest policy is one squid
+      # refused (its entrypoint marks it), so that it doesn't go unnoticed.
+      test: ["CMD", "bash", "-c", "test ! -e /var/spool/squid/refused && exec 3<>/dev/tcp/127.0.0.1/3128 && printf 'GET http://squid/ HTTP/1.0\\r\\n\\r\\n' >&3 && head -c 12 <&3 | grep -q HTTP"]
       interval: 10s
       timeout: 3s
       retries: 6

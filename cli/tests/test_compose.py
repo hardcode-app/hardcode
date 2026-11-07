@@ -273,7 +273,7 @@ class ComposeTests(HomeTestCase):
     def test_status_carries_the_reason(self):
         project = self.make(FakeRunner(running=True))
         services, error = project.status()
-        self.assertEqual((len(services), error), (2, ""))
+        self.assertEqual((len(services), error), (3, ""))
 
         def daemon_down(argv, **_):
             return subprocess.CompletedProcess(argv, 1, "", "Cannot connect to the Docker daemon. Is it running?\n")

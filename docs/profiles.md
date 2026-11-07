@@ -114,7 +114,7 @@ hardcode --all enable go --no-build
 hardcode --all extension add eamodio.gitlens
 hardcode --all docker off
 hardcode --all rebuild
-hardcode --all reload
+hardcode --all apply
 hardcode --all token rotate
 ```
 
@@ -157,13 +157,14 @@ profiles/
     allowlist.txt            its own allowlist entries, and the provided ones it switches off
     compose.override.yaml    its shared folders and port forwards, and any other Compose changes of yours
     image/Dockerfile         its own Dockerfile steps, when it has any, with the files they copy beside it
-    proxy-allowlist.txt      what the proxy is given: allowlist.txt with HardCode's entries (written by hardcode)
-    proxy-allowlist.applied  a digest of what the running proxy last loaded (written by hardcode)
-    proxy-allowlist.failed   why the proxy didn't take the last changes, when it didn't (written by hardcode)
+    proxy/allowlist.txt      what the proxy is given: allowlist.txt with HardCode's entries (written by hardcode)
+    proxy/applied, failed    what the proxy did with it: took it, or refused it and why (written by the proxy)
     vscode-extensions.txt    the VS Code extensions the sandbox keeps installed (written by hardcode)
     compose.devices.yaml     the devices of this computer it may use, for Compose (written by hardcode)
+    changes.json             changes waiting to restart containers, or the last ones undone (written by hardcode)
+    applier.log              what became of those changes: hardcode logs applier (written by hardcode)
     .lock, .containers.lock  held while a command changes the profile
-    .reloader.lock           held while the proxy is being given the latest allowlist changes
+    .applier.lock            held while changes wait to restart containers
 ```
 
 The first four are yours, to edit by hand as well as through the app and
@@ -194,7 +195,7 @@ it.
 
 A changed setting applies when the containers are next created:
 `hardcode up` recreates what changed. A language switched on by hand
-reaches the allowlist at the next start or `hardcode reload`, and the
+reaches the allowlist at the next start or `hardcode apply`, and the
 image at the next `hardcode rebuild`; `hardcode enable` and `disable` do
 all of that for you.
 

@@ -26,7 +26,7 @@
   const pending = new Map(); // stream id -> {resolve, reject}
 
   // How the proxy stands with the allowlist when the CLI couldn't say.
-  const PROXY_UNKNOWN = { reloading: false, behind: false, error: '' };
+  const PROXY_UNKNOWN = { reloading: false, due: null, behind: false, error: '' };
 
   // ---------------------------------------------------------------------------
   // Streams
@@ -258,8 +258,9 @@
       return null;
     },
 
-    // -- the allowlist. These apply to the running proxy at once (the CLI
-    //    reloads it); the results say so, and the page tells the user.
+    // -- the allowlist. A running proxy reloads with each change by itself,
+    //    a few seconds after the last; the results say when, and the page
+    //    tells the user.
 
     async 'allowlist:add'(entry, flag, scope) {
       const response = await cli(['allow', '--', entry, ...(flag ? [flag] : [])], scoped(scope));
@@ -276,9 +277,10 @@
       return withResults(response);
     },
 
-    async 'allowlist:apply'(scope) {
-      const response = await cli(['reload'], scoped(scope));
-      return response.results.filter((result) => result.applied).map((result) => result.profile);
+    // Every change waiting, made now: the proxy's allowlist, and the
+    // containers waiting to be recreated. The CLI's results.
+    async 'changes:apply'(scope) {
+      return (await cli(['apply'], scoped(scope))).results;
     },
 
     // -- names on your network: each lets one name reach one address there,
@@ -320,17 +322,17 @@
       return withResults(await cli(['lan', 'remove', '--', name], scoped(scope)));
     },
 
-    // -- forwards and mounts
+    // -- forwards and mounts. The containers they recreate are recreated a
+    //    few seconds after the profile's last such change; the results say
+    //    which, and when.
 
     async 'forwards:add'(port, host, target) {
       const differentTarget = target && target !== port ? [String(target)] : [];
-      await cli(['forward', '--', String(port), host, ...differentTarget]);
-      return refresh();
+      return withResults(await cli(['forward', '--', String(port), host, ...differentTarget]));
     },
 
     async 'forwards:remove'(port) {
-      await cli(['unforward', '--', String(port)]);
-      return refresh();
+      return withResults(await cli(['unforward', '--', String(port)]));
     },
 
     async 'mounts:pickFolder'() {
@@ -338,13 +340,11 @@
     },
 
     async 'mounts:add'(local, remote, readOnly, scope) {
-      await cli(['mount', ...(readOnly ? ['--ro'] : []), '--', local, remote], scoped(scope));
-      return refresh();
+      return withResults(await cli(['mount', ...(readOnly ? ['--ro'] : []), '--', local, remote], scoped(scope)));
     },
 
     async 'mounts:remove'(remote, scope) {
-      await cli(['unmount', '--', remote], scoped(scope));
-      return refresh();
+      return withResults(await cli(['unmount', '--', remote], scoped(scope)));
     },
 
     // -- languages, extensions, the image and the Docker daemon
@@ -426,7 +426,9 @@
     // `extensions` is how far the running VS Code container has got with the
     // profile's extensions ({state, installed, total}), null while it isn't
     // running. `proxy` is how the proxy stands with the allowlist
-    // ({reloading, behind, error}): an edit is given to it in the background.
+    // ({reloading, due, behind, error}): it reloads with a change by itself.
+    // `changes` is what waits to recreate containers ({changes, services,
+    // token, due, applying, undone, error}), and the last changes undone.
     async 'stack:status'() {
       try {
         const response = await cli(['ps']);
@@ -436,6 +438,7 @@
           error: response.error || '',
           extensions: response.extensions,
           proxy: response.proxy || { ...PROXY_UNKNOWN },
+          changes: response.changes || null,
         };
       } catch (error) {
         return {
@@ -444,6 +447,7 @@
           error: String(error.message || error),
           extensions: null,
           proxy: { ...PROXY_UNKNOWN },
+          changes: null,
         };
       }
     },
@@ -484,7 +488,8 @@
 
     // The page passes the URL it already has; without one, it is asked for.
     // A new token, once the user confirms: every copy of the old one stops
-    // working, and VS Code restarts. Null when they don't.
+    // working, and VS Code restarts a few seconds later. The new state with
+    // the CLI's results; null when they don't.
     async 'vscode:port'(port) {
       const response = await cli(['port', '--', String(port)]);
       return withResults(response);
@@ -492,14 +497,14 @@
 
     async 'vscode:rotate'() {
       const confirmed = await dialog.ask(
-        'Every copy of the current token stops working (a screenshot, a shared screen, a browser history), and VS Code restarts: open windows need the new URL.',
+        'Every copy of the current token stops working (a screenshot, a shared screen, a browser history), and VS Code restarts in a few seconds: open windows need the new URL.',
         { title: `A new VS Code token for "${profile}"?`, kind: 'warning', okLabel: 'New token', cancelLabel: 'Cancel' },
       );
       if (!confirmed) {
         return null;
       }
 
-      return (await cli(['token', 'rotate'])).results;
+      return withResults(await cli(['token', 'rotate']));
     },
 
     async 'vscode:open'(url) {

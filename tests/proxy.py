@@ -26,6 +26,12 @@ against an origin server that normalises paths the way web servers do
 - an empty allowlist renders a policy that allows nothing
 - the renderer agrees with the CLI's grammar (tests/allowlist-corpus.txt) and
   renders a last line that has no newline
+- the renderer publishes a policy whole, with its manifest, and says which
+  allowlist it published; one it refuses leaves what was published as it
+  was, and it says why
+- a running proxy takes each change the watch (allowlist-watch) publishes in
+  place, without a restart, a pin's new name and address included; a policy
+  squid would refuse is left out, said so, and the one it had stays in force
 - an internal network in isolated gateway mode has no way to the host
 
 Squid is on two networks, as in Compose: the internal one its clients are
@@ -42,6 +48,7 @@ Every container is memory-capped; nothing of your own stack is touched.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 from dataclasses import dataclass
@@ -49,7 +56,7 @@ from pathlib import Path
 from typing import Optional, Sequence, Union
 
 import harness
-from harness import FIXTURES, ROOT, Docker, Suite
+from harness import FIXTURES, ROOT, Docker, Output, Suite
 
 SQUID_IMAGE = os.environ.get("SQUID_IMAGE", "hardcode-squid:test")
 NETWORK = f"hc-proxy-test-{os.getpid()}"
@@ -91,12 +98,30 @@ sshonly.test:22 ssh
 """
 
 # The test origins' addresses are private, so for these checks only
-# loopback, link-local and shared address space count as internal.
-INTERNAL_RANGES = """\
-127.0.0.0/8
-169.254.0.0/16
-100.64.0.0/10
-"""
+# loopback, link-local and shared address space count as internal: the
+# renderer is given them as Compose gives it a profile's setting.
+INTERNAL_RANGES = {"INTERNAL_RANGES": "127.0.0.0/8 169.254.0.0/16 100.64.0.0/10"}
+
+# Squid's files, as the renderer publishes them (images/squid/allowlist-render.sh).
+POLICY_FILES = [
+    "hosts.txt",
+    "urls-ro.regex",
+    "urls-rw.regex",
+    "ssh.conf",
+    "pins.conf",
+    "pins.hosts",
+    "sandbox.txt",
+    "clients.txt",
+    "internal.txt",
+]
+
+# What the running proxy is given later, in place: one more path.
+LATER = "origin.test/later\n"
+
+# How long a change may take to reach the running proxy: the watch's quiet
+# second (QUIET_SECONDS, cut down from five for the suite), its look every
+# second, and squid's.
+RELOAD_SECONDS = 30
 
 # The names on your network: origins A and B, at their addresses beyond
 # squid's networks ({a} is A's), which are private, so internal to the
@@ -288,6 +313,22 @@ def read_lines(path: Path) -> list[str]:
     return path.read_text(encoding="utf-8").splitlines() if path.exists() else []
 
 
+def sha256_of(path: Path) -> str:
+    """
+    A file's sha256, as sha256sum writes it.
+    """
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def write_manifest(policy: Path) -> None:
+    """
+    Write a policy's manifest, as the renderer does: the sha256 of each of
+    squid's files, sha256sum's way.
+    """
+    lines = [f"{sha256_of(policy / name)}  {name}\n" for name in POLICY_FILES]
+    (policy / "manifest").write_text("".join(lines), encoding="utf-8")
+
+
 class ProxyTest:
     """
     The squid image, its renderer, and the containers around them.
@@ -333,6 +374,80 @@ class ProxyTest:
             entrypoint="/usr/local/bin/allowlist-render",
         )
         return output.ok, output_dir, output.text
+
+    def render_in(self, folder: Path, output_dir: Path, environment: Optional[dict[str, str]] = None) -> Output:
+        """
+        Render the allowlist in *folder* (``allowlist.txt``) into
+        *output_dir*, as Compose's ``allowlist`` service does: with *folder*
+        as the profile's proxy folder, where it says what it did.
+        """
+        return self.docker.run(
+            SQUID_IMAGE,
+            memory="256m",
+            network="none",
+            user=harness.current_user(),
+            environment={"STATUS_DIR": "/config", **(environment or {})},
+            volumes=[f"{folder}:/config", f"{output_dir}:/out"],
+            entrypoint="/usr/local/bin/allowlist-render",
+        )
+
+    def check_publishing(self) -> None:
+        """
+        What the renderer publishes, and what it says of it: a policy
+        whole, with its manifest, and which allowlist it came from; one it
+        refuses leaves what was published as it was.
+        """
+        folder = self.scratch / "publish-config"
+        output_dir = self.scratch / "publish"
+        folder.mkdir()
+        output_dir.mkdir()
+
+        allowlist = folder / "allowlist.txt"
+        allowlist.write_text("example.com\n", encoding="utf-8")
+        output = self.render_in(folder, output_dir)
+
+        self.suite.check(
+            "the renderer says which allowlist it published",
+            output.ok and read_lines(folder / "applied") == [sha256_of(allowlist)],
+            output.text,
+        )
+        self.suite.check(
+            "...and so does the policy",
+            read_lines(output_dir / "allowlist.sha256") == [sha256_of(allowlist)],
+        )
+
+        policy = output_dir / "squid"
+        manifest = [line.split() for line in read_lines(policy / "manifest")]
+        self.suite.check(
+            "a manifest names each of squid's files by its sha256",
+            [name for _, name in manifest] == POLICY_FILES
+            and all(digest == sha256_of(policy / name) for digest, name in manifest),
+            str(manifest),
+        )
+
+        published = {name: (policy / name).read_bytes() for name in [*POLICY_FILES, "manifest"]}
+        allowlist.write_text("example.com\nnot a valid line\n", encoding="utf-8")
+        output = self.render_in(folder, output_dir)
+
+        failed = read_lines(folder / "failed")
+        self.suite.check(
+            "an allowlist it refuses is said so, by its sha256, and why",
+            not output.ok and failed[:1] == [sha256_of(allowlist)] and "line 2" in " ".join(failed[1:]),
+            f"{output.text}\nfailed: {failed}",
+        )
+        self.suite.check(
+            "...and what was published stays as it was",
+            all((policy / name).read_bytes() == data for name, data in published.items())
+            and read_lines(folder / "applied") != [sha256_of(allowlist)],
+        )
+
+        allowlist.write_text("example.com\npypi.org\n", encoding="utf-8")
+        output = self.render_in(folder, output_dir)
+        self.suite.check(
+            "the next one it publishes, the refusal goes",
+            output.ok and not (folder / "failed").exists() and read_lines(folder / "applied") == [sha256_of(allowlist)],
+            output.text,
+        )
 
     def check_grammar_corpus(self) -> None:
         """
@@ -682,6 +797,117 @@ class ProxyTest:
             log,
         )
 
+    def started_at(self, container: str) -> str:
+        """
+        When a container last started: the same while it hasn't restarted.
+        """
+        return harness.run(["docker", "inspect", "--format", "{{.State.StartedAt}}", container]).text.strip()
+
+    def reaches(self, request: Request, ca_public: Path) -> bool:
+        """
+        Whether *request* gets what it should within ``RELOAD_SECONDS``: a
+        change on its way to the running proxy.
+        """
+        wanted = request.expect if isinstance(request.expect, tuple) else (request.expect,)
+        return harness.wait_until(
+            lambda: self.send(request, ca_public).startswith(wanted),
+            timeout=RELOAD_SECONDS,
+            interval=1,
+        )
+
+    def check_reload_in_place(self, ca_private: Path, ca_public: Path, tls: Path) -> None:
+        """
+        A running proxy, given a change by the watch, reloads with it in
+        place; and a policy squid would refuse is left out.
+        """
+        folder = self.scratch / "watch-config"
+        output_dir = self.scratch / "watch"
+        folder.mkdir()
+        output_dir.mkdir()
+
+        (folder / "allowlist.txt").write_text(ALLOWLIST, encoding="utf-8")
+        output = self.render_in(folder, output_dir, INTERNAL_RANGES)
+        self.suite.require("the test allowlist renders into the folder the proxy reads", output.ok, output.text)
+
+        squid = f"{NETWORK}-reload"
+        self.start_squid(squid, output_dir / "squid", ca_private, tls, POLICY_HOSTS)
+        started = self.started_at(squid)
+
+        watch = f"{NETWORK}-watch"
+        self.docker.run(
+            SQUID_IMAGE,
+            memory="256m",
+            name=watch,
+            detach=True,
+            network="none",
+            user=harness.current_user(),
+            environment={"STATUS_DIR": "/config", "QUIET_SECONDS": "1", **INTERNAL_RANGES},
+            volumes=[f"{folder}:/config", f"{output_dir}:/out"],
+            entrypoint="/usr/local/bin/allowlist-watch",
+        )
+
+        later = Request("", "GET", "http://origin.test/later/x", "200 GET /later/x")
+        self.check_requests(
+            [Request("before the change, a path it doesn't list is refused", "GET", later.url)], ca_public
+        )
+
+        (folder / "allowlist.txt").write_text(ALLOWLIST + LATER, encoding="utf-8")
+        self.suite.check(
+            "a change reaches the running proxy within seconds",
+            self.reaches(later, ca_public),
+            f"{self.docker.logs(watch)}\n{self.docker.logs(squid, lines=40)}",
+        )
+        self.suite.check(
+            "...in place: squid reloaded, and wasn't restarted",
+            self.started_at(squid) == started
+            and "reloading with the allowlist's new policy" in self.docker.logs(squid, lines=400),
+            self.docker.logs(squid, lines=40),
+        )
+
+        # A policy squid would refuse, which no allowlist renders to: published
+        # by hand, with its manifest, the watch stopped first.
+        self.docker.remove(watch)
+        policy = output_dir / "squid"
+        (policy / "urls-ro.regex").write_text("^http://origin\\.test/(unclosed\n", encoding="utf-8")
+        write_manifest(policy)
+
+        refused = harness.wait_until(
+            lambda: "kept the policy it has" in self.docker.logs(squid, lines=400),
+            timeout=RELOAD_SECONDS,
+            interval=1,
+        )
+        self.suite.check(
+            "a policy squid would refuse is left out, saying why",
+            refused and "regcomp" in self.docker.logs(squid, lines=400),
+            self.docker.logs(squid, lines=40),
+        )
+        marked = harness.run(["docker", "exec", squid, "test", "-e", "/var/spool/squid/refused"])
+        self.suite.check(
+            "...squid runs on, marked for its healthcheck",
+            marked.ok and self.started_at(squid) == started,
+            marked.text,
+        )
+        self.check_requests(
+            [Request("...and the policy it had stays in force", "GET", later.url, later.expect)], ca_public
+        )
+
+    def check_pins_reload(self, folder: Path, output_dir: Path, pins: str, ca_public: Path, environment: dict) -> None:
+        """
+        A running proxy given a new pin, *pins* (the allowlist it has) and
+        one more, reloads its hosts file with it: the new name reaches its
+        address.
+        """
+        renamed = f"{pins}renamed.test\nlan renamed.test {OUTSIDE['inside-a']}\n"
+        (folder / "allowlist.txt").write_text(renamed, encoding="utf-8")
+
+        output = self.render_in(folder, output_dir, environment)
+        self.suite.require("the pins with one more render", output.ok, output.text)
+
+        request = Request("", "GET", "http://renamed.test/x", "200 GET /x from A")
+        self.suite.check(
+            "a pin given to the running proxy reaches its address, in place", self.reaches(request, ca_public)
+        )
+
     def send(self, request: Request, ca_public: Path) -> str:
         """
         Send one request through the proxy from a client container.
@@ -723,6 +949,9 @@ def run_checks(suite: Suite) -> None:
         test.check_grammar_corpus()
         test.check_rendering_edge_cases()
 
+        suite.section("renderer: what it publishes, and says")
+        test.check_publishing()
+
         suite.section("network: internal, isolated gateway")
         test.check_isolated_network()
         gateway = test.create_egress()
@@ -740,7 +969,10 @@ def run_checks(suite: Suite) -> None:
             "172.16.0.0/12" in internal and "169.254.0.0/16" in internal,
             "\n".join(internal),
         )
-        (rendered / "squid" / "internal.txt").write_text(INTERNAL_RANGES, encoding="utf-8")
+
+        # The suite's own, as a profile's setting gives them.
+        accepted, rendered, log = test.render(ALLOWLIST, "policy-suite", INTERNAL_RANGES)
+        suite.require("the test allowlist renders with the suite's internal ranges", accepted, log)
 
         ca_private, ca_public = test.make_proxy_ca()
         test.start_squid(f"{NETWORK}-squid", rendered / "squid", ca_private, tls, POLICY_HOSTS)
@@ -750,8 +982,12 @@ def run_checks(suite: Suite) -> None:
         test.check_requests(INSPECTED_HTTPS, ca_public)
         test.check_requests(TUNNELS, ca_public)
 
-        suite.section("names on your network")
+        suite.section("the running proxy takes each change in place")
         docker.remove(f"{NETWORK}-squid")
+        test.check_reload_in_place(ca_private, ca_public, tls)
+
+        suite.section("names on your network")
+        docker.remove(f"{NETWORK}-reload")
         sandbox = test.start_inside_origins()
         pins = PIN_ALLOWLIST.format(a=OUTSIDE["inside-a"], gateway=gateway, sandbox=sandbox)
 
@@ -765,8 +1001,13 @@ def run_checks(suite: Suite) -> None:
             log,
         )
 
-        accepted, pinned, log = test.render(pins, "pins", {"DEVNET_SUBNET": ELSEWHERE})
-        suite.require("an allowlist with names on your network renders", accepted, log)
+        pins_folder = scratch / "pins-config"
+        pinned = scratch / "pins"
+        pins_folder.mkdir()
+        pinned.mkdir()
+        (pins_folder / "allowlist.txt").write_text(pins, encoding="utf-8")
+        output = test.render_in(pins_folder, pinned, {"DEVNET_SUBNET": ELSEWHERE})
+        suite.require("an allowlist with names on your network renders", output.ok, output.text)
         test.start_squid(f"{NETWORK}-pins", pinned / "squid", ca_private, tls, PIN_HOSTS)
         test.check_own_networks(f"{NETWORK}-pins", gateway)
 
@@ -774,6 +1015,7 @@ def run_checks(suite: Suite) -> None:
         suite.note("-- pins into squid's own networks, allowed and pinned")
         test.check_requests(NEVER_PINNED, ca_public)
         test.check_refusal_reasons(f"{NETWORK}-pins")
+        test.check_pins_reload(pins_folder, pinned, pins, ca_public, {"DEVNET_SUBNET": ELSEWHERE})
 
         suite.section("the proxy with nothing allowed")
         docker.remove(f"{NETWORK}-pins")

@@ -1,9 +1,11 @@
 """
 The operations behind the commands.
 
-Each operation takes a profile, edits its files, applies the change to the
-running containers when there are any, and returns a ``Result`` that the
-command line prints, or emits as JSON for the app.
+Each operation takes a profile, edits its files, has the running containers
+take the change when there are any, and returns a ``Result`` that the
+command line prints, or emits as JSON for the app. A change the containers
+take only by being recreated waits a few seconds for the next (``applier``);
+the proxy reloads with a change of the allowlist by itself.
 """
 
 from __future__ import annotations
@@ -20,6 +22,7 @@ from typing import Callable, Optional
 
 from . import (
     allowlist,
+    applier,
     blocked,
     bounded,
     devices,
@@ -30,7 +33,6 @@ from . import (
     override,
     packages,
     profiles,
-    reloader,
     stack,
 )
 from .compose import Compose, ComposeError, Runner
@@ -62,17 +64,24 @@ STATUS_BYTES = 65536
 STATUS_ITEMS = 1000
 STATUS_ITEM_LENGTH = 256
 
+# What deletes VS Code's connection token, in the home volume: the VS Code
+# container writes a new one as it starts when there is none.
+REMOVE_TOKEN = "rm -f ~/.vscode-server/connection-token"
+
 
 @dataclass
 class Result:
     """
     What an operation did, for one profile.
 
-    ``applied`` says whether the running sandbox took the change: ``True`` if
-    it did, ``False`` when the profile isn't running (the change applies at its
+    ``applied`` says whether the running sandbox takes the change: ``True`` if
+    it does, ``False`` when the profile isn't running (the change applies at its
     next start), and ``None`` when there was nothing to apply. ``reloading``
-    says that the running proxy is given it in the background, a few seconds
-    after the profile's last change (see ``reloader``): it isn't in force yet.
+    says that the running proxy reloads with it by itself, a few seconds
+    after the allowlist's last change; ``restarts``, the containers that are
+    recreated with it, a few seconds after the profile's last such change
+    (see ``applier``). Either way it isn't in force yet, and ``due`` says
+    when it will be, in seconds since the epoch.
     """
 
     profile: str
@@ -81,6 +90,8 @@ class Result:
     applied: Optional[bool] = None
     data: dict = field(default_factory=dict)
     reloading: bool = False
+    restarts: list[str] = field(default_factory=list)
+    due: Optional[float] = None
 
 
 def _checked_status(status: object) -> Optional[dict]:
@@ -172,8 +183,10 @@ class Ops:
     The operations on one profile of a checkout.
 
     *host* is this computer as the devices see it (``devices.Host``): its
-    platform and its device nodes, which tests replace. *start_reloader*
-    starts the background reload of a running proxy (``reloader.start``).
+    platform and its device nodes, which tests replace. *start_applier*
+    starts the profile's applier, which recreates its containers for the
+    changes waiting (``applier.start``); *clock* is the time of day, which
+    says when they are due.
     """
 
     def __init__(
@@ -187,7 +200,8 @@ class Ops:
         resolve: lan.Resolver = lan.resolve,
         this_computer: lan.ThisComputer = lan.is_this_computer,
         host: Optional[devices.Host] = None,
-        start_reloader: Callable[[Path, profiles.Profile], None] = reloader.start,
+        start_applier: Callable[[Path, profiles.Profile], None] = applier.start,
+        clock: Callable[[], float] = time.time,
     ):
         self.root = root
         self.profile = profile
@@ -195,7 +209,8 @@ class Ops:
         self.resolve = resolve
         self.this_computer = this_computer
         self.host = host or devices.Host()
-        self.start_reloader = start_reloader
+        self.start_applier = start_applier
+        self.clock = clock
         self.compose = Compose(profile, runner=runner, docker=docker, sleep=sleep)
 
     # -- helpers --------------------------------------------------------------
@@ -215,79 +230,94 @@ class Ops:
 
         return True
 
-    def reload_allowlist(self) -> bool:
+    def give_proxy_now(self) -> None:
         """
-        Render the proxy's allowlist file into squid's rules again, and
-        restart squid with them.
+        Have the running proxy take the proxy allowlist as it is now, without
+        waiting for its quiet seconds: the one-shot renderer runs again,
+        checks it with squid's own parser and publishes it, and squid and
+        CoreDNS reload with it in place within a second or two. Raises with
+        the renderer's reason when it refuses it: the proxy keeps the policy
+        it has.
+        """
+        try:
+            self.compose.run("--progress", "quiet", "run", "--rm", "--no-deps", "allowlist", capture=True, check=True)
+        except ComposeError as error:
+            raise ComposeError(f"the proxy keeps the allowlist it has: {error}") from error
 
-        Returns ``False`` when the profile isn't running: the change applies at
-        its next start. Raises when it is running but the proxy doesn't come
-        back healthy, because then nobody knows which policy is in force.
+    def _vscode_running(self) -> bool:
+        """
+        Whether the VS Code container is running.
+        """
+        return any(service.service == "vscode" and service.state == "running" for service in self.compose.ps())
+
+    def _made(self, message: str, services: list[str], before: dict, token: bool = False) -> Result:
+        """
+        The result of a change written for *services* to be recreated with.
+
+        On a running profile it waits for the applier, which recreates them
+        with every change waiting, ``applier.QUIET_SECONDS`` after the last;
+        *before* is the profile as the change found it (``applier.snapshot``),
+        what goes back if they can't be recreated with it, and *token* says
+        VS Code is given a new token as it restarts. A stopped profile takes
+        the change at its next start.
         """
         if not self.compose.running():
-            return False
+            return Result(self.profile.name, message, applied=False)
 
-        # Every allowlist and squid container of the profile goes first, a
-        # leftover from a recreate that was cut short included (Compose
-        # renames the old container out of the way and leaves it behind when
-        # it fails, and a later recreate trips over it); then both start
-        # fresh, the renderer from the file as it now is.
-        self.compose.run(
-            "--progress", "quiet", "rm", "--stop", "--force", "allowlist", "squid",
-            capture=True,
-            check=True,
-        )  # fmt: skip
-        self.compose.run("--progress", "quiet", "up", "-d", "allowlist", "squid", capture=True, check=True)
+        waiting = applier.record(self.profile, message, services, before, token=token, clock=self.clock)
+        self.start_applier(self.root, self.profile)
 
-        if not self.compose.wait_healthy("squid"):
-            raise ComposeError(
-                "the allowlist was written, but squid didn't come back healthy after the reload, "
-                "so the new policy may not be in force: "
-                f"hardcode -p {self.profile.name} logs allowlist squid"
-            )
+        return Result(self.profile.name, message, applied=True, restarts=waiting.services, due=waiting.due)
 
-        profiles.mark_proxy_allowlist_applied(self.profile)
-        return True
-
-    def proxy_started(self, was_running: bool) -> bool:
+    def recreate_for(self, waiting: applier.Waiting) -> None:
         """
-        After a start that succeeded, make sure the proxy has the policy the
-        proxy allowlist holds; whether it was reloaded for that.
+        Recreate the containers *waiting* names, from the profile's files as
+        they are now: the applier's step, and ``hardcode apply``'s. Raises
+        when Compose fails.
 
-        A proxy that started from nothing read the file as it started. One
-        that was running keeps the rules it last loaded, and is reloaded when
-        those aren't the file's: the file changed since (an edit, a newer
-        HardCode's entries) and the start or reload that should have given it
-        failed before it did. Rewriting the file is no proof of what the
-        proxy enforces.
+        Only those containers: what they depend on runs already. The Docker
+        daemon is started while it is on, and removed while it is off. For a
+        new token, VS Code's is deleted first, and the VS Code container
+        recreated even if nothing else of it changed: it writes the next one
+        as it starts.
         """
-        if not was_running:
-            profiles.mark_proxy_allowlist_applied(self.profile)
-            return False
+        compose = self.compose
+        docker_on = compose.docker_enabled()
 
-        return self.reload_if_behind()
+        if waiting.token and self._vscode_running():
+            compose.run("exec", "-T", "vscode", "sh", "-c", REMOVE_TOKEN, capture=True, check=True)
 
-    def reload_if_behind(self) -> bool:
+        # The container of a Compose profile that is switched off isn't an
+        # orphan to `up`, so it is stopped and removed by name. Its data
+        # volume stays, for `docker on`.
+        if "docker" in waiting.services and not docker_on:
+            compose.run(
+                "--profile", "docker", "--progress", "quiet", "rm", "--stop", "--force", "docker",
+                capture=True,
+                check=True,
+            )  # fmt: skip
+
+        others = [service for service in waiting.services if service != "vscode" and (service != "docker" or docker_on)]
+        if others:
+            compose.run("--progress", "quiet", "up", "-d", "--no-deps", *others, capture=True, check=True)
+
+        if "vscode" in waiting.services or waiting.token:
+            again = ["--force-recreate"] if waiting.token else []
+            compose.run("--progress", "quiet", "up", "-d", "--no-deps", *again, "vscode", capture=True, check=True)
+
+    def apply_waiting(self, now: bool = True) -> Optional[applier.Waiting]:
         """
-        Reload a running proxy whose rules aren't the proxy allowlist's;
-        whether it was reloaded.
+        Make the changes the profile has waiting, at once, under the locks
+        the caller holds (``applier.make``): what became of them, ``None``
+        when nothing waited.
         """
-        if profiles.proxy_allowlist_applied(self.profile):
-            return False
+        return applier.make(self.profile, self.recreate_for, self.compose.running, clock=self.clock, now=now)
 
-        return self.reload_allowlist()
-
-    def _change_override(self, edit: Callable[[Path], object], *services: str) -> bool:
+    def _change_override(self, edit: Callable[[Path], object]) -> None:
         """
-        Apply *edit* to the override file and recreate *services* with it if
-        the profile is running; returns whether it was. Either the whole
-        change happens, or none of it.
-
-        The old file goes back if the edit fails, if Compose rejects the
-        result, or if the services can't be recreated with it (a host port
-        that something else holds, say). In that last case they are
-        recreated again from the old file, so the profile isn't left stopped,
-        or unable to start, by a change that didn't work.
+        Apply *edit* to the override file, and have Compose check the result.
+        Either the whole change is written, or none of it: the old file goes
+        back if the edit fails or Compose rejects the result.
         """
         path = self.profile.override_file
         if not path.exists():
@@ -307,24 +337,6 @@ class Ops:
         if not ok:
             path.write_bytes(backup)
             raise override.OverrideError(f"compose rejected the change; file restored: {complaint}")
-
-        try:
-            return self._recreate(*services)
-        except ComposeError as error:
-            path.write_bytes(backup)
-            self._restart_as_before(*services)
-            raise ComposeError(f"{error}; the change was undone") from error
-
-    def _restart_as_before(self, *services: str) -> None:
-        """
-        Recreate *services* from the files as they were, after a change that
-        couldn't be applied. A failure here is reported, not raised: the
-        error worth showing is the one that made the change fail.
-        """
-        try:
-            self._recreate(*services)
-        except ComposeError as error:
-            self.warn(f"warning: {', '.join(services)} couldn't be started again as before: {error}")
 
     def _dev_user(self) -> str:
         """
@@ -352,12 +364,12 @@ class Ops:
     def _edit_allowlist(self, edit: Callable[[str], tuple[str, str]]) -> tuple[bool, str, Optional[bool]]:
         """
         Apply *edit* to ``allowlist.txt``, and when it changed the file,
-        see that the proxy is given the new allowlist (``give_proxy_later``):
+        write the allowlist the proxy is given (``give_proxy_later``):
         whether it changed, what *edit* said about it, and whether the
         running proxy takes it.
 
         It runs under the profile's files lock alone (``profiles.files_lock``),
-        so it doesn't wait for a reload of the proxy under way.
+        so it doesn't wait for containers being recreated (``applier``).
         """
         path = self.profile.allowlist_file
         before = path.read_text(encoding="utf-8")
@@ -372,22 +384,14 @@ class Ops:
 
     def give_proxy_later(self) -> bool:
         """
-        After an edit of the allowlist: a running profile's proxy is given it
-        in the background, a few seconds after the profile's last edit
-        (``reloader``), and ``True`` says so. A profile that isn't running
-        gives its proxy the allowlist at its next start (``False``); the
-        proxy allowlist is written now all the same, unless a holder of the
-        containers lock may be giving the proxy that file this moment.
+        After an edit of the allowlist: write the allowlist the proxy is
+        given. A running proxy reloads with it by itself, in place, a few
+        seconds after the allowlist's last change (the stack's
+        ``allowlist-watch``), and ``True`` says so; a stopped one reads it as
+        it starts (``False``).
         """
-        if self.compose.running():
-            self.start_reloader(self.root, self.profile)
-            return True
-
-        with profiles.try_lock(self.profile, profiles.CONTAINERS_LOCK_FILE) as free:
-            if free:
-                self._write_proxy_allowlist()
-
-        return False
+        self._write_proxy_allowlist()
+        return self.compose.running()
 
     def _allowlist_result(
         self,
@@ -397,16 +401,19 @@ class Ops:
         data: Optional[dict] = None,
     ) -> Result:
         """
-        The result of an allowlist edit: one a running profile took is given
-        to its proxy in the background.
+        The result of an allowlist edit: a running profile's proxy reloads
+        with it by itself, ``applier.QUIET_SECONDS`` after the last.
         """
+        reloading = applied is True
+
         return Result(
             self.profile.name,
             message,
             changed=changed,
             applied=applied,
             data=data or {},
-            reloading=applied is True,
+            reloading=reloading,
+            due=self.clock() + applier.QUIET_SECONDS if reloading else None,
         )
 
     def _write_proxy_allowlist(self) -> tuple[str, str]:
@@ -717,7 +724,8 @@ class Ops:
         profile's languages and tools as they are now: what that changed, one
         line per entry (``Rust: + newrustsite.com``), when there was a file
         before. A newer HardCode's provided entries arrive this way, at the
-        next start or reload. The running proxy isn't touched.
+        next start or ``hardcode apply``. A running proxy reloads with it by
+        itself, a few seconds later.
         """
         before, after = self._write_proxy_allowlist()
         if not before:
@@ -725,15 +733,29 @@ class Ops:
 
         return allowlist.changes(before, after)
 
-    def reload(self) -> Result:
+    def apply(self) -> Result:
         """
-        Give the running proxy the allowlist again, after a hand edit, with
-        the provided entries as this HardCode has them.
+        Make every change waiting, at once: the proxy takes the allowlist
+        as the profile's files say it now (after a hand edit of
+        ``allowlist.txt`` too, and with the entries this HardCode provides),
+        and the containers waiting to be recreated are (``applier``).
+
+        Raises when the renderer refuses the allowlist, or the containers
+        can't be recreated with the changes waiting, which are then undone.
         """
         changes = self.update_proxy_allowlist()
+        applied = self.compose.running()
 
-        applied = self.reload_allowlist()
-        message = "proxy reloaded" if applied else "profile isn't running"
+        if applied:
+            self.give_proxy_now()
+
+        made = self.apply_waiting()
+        if made is not None and made.error:
+            raise ComposeError(f"{'; '.join(made.undone)}: undone, as {made.error}")
+
+        message = "the proxy has the allowlist" if applied else "profile isn't running"
+        if made is not None and applied:
+            message += "; the changes waiting were made"
         if changes:
             message = f"allowlist: {'; '.join(changes)}; {message}"
 
@@ -752,8 +774,8 @@ class Ops:
     def set_port(self, port: int) -> Result:
         """
         Publish VS Code on *port* instead: ``VSCODE_PORT`` in the ``.env``,
-        and the gateway recreated with it if the profile is running (only the
-        gateway: VS Code itself carries on).
+        and the gateway recreated with it a few seconds later if the profile
+        is running (``applier``; only the gateway: VS Code itself carries on).
 
         A port another profile publishes, or one of this profile's forwards,
         is refused. If the gateway can't be recreated on it (another program
@@ -779,20 +801,10 @@ class Ops:
             if port in {forward.port for forward in override.get_forwards(document)}:
                 raise profiles.ProfileError(f"port {port} is one of this profile's forwards")
 
-        backup = env_file.read_bytes()
+        before = applier.snapshot(self.profile)
         envfile.set_value(env_file, "VSCODE_PORT", str(port))
 
-        if not self.compose.running():
-            return Result(self.profile.name, f"VS Code on port {port}", applied=False)
-
-        try:
-            self.compose.run("--progress", "quiet", "up", "-d", "--no-deps", "gateway", capture=True, check=True)
-        except ComposeError as error:
-            env_file.write_bytes(backup)
-            self._restart_as_before("gateway")
-            raise ComposeError(f"{error}; VS Code stays on port {current}") from error
-
-        return Result(self.profile.name, f"VS Code on port {port}", applied=True)
+        return self._made(f"VS Code on port {port}", ["gateway"], before)
 
     # -- forwards --------------------------------------------------------------
 
@@ -816,26 +828,21 @@ class Ops:
             if existing.port == port and existing.host == host and existing.target == (target or port):
                 return Result(self.profile.name, f"localhost:{port} is already forwarded", changed=False)
 
+        before = applier.snapshot(self.profile)
         added: list[override.Forward] = []
-        applied = self._change_override(
-            lambda path: added.append(override.add_forward(path, port, host, target)),
-            "gateway",
-        )
+        self._change_override(lambda path: added.append(override.add_forward(path, port, host, target)))
         forward = added[0]
 
-        return Result(
-            self.profile.name,
-            f"forwarding localhost:{port} -> {forward.host}:{forward.target}",
-            applied=applied,
-        )
+        return self._made(f"forwarding localhost:{port} -> {forward.host}:{forward.target}", ["gateway"], before)
 
     def unforward(self, port: int) -> Result:
         """
         Stop forwarding localhost:*port*.
         """
-        applied = self._change_override(lambda path: override.remove_forward(path, port), "gateway")
+        before = applier.snapshot(self.profile)
+        self._change_override(lambda path: override.remove_forward(path, port))
 
-        return Result(self.profile.name, f"forward for port {port} removed", applied=applied)
+        return self._made(f"forward for port {port} removed", ["gateway"], before)
 
     # -- mounts ----------------------------------------------------------------
 
@@ -846,20 +853,15 @@ class Ops:
         """
         self._refuse_the_home(local)
 
+        before = applier.snapshot(self.profile)
         added: list[override.Mount] = []
-        applied = self._change_override(
+        self._change_override(
             lambda path: added.append(override.add_mount(path, local, remote, read_only, self._dev_user())),
-            "vscode",
-            "docker",
         )
         mounted = added[0]
 
         note = " (read-only)" if read_only else ""
-        return Result(
-            self.profile.name,
-            f"mounted {mounted.local} at {mounted.remote}{note}",
-            applied=applied,
-        )
+        return self._made(f"mounted {mounted.local} at {mounted.remote}{note}", ["vscode", "docker"], before)
 
     def _refuse_the_home(self, local: str) -> None:
         """
@@ -888,14 +890,11 @@ class Ops:
         """
         Remove a mount, by its path in the VS Code container.
         """
+        before = applier.snapshot(self.profile)
         removed: list[str] = []
-        applied = self._change_override(
-            lambda path: removed.append(override.remove_mount(path, remote, self._dev_user())),
-            "vscode",
-            "docker",
-        )
+        self._change_override(lambda path: removed.append(override.remove_mount(path, remote, self._dev_user())))
 
-        return Result(self.profile.name, f"mount at {removed[0]} removed", applied=applied)
+        return self._made(f"mount at {removed[0]} removed", ["vscode", "docker"], before)
 
     # -- the Docker daemon -----------------------------------------------------
 
@@ -903,29 +902,18 @@ class Ops:
         """
         Switch the rootless Docker daemon beside the VS Code container on, or off for a
         harder sandbox: nothing privileged runs for the profile, and there is
-        no ``docker`` inside.
+        no ``docker`` inside. A running profile's daemon is started or
+        removed a few seconds later, and the VS Code container recreated
+        with it (``applier``).
         """
         word = "on" if enabled else "off"
         if self.compose.docker_enabled() == enabled:
             return Result(self.profile.name, f"docker is already {word}", changed=False)
 
+        before = applier.snapshot(self.profile)
         self._write_docker(enabled)
 
-        applied = self.compose.running()
-        if applied:
-            try:
-                self._switch_docker(enabled)
-            except ComposeError as error:
-                # Back to how it was, file and containers, so that what the
-                # profile says is what runs.
-                self._write_docker(not enabled)
-                try:
-                    self._switch_docker(not enabled)
-                except ComposeError as second:
-                    self.warn(f"warning: the sandbox couldn't be started again as before: {second}")
-                raise ComposeError(f"{error}; the change was undone") from error
-
-        return Result(self.profile.name, f"docker {word}", applied=applied)
+        return self._made(f"docker {word}", ["docker", "vscode"], before)
 
     def _write_docker(self, enabled: bool) -> None:
         """
@@ -936,24 +924,6 @@ class Ops:
             envfile.unset(self.profile.env_file, "ENABLE_DOCKER")
         else:
             envfile.set_value(self.profile.env_file, "ENABLE_DOCKER", "false")
-
-    def _switch_docker(self, enabled: bool) -> None:
-        """
-        Bring the running profile in line with ``ENABLE_DOCKER``, already written.
-        """
-        if not enabled:
-            # The container of a Compose profile that is switched off isn't
-            # an orphan to `up`, so it is stopped and removed by name. Its
-            # data volume stays, for `docker on`.
-            self.compose.run(
-                "--profile", "docker", "--progress", "quiet", "rm", "--stop", "--force", "docker",
-                capture=True,
-                check=True,
-            )  # fmt: skip
-
-        # The VS Code container is recreated because its environment changed; when
-        # switching on, the daemon starts beside it.
-        self.compose.run("--progress", "quiet", "up", "-d", capture=True, check=True)
 
     # -- devices of this computer ----------------------------------------------
 
@@ -1040,14 +1010,15 @@ class Ops:
         """
         Switch a device of this computer on or off for the VS Code
         container: ``VSCODE_DEVICES`` in the ``.env``, the Compose file
-        written from it, and the VS Code container recreated with them if
-        the profile is running (only it: the Docker daemon gets no devices).
+        written from it, and the VS Code container recreated with them a few
+        seconds later if the profile is running (``applier``; only it: the
+        Docker daemon gets no devices).
 
         On is refused for a device this computer can't give, and needs
         *confirm*'s yes, asked with the device; off asks nothing. Either the
-        whole change happens, or none of it: when Compose rejects the file,
-        or the container can't be recreated with it, both files go back,
-        and the container is recreated from them again.
+        whole change happens, or none of it: when Compose rejects the file
+        both files go back, and when the container can't be recreated with
+        it the applier puts them back and recreates it from them again.
         """
         key = devices.check(key)
         word = "on" if enabled else "off"
@@ -1067,20 +1038,7 @@ class Ops:
         wanted = [other for other in current if other != key] + ([key] if enabled else [])
 
         # What the two files were, to put back when the change can't be made.
-        env_file = self.profile.env_file
-        fragment_file = self.profile.devices_file
-        env_before = env_file.read_bytes()
-        fragment_before = fragment_file.read_bytes() if fragment_file.exists() else None
-
-        def restore() -> None:
-            """
-            Put both files back as they were; a file that wasn't there goes.
-            """
-            env_file.write_bytes(env_before)
-            if fragment_before is None:
-                fragment_file.unlink(missing_ok=True)
-            else:
-                fragment_file.write_bytes(fragment_before)
+        before = applier.snapshot(self.profile)
 
         try:
             self._write_device_list(wanted)
@@ -1089,21 +1047,14 @@ class Ops:
         except BaseException:
             # Docker missing, a check that timed out: nothing was applied, so
             # nothing may stay written either.
-            restore()
+            applier.restore(self.profile, before)
             raise
 
         if not ok:
-            restore()
+            applier.restore(self.profile, before)
             raise devices.DeviceError(f"compose rejected the change; it was undone: {complaint}")
 
-        try:
-            applied = self._recreate("vscode")
-        except ComposeError as error:
-            restore()
-            self._restart_as_before("vscode")
-            raise ComposeError(f"{error}; the change was undone") from error
-
-        return Result(self.profile.name, f"device {key} {word}", applied=applied)
+        return self._made(f"device {key} {word}", ["vscode"], before)
 
     def _write_device_list(self, keys: list[str]) -> None:
         """
@@ -1154,14 +1105,13 @@ class Ops:
         list_changed = profiles.write_extension_list(self.profile)
 
         # What the running sandbox takes by itself: the proxy's new policy,
-        # in the background, and the extensions the VS Code container
-        # installs or removes.
+        # which it reloads with a few seconds later, and the extensions the
+        # VS Code container installs or removes.
         applied: Optional[bool] = None
         reloading = False
         if allowlist_changed or list_changed:
             applied = self.compose.running()
         if allowlist_changed and applied:
-            self.start_reloader(self.root, self.profile)
             reloading = True
 
         if build:
@@ -1169,7 +1119,13 @@ class Ops:
             applied = self._recreate("vscode")
 
         note = "" if build else " (the image is rebuilt with: hardcode rebuild)"
-        return Result(self.profile.name, f"{', '.join(words)}{note}", applied=applied, reloading=reloading)
+        return Result(
+            self.profile.name,
+            f"{', '.join(words)}{note}",
+            applied=applied,
+            reloading=reloading,
+            due=self.clock() + applier.QUIET_SECONDS if reloading else None,
+        )
 
     # -- extensions ------------------------------------------------------------
 
@@ -1355,30 +1311,25 @@ class Ops:
         (a screenshot, a shared screen, a browser's history) stops working.
 
         The token is a file in the home volume, which the VS Code container
-        writes at start when there is none: it is deleted, and a running
-        container restarted to write the next one; a stopped profile gets it
-        at its next start. A token fixed in the profile's ``.env`` is changed
-        there instead.
+        writes at start when there is none. A running container's is
+        deleted, and the container recreated to write the next one, a few
+        seconds later (``applier``); a stopped profile's is deleted now, and
+        it gets the next one at its next start. A token fixed in the
+        profile's ``.env`` is changed there instead.
         """
         if envfile.read(self.profile.env_file).get("VSCODE_CONNECTION_TOKEN"):
             raise profiles.ProfileError(
                 "this profile's token is fixed (VSCODE_CONNECTION_TOKEN in its .env): change it there"
             )
 
-        remove = "rm -f ~/.vscode-server/connection-token"
-        running = any(service.service == "vscode" and service.state == "running" for service in self.compose.ps())
-
-        if running:
-            self.compose.run("exec", "-T", "vscode", "sh", "-c", remove, capture=True, check=True)
-            self.compose.run("--progress", "quiet", "restart", "vscode", capture=True, check=True)
-            return Result(
-                self.profile.name, "new VS Code token; VS Code restarted with it (hardcode open)", applied=True
-            )
+        if self._vscode_running():
+            before = applier.snapshot(self.profile)
+            return self._made("new VS Code token (hardcode open)", ["vscode"], before, token=True)
 
         # Stopped: a container of its own, on the home volume, without
         # starting anything else.
         self.compose.run(
-            "--progress", "quiet", "run", "--rm", "--no-deps", "--entrypoint", "sh", "vscode", "-c", remove,
+            "--progress", "quiet", "run", "--rm", "--no-deps", "--entrypoint", "sh", "vscode", "-c", REMOVE_TOKEN,
             capture=True,
             check=True,
         )  # fmt: skip
@@ -1448,8 +1399,8 @@ class Ops:
         """
         Rebuild the VS Code image, and recreate the container if it is running.
 
-        The proxy's allowlist is brought up to date too, as at every start,
-        and a running proxy is given it when it doesn't have it.
+        The proxy's allowlist is brought up to date too, as at every start: a
+        running proxy reloads with it by itself.
         """
         changes = self.update_proxy_allowlist()
 
@@ -1459,8 +1410,6 @@ class Ops:
         message = "VS Code image rebuilt"
         if changes:
             message += f"; allowlist: {'; '.join(changes)}"
-
-        self.reload_if_behind()
 
         return Result(self.profile.name, message, applied=applied)
 
@@ -1528,32 +1477,37 @@ class Ops:
             if status:
                 extensions = {key: status.get(key) for key in ("state", "installed", "total")}
 
-        proxy_running = any(service.service == "squid" and service.state == "running" for service in services)
+        def runs(name: str) -> bool:
+            return any(service.service == name and service.state == "running" for service in services)
 
         return {
             "services": [asdict(service) for service in services],
             "docker": self.compose.has_docker(),
             "error": error,
             "extensions": extensions,
-            "proxy": self.proxy_state(proxy_running),
+            "proxy": self.proxy_state(runs("squid"), runs("allowlist-watch")),
+            "changes": applier.load(self.profile).report(),
         }
 
-    def proxy_state(self, running: bool) -> dict:
+    def proxy_state(self, running: bool, watched: bool) -> dict:
         """
-        How the proxy stands with the allowlist: ``reloading`` while the
-        background reload runs (``reloader``); ``behind`` while a *running*
-        proxy hasn't the allowlist the files say (an edit waiting for that
-        reload, a hand edit nobody reloaded it for, a reload that failed);
-        and ``error``, why the last background reload failed, while it
-        stays behind.
+        How a *running* proxy stands with the allowlist: ``reloading`` while
+        it is about to reload with a change, which ``allowlist-watch`` (when
+        *watched*: it runs) gives it ``applier.QUIET_SECONDS`` after the
+        allowlist last changed, at ``due``; ``behind`` while it hasn't the
+        allowlist the files say (a change waiting for that, a hand edit of
+        ``allowlist.txt`` nobody gave it, one the renderer refused); and
+        ``error``, why the renderer refused it, while it stays behind.
         """
         behind = running and not profiles.proxy_allowlist_current(self.profile, self.this_computer)
+        error = profiles.proxy_refusal(self.profile) if behind else ""
 
-        return {
-            "reloading": reloader.running(self.profile),
-            "behind": behind,
-            "error": profiles.proxy_reload_failure(self.profile) if behind else "",
-        }
+        reloading = behind and watched and not error and not profiles.proxy_allowlist_applied(self.profile)
+        due = None
+        if reloading:
+            due = self.profile.proxy_allowlist_file.stat().st_mtime + applier.QUIET_SECONDS
+
+        return {"reloading": reloading, "due": due, "behind": behind, "error": error}
 
     def blocked(self, since: str = "30m") -> list[dict]:
         """

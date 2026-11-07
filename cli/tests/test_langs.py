@@ -223,7 +223,7 @@ class CatalogueAgreementTests(unittest.TestCase):
     def test_the_proxy_is_handed_the_rendered_allowlist(self):
         compose = (REPO / "compose.yaml").read_text(encoding="utf-8")
 
-        self.assertIn("/proxy-allowlist.txt:/config/allowlist.txt:ro", compose)
+        self.assertIn("}/proxy:/config\n", compose, "the proxy folder, where the command writes it")
 
     def test_the_charts_allowlist_is_the_templates(self):
         template = REPO / "template" / "allowlist.txt"

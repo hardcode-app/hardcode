@@ -66,7 +66,7 @@ and CoreDNS the DNS server that answers name lookups.
   still refused, and a pin without an entry for its name allows nothing.
   The address must be inside the internal ranges and can't be loopback,
   link-local, multicast or `0.0.0.0/8`. HardCode asks before adding one,
-  checks at every start and reload whether the name still resolves
+  checks at every start and `hardcode apply` whether the name still resolves
   there, and never moves a pin by itself. Over `ssh`, a pin is a whole
   tunnel to that host's port, uninspected, like any `ssh` entry.
   The proxy also refuses, for every name, the addresses of its own
@@ -105,24 +105,40 @@ and CoreDNS the DNS server that answers name lookups.
   and tools') live in one place, the catalogue, and aren't copied into
   profiles. A fix to them (a host added, or one dropped because it
   shouldn't have been there) reaches every profile at its next start or
-  reload, or on Kubernetes at the operator's next pass, and is printed or
-  logged. A provided entry a profile switched off stays off through every
+  `hardcode apply`, or on Kubernetes at the operator's next pass, and is
+  printed or logged. A provided entry a profile switched off stays off through every
   update.
-- **The proxy runs the policy the profile says.** `hardcode` records what
-  it saw the running proxy load, and a start or rebuild reloads a proxy
-  that has anything else: a removed entry stays removed, even after a
-  reload or start that failed half-way.
+- **The proxy runs the policy the profile says, or the one it had.** The
+  allowlist's renderer turns the list into the proxy's rules in a folder
+  of its own, checks them with squid's own parser, and only then
+  publishes them, file by file with a manifest of their sha256 last;
+  squid takes a copy of a published policy only once it matches the
+  manifest, checks it again with its own CA and networks, and only then
+  reloads with it (SIGHUP). A policy either refuses is never loaded:
+  squid keeps the one it has, which a reload with a bad rule would stop
+  outright, and its healthcheck fails while it does. The renderer says
+  what it published, by the list's sha256, so `hardcode` reports what
+  the proxy has, not what it was given.
 - **A change reaches a running proxy a few seconds after it is made.**
-  An edit of the allowlist returns once it is written, and the proxy is
-  reloaded with it in the background, five seconds after the profile's
-  last change (on Kubernetes, the operator waits the same way): an entry
-  you remove stays allowed until then, and a stream of changes holds the
-  reload off until it stops. The app says *applying allowlist* meanwhile,
-  and *allowlist not applied* if the reload fails; `hardcode reload`
-  gives the proxy the allowlist at once and waits for it, for when a
-  removal can't wait. The proxy's file is written only by whoever then
-  gives it to the proxy, under the profile's lock on its containers, so
-  what is recorded as loaded is what the proxy read.
+  An edit of the allowlist returns once it is written, and the proxy
+  reloads with it in place five seconds after the list last changed (the
+  `allowlist-watch` service; on Kubernetes, the operator restarts the
+  proxy after waiting the same way): an entry you remove stays allowed
+  until then, and a stream of changes holds the reload off until it
+  stops. The app counts down meanwhile, and says *allowlist not applied*
+  when the list is refused; `hardcode apply` gives the proxy the
+  allowlist at once and fails if it is refused, for when a removal can't
+  wait. The DNS server reloads its list within two seconds of the proxy
+  (CoreDNS's `reload 2s`).
+- **Changes that recreate containers wait the same way.** VS Code's port,
+  a forward, a mount, the Docker daemon, a device or a new token is
+  checked and written at once, and its containers are recreated five
+  seconds after the profile's last such change, by a process of
+  `hardcode`'s on your computer (`hardcode logs applier` shows what it
+  did). Until then the containers run as they were: a new token, say,
+  takes the old one's place only then. A change the containers can't be
+  recreated with is undone, with the files as they were before it, and
+  said.
 
 ### Docker inside the sandbox
 
@@ -212,8 +228,13 @@ languages while the chart's `profileDefaults.languages` is empty.
 ### The image
 
 - **A profile's files stay out of every sandbox.** No container mounts
-  the profile's folder; the proxy and the VS Code container get two
-  files from it, read-only. `hardcode mount` refuses a folder that is,
+  the profile's folder. The VS Code container gets one file from it, its
+  extension list, read-only; the allowlist's renderer (`allowlist` and
+  `allowlist-watch`) gets its `proxy/` folder, where it reads the list
+  the proxy is given and writes what it did with it. The renderer has no
+  network, nothing in the sandbox reaches it, and `allowlist-watch` runs
+  with every capability dropped but the one that lets it write in your
+  folder (`DAC_OVERRIDE`), no new privileges, and a read-only filesystem. `hardcode mount` refuses a folder that is,
   holds or is inside HardCode's home. This matters most for a profile's
   own Dockerfile steps (`image/`): whoever can change them runs code on
   your computer at the next rebuild.
@@ -228,7 +249,9 @@ languages while the chart's `profileDefaults.languages` is empty.
 - **Nothing can eat the host.** Every container has a hard memory limit:
   on Compose, the VS Code container (`VSCODE_MEMORY`, 8g) and the Docker
   daemon (`DOCKER_MEMORY`, 4g) from the profile's `.env`, squid 512m,
-  CoreDNS 128m, the gateway and the one-shots less; on Kubernetes the same
+  the allowlist's renderer 256m (squid's parser, which checks each
+  policy, sizes its tables for squid's descriptors), CoreDNS 128m, the
+  gateway and the one-shots less; on Kubernetes the same
   for every container (`resources`, `dockerResources`; a profile that
   leaves the memory limit out still gets the default). Squid's descriptor
   table is capped as well (`max_filedescriptors 65536`; an unlimited

@@ -44,7 +44,9 @@ const state = {
   extensionStatusAsked: false, // whether extensions:status has answered for the profile shown
   extensionStatusError: '', // why the VS Code container couldn't be asked, when it couldn't
   extensionWatchUntil: 0, // until when (Date.now()) the status is read often, after a change to the extensions
-  proxyWatchUntil: 0, // ... and after a change the proxy is given in the background
+  proxyWatchUntil: 0, // ... and after a change the proxy reloads with by itself
+  changesWatchUntil: 0, // ... and after a change that recreates containers
+  countdownTimer: null, // the next redraw of the header's countdown
   extensionDraft: '', // what is typed in the Extensions view's form
   packageDraft: '', // what is typed in the Ubuntu packages card's form
   imageSteps: null, // the profile's own Dockerfile steps, from image:get; null until it answers
@@ -92,14 +94,17 @@ const ALLOWLIST_FILTERS = {
   custom: 'your own',
 };
 
-// How a change's toast says that the running sandbox took it, or that it
+// How a change's toast says that the running sandbox takes it, or that it
 // waits for the next start. A language's words depend on what it brings
-// (languageOutcome).
-const ALLOWLIST_OUTCOME = { applied: 'the proxy reloads in a few seconds', waiting: 'applies when the sandbox starts' };
+// (languageOutcome). When the proxy reloads or containers restart for it,
+// the toast says so, and when, from the CLI's results (soonNote).
+const ALLOWLIST_OUTCOME = { applied: '', waiting: 'applies when the sandbox starts' };
 const EXTENSION_ADDED = { applied: 'installing in the background', waiting: 'applies when the sandbox starts' };
 const EXTENSION_REMOVED = { applied: 'removing in the background', waiting: 'applies when the sandbox starts' };
-const DOCKER_OUTCOME = { applied: 'containers recreated', waiting: 'applies when the sandbox starts' };
-const DEVICE_OUTCOME = { applied: 'VS Code container recreated', waiting: 'applies when the sandbox starts' };
+// What recreates containers: VS Code's port, a forward, a mount, the Docker
+// daemon, a device, a new token. They restart a few seconds after the
+// profile's last such change.
+const CHANGE_OUTCOME = { applied: '', waiting: 'applies when the sandbox starts' };
 // The profile's own packages change nothing that runs: the image has them after its next rebuild.
 const PACKAGE_OUTCOME = { applied: '', waiting: '' };
 
@@ -125,9 +130,14 @@ const STATUS_REFRESH_INSTALLING = 3000;
 // then says it is installing.
 const EXTENSION_WATCH = 15000;
 
-// ... and after a change to the allowlist: the proxy is given it five seconds
-// after the last change, and the reload takes some seconds more.
+// ... and after a change to the allowlist, or one that recreates containers:
+// the proxy reloads, and the containers restart, five seconds after the
+// last change, which takes some seconds more.
 const PROXY_WATCH = 30000;
+const CHANGES_WATCH = 60000;
+
+// How often the header's countdown to a change waiting is redrawn (milliseconds).
+const COUNTDOWN_TICK = 1000;
 
 // How much of a container's log the logs dialog shows, and how often it is read again.
 const LOG_LINES = 300;
@@ -208,10 +218,43 @@ function errorText(error) {
 }
 
 /**
+ * What the CLI's *results* say happens a few seconds from now, for a
+ * toast: " · gateway, vscode restart in 5 seconds", or " · the proxy takes
+ * it in 5 seconds"; nothing when neither. The time is the results' latest
+ * due one: every change pushes it out.
+ */
+function soonNote(results) {
+  const restarts = [...new Set(results.flatMap((result) => result.restarts || []))];
+  const reloading = results.some((result) => result.reloading);
+  if (!restarts.length && !reloading) {
+    return '';
+  }
+
+  const due = Math.max(...results.map((result) => result.due || 0));
+  const seconds = secondsUntil(due) || 5;
+
+  if (restarts.length) {
+    const verb = restarts.length === 1 ? 'restarts' : 'restart';
+    return ` · ${restarts.join(', ')} ${verb} in ${seconds} seconds`;
+  }
+  return ` · the proxy takes it in ${seconds} seconds`;
+}
+
+/** Whole seconds from now until *due* (seconds since the epoch, as the CLI counts), at least 1; 0 without one. */
+function secondsUntil(due) {
+  if (!due) {
+    return 0;
+  }
+
+  return Math.max(1, Math.round(due - Date.now() / 1000));
+}
+
+/**
  * Tell the user what the last change did, from the CLI's own results:
- * whether the running sandbox took it, or it waits for the next start.
- * Nothing already in force is shown as "pending". A change the running
- * proxy is given in the background is followed until it has it.
+ * whether the running sandbox takes it, and when (the proxy reloads, or
+ * containers restart, a few seconds after the last change), or it waits
+ * for the next start. Nothing already in force is shown as "pending". A
+ * change on its way is followed until it is made.
  *
  * *outcome* has the words for both (the allowlist's by default). *head*,
  * when given, says what changed in place of the CLI's message.
@@ -225,6 +268,9 @@ function reportOutcome(outcome = ALLOWLIST_OUTCOME, head = '') {
   if (results.some((result) => result.reloading)) {
     watchProxy();
   }
+  if (results.some((result) => (result.restarts || []).length)) {
+    watchChanges();
+  }
 
   const applied = results.filter((result) => result.applied === true).length;
   const waiting = results.filter((result) => result.applied === false).length;
@@ -236,24 +282,23 @@ function reportOutcome(outcome = ALLOWLIST_OUTCOME, head = '') {
     summary = head && results[0].changed ? head : results[0].message;
   }
 
+  const soon = applied ? soonNote(results) : '';
   const now = applied && outcome.applied ? ` · ${outcome.applied}` : '';
   const later = waiting ? ` · ${outcome.waiting}` : '';
 
-  toast(`${summary}${now}${later}`, skipped ? '' : 'ok');
+  toast(`${summary}${soon}${now}${later}`, skipped ? '' : 'ok');
 }
 
 /**
  * The words for switching *lang* on or off: what a running sandbox does by
- * itself (the proxy reloads with its allowlist block in a few seconds; its
- * VS Code container installs or removes its extensions in the background),
+ * itself (the proxy reloads with its allowlist block, which the toast says
+ * with when; its VS Code container installs or removes its extensions in
+ * the background),
  * or that it waits for the next start. The toolchain waits for a rebuild,
  * which the Languages / Tools view says on its own.
  */
 function languageOutcome(lang, enabled) {
   const now = [];
-  if (lang.domains.length) {
-    now.push('the proxy reloads in a few seconds');
-  }
   if (lang.extensions.length) {
     now.push(enabled ? 'extensions installing' : 'extensions removing');
   }
@@ -461,12 +506,13 @@ async function readStatus() {
   const epoch = state.epoch;
   const wasWatching = watchingExtensions();
   const failedBefore = proxyState().error;
+  const undoneBefore = changesState().error;
 
   let status;
   try {
     status = await call('stack:status');
   } catch (error) {
-    status = { services: [], docker: null, error: errorText(error), extensions: null, proxy: null };
+    status = { services: [], docker: null, error: errorText(error), extensions: null, proxy: null, changes: null };
   }
 
   // Asked for the profile shown before a switch: the new one's comes next.
@@ -476,11 +522,19 @@ async function readStatus() {
   state.status = status;
   showStatusPill();
 
-  // A background reload of the proxy that failed is said once, as it fails;
-  // the status pill keeps saying so until the proxy has the allowlist.
+  // An allowlist the proxy refused is said once, as it is refused; the
+  // status pill keeps saying so until the proxy has the allowlist.
   const failed = proxyState().error;
   if (failed && failed !== failedBefore) {
     toast(`The proxy didn't take the allowlist: ${failed}`, 'error');
+  }
+
+  // So are changes the containers couldn't be recreated with, and were
+  // undone: the page shows the profile as it is again.
+  const changes = changesState();
+  if (changes.error && changes.error !== undoneBefore) {
+    toast(`Undone: ${changes.undone.join('; ')}. ${changes.error}`, 'error');
+    loadState();
   }
 
   // A VS Code container that stopped takes its token's validity with it, as far as we
@@ -510,13 +564,40 @@ async function readStatus() {
 function scheduleStatus() {
   clearTimeout(state.statusTimer);
 
-  const delay = watchingExtensions() || watchingProxy() ? STATUS_REFRESH_INSTALLING : STATUS_REFRESH;
-  state.statusTimer = setTimeout(refreshStatus, delay);
+  const often = watchingExtensions() || watchingProxy() || watchingChanges();
+  state.statusTimer = setTimeout(refreshStatus, often ? STATUS_REFRESH_INSTALLING : STATUS_REFRESH);
 }
 
-/** How the proxy stands with the allowlist, as the last status said: {reloading, behind, error}. */
+/** How the proxy stands with the allowlist, as the last status said: {reloading, due, behind, error}. */
 function proxyState() {
-  return state.status.proxy || { reloading: false, behind: false, error: '' };
+  return state.status.proxy || { reloading: false, due: null, behind: false, error: '' };
+}
+
+/**
+ * What waits to recreate containers, as the last status said: {changes,
+ * services, token, due, applying, undone, error}; and the last changes
+ * undone, and why.
+ */
+function changesState() {
+  const none = { changes: [], services: [], token: false, due: 0, applying: false, undone: [], error: '' };
+  return { ...none, ...(state.status.changes || {}) };
+}
+
+/** Whether changes wait to recreate containers, or are being made. */
+function changesWaiting() {
+  const changes = changesState();
+  return isUp() && (changes.changes.length > 0 || changes.applying);
+}
+
+/** Whether the waiting changes are worth following closely: some wait, or one was made a moment ago. */
+function watchingChanges() {
+  return changesWaiting() || Date.now() < state.changesWatchUntil;
+}
+
+/** After a change that recreates containers: follow it from now on, until it is made. */
+function watchChanges() {
+  state.changesWatchUntil = Date.now() + CHANGES_WATCH;
+  refreshStatus();
 }
 
 /**
@@ -614,18 +695,36 @@ function showStatusPill() {
     }
   }
 
+  // Containers waiting to restart for a change, counted down; restarting;
+  // or the last changes undone.
+  const changes = changesState();
+  if (changesWaiting()) {
+    const services = changes.services.join(', ');
+    const seconds = secondsUntil(changes.due);
+    text += changes.applying || !seconds ? ` · restarting ${services}` : ` · ${services} in ${seconds}s`;
+    title = `${changes.changes.join('; ')}: ${services} restart with them a few seconds after your last change (Apply now, on the Allowlist page, makes them at once)`;
+    if (kind === 'ok') {
+      kind = 'info';
+    }
+  } else if (changes.error) {
+    text += ' · changes undone';
+    title = `${changes.undone.join('; ')}: undone, as ${changes.error}`;
+    kind = 'bad';
+  }
+
   const proxy = proxyState();
   if (proxyApplying()) {
-    text += ' · applying allowlist';
-    title = 'Giving the proxy the allowlist: it reloads with it a few seconds after your last change';
+    const seconds = secondsUntil(proxy.due);
+    text += seconds ? ` · allowlist in ${seconds}s` : ' · applying allowlist';
+    title = 'The proxy reloads with the allowlist a few seconds after your last change';
     if (kind === 'ok') {
       kind = 'info';
     }
   } else if (proxy.behind) {
     text += ' · allowlist not applied';
     title = proxy.error
-      ? `The proxy didn't take the allowlist: ${proxy.error}. Reload proxy, on the Allowlist page, tries again.`
-      : "The running proxy hasn't the allowlist as it is now (edited by hand?): Reload proxy, on the Allowlist page, gives it.";
+      ? `The proxy didn't take the allowlist: ${proxy.error}. Apply now, on the Allowlist page, tries again.`
+      : "The running proxy hasn't the allowlist as it is now (edited by hand?): Apply now, on the Allowlist page, gives it.";
     kind = proxy.error ? 'bad' : 'warn';
   }
 
@@ -633,6 +732,12 @@ function showStatusPill() {
   pill.textContent = text;
   pill.className = `pill ${kind}`;
   pill.title = title;
+
+  // The countdowns move every second until the change is made.
+  clearTimeout(state.countdownTimer);
+  if ((changesWaiting() && !changes.applying) || (proxyApplying() && proxy.due)) {
+    state.countdownTimer = setTimeout(showStatusPill, COUNTDOWN_TICK);
+  }
 }
 
 /**
@@ -852,19 +957,20 @@ async function fetchVscodeUrl() {
 
 /**
  * Give VS Code a new token, once asked: every copy of the old one stops
- * working, and VS Code restarts, so open windows need the new URL.
+ * working, and VS Code restarts a few seconds later, so open windows need
+ * the new URL.
  */
 async function rotateToken() {
-  const results = await call('vscode:rotate');
-  if (!results) {
+  const data = await call('vscode:rotate');
+  if (!data) {
     return;
   }
 
+  state.data = data;
   forgetVscodeUrl();
   state.showToken = false;
   showVscodeUrl();
-  toast('New token: VS Code restarted with it', 'ok');
-  refreshStatus();
+  reportOutcome(CHANGE_OUTCOME, 'New VS Code token');
 }
 
 /** The dialog for VS Code's port, with the current one to change. */
@@ -889,8 +995,7 @@ async function savePort() {
   $('#port-modal').classList.add('hidden');
   forgetVscodeUrl();
   render();
-  toast(`VS Code on port ${port}`, 'ok');
-  refreshStatus();
+  reportOutcome(CHANGE_OUTCOME, `VS Code on port ${port}`);
 }
 
 $('#pm-save').onclick = savePort;
@@ -917,7 +1022,7 @@ function openDeviceDialog(device) {
   state.deviceDialog = device.key;
 
   $('#dm-title').textContent = `Turn ${device.name} on for profile ${state.data.profile}?`;
-  $('#dm-summary').textContent = `It gives the VS Code container ${device.summary}. A running one is recreated with it.`;
+  $('#dm-summary').textContent = `It gives the VS Code container ${device.summary}. A running one restarts with it five seconds after your last change.`;
   $('#dm-warning').textContent = device.warning;
   $('#dm-understand').checked = false;
   $('#dm-confirm').disabled = true;
@@ -954,7 +1059,7 @@ async function confirmDevice() {
 
   closeDeviceDialog();
   render();
-  reportOutcome(DEVICE_OUTCOME);
+  reportOutcome(CHANGE_OUTCOME);
   refreshStatus();
 }
 
@@ -1185,7 +1290,7 @@ function serviceNote(service) {
 
 // The order the Overview lists the containers in: the one you work in, the
 // Docker daemon beside it, then the plumbing that keeps them in.
-const SERVICE_ORDER = ['vscode', 'docker', 'squid', 'coredns', 'gateway'];
+const SERVICE_ORDER = ['vscode', 'docker', 'squid', 'coredns', 'allowlist-watch', 'gateway'];
 
 /** A container's place in the Overview's list; any other goes last. */
 function serviceRank(name) {
@@ -2051,7 +2156,7 @@ function allowlist() {
       <div class="chips">${filterChips}</div>
       <span class="spacer"></span>
       ${scopeChips('changes')}
-      <button class="btn" data-act="reload-proxy" ${state.running ? 'disabled' : ''} title="Give the running proxy the allowlist now: after editing the file by hand, or rather than wait for the changes below to reach it">Reload ${all ? 'all proxies' : 'proxy'}</button>
+      <button class="btn" data-act="apply-now" ${state.running ? 'disabled' : ''} title="Make the changes waiting now, rather than a few seconds after the last: the proxy's allowlist (after editing the file by hand too), and the containers waiting to restart">Apply now${all ? ' everywhere' : ''}</button>
     </div>
     ${scopeNote("Adding, toggling and deleting below changes the same entry in every profile's allowlist")}
     <div class="card" style="margin-bottom:14px">
@@ -2061,7 +2166,7 @@ function allowlist() {
         <button class="btn primary" data-act="add-allowlist" ${state.adding ? 'disabled' : ''}>Add${all ? ' to all' : ''}</button>
       </div>
       <div class="form-error" id="al-error"></div>
-      <p class="muted small" style="margin:0">Read-only still lets git clone, fetch and pull. A path such as <code>github.com/myuser</code> allows only that namespace. The entries HardCode provides (every profile's, and those of the languages and tools that are on) can be switched off but not deleted: one switched off stays off through updates, and one an update adds arrives switched on. Every change is written to <code>profiles/${esc(data.profile)}/allowlist.txt</code> at once, and a running proxy reloads with it a few seconds after your last change (the header says <i>applying allowlist</i> meanwhile); with the sandbox stopped it applies at the next start. <b>Reload</b> gives it at once, and is for edits you made to the file by hand.</p>
+      <p class="muted small" style="margin:0">Read-only still lets git clone, fetch and pull. A path such as <code>github.com/myuser</code> allows only that namespace. The entries HardCode provides (every profile's, and those of the languages and tools that are on) can be switched off but not deleted: one switched off stays off through updates, and one an update adds arrives switched on. Every change is written to <code>profiles/${esc(data.profile)}/allowlist.txt</code> at once, and a running proxy reloads with it, without a restart, five seconds after your last change (the header counts down meanwhile); with the sandbox stopped it applies at the next start. <b>Apply now</b> gives it at once, and is for edits you made to the file by hand.</p>
     </div>
     ${lanSection()}
     <div class="card" style="padding:0">
@@ -2158,7 +2263,7 @@ function forwards() {
         <button class="btn primary" data-act="add-forward">Add forward</button>
       </div>
       <div class="form-error" id="fw-error"></div>
-      <p class="muted small" style="margin:0">Written to this profile's <code>compose.override.yaml</code>; the gateway is recreated at once if the sandbox is running. Host ports belong to one profile each. Servers in the VS Code container must listen on <code>0.0.0.0</code>, not localhost.</p>
+      <p class="muted small" style="margin:0">Written to this profile's <code>compose.override.yaml</code>; a running gateway restarts with it five seconds after your last change. Host ports belong to one profile each. Servers in the VS Code container must listen on <code>0.0.0.0</code>, not localhost.</p>
     </div>
     <div class="card" style="padding:0"><table><thead><tr><th>On this machine</th><th>In the sandbox</th><th></th><th></th></tr></thead><tbody>${rows}</tbody></table></div>`;
 }
@@ -2192,7 +2297,7 @@ function mounts() {
       </div>
       <div class="form-error" id="mt-error"></div>
       <div class="callout">A writable mount is a way out of the sandbox: anything inside, Claude included, can change files your host later runs (<code>.git/hooks</code>, build scripts). Prefer read-only for repos you only need to read.</div>
-      <p class="muted small" style="margin:0">Mounted in the VS Code container and in docker at the same path, so <code>docker run -v</code> works for it. Applying recreates both containers (VS Code reloads).</p>
+      <p class="muted small" style="margin:0">Mounted in the VS Code container and in docker at the same path, so <code>docker run -v</code> works for it. Both containers restart with it five seconds after your last change (VS Code reloads).</p>
     </div>
     <div class="card" style="padding:0"><table><thead><tr><th>This machine</th><th>VS Code</th><th>Access</th><th></th></tr></thead><tbody>${rows || '<tr><td colspan="4" class="empty">No host folders mounted in this profile.</td></tr>'}</tbody></table></div>`;
 }
@@ -2385,7 +2490,7 @@ function bindForwardsAndMounts() {
     button.onclick = async () => {
       state.data = await change('forwards:remove', +button.dataset.removeForward);
       render();
-      toast('Forward removed', 'ok');
+      reportOutcome(CHANGE_OUTCOME, 'Forward removed');
     };
   });
 
@@ -2393,7 +2498,7 @@ function bindForwardsAndMounts() {
     button.onclick = async () => {
       state.data = await change('mounts:remove', button.dataset.removeMount, state.scope);
       render();
-      toast('Mount removed', 'ok');
+      reportOutcome(CHANGE_OUTCOME, 'Mount removed');
     };
   });
 }
@@ -2494,7 +2599,7 @@ function bindOverview() {
     toggle.onchange = async () => {
       state.data = await change('docker:set', toggle.checked, 'profile');
       render();
-      reportOutcome(DOCKER_OUTCOME);
+      reportOutcome(CHANGE_OUTCOME);
       refreshStatus();
     };
   });
@@ -2513,7 +2618,7 @@ function bindOverview() {
 
       state.data = await change('device:set', device.key, false);
       render();
-      reportOutcome(DEVICE_OUTCOME);
+      reportOutcome(CHANGE_OUTCOME);
       refreshStatus();
     };
   });
@@ -2657,11 +2762,12 @@ const actions = {
     }
   },
 
-  async 'reload-proxy'() {
-    const applied = await call('allowlist:apply', state.scope);
+  async 'apply-now'() {
+    const results = await call('changes:apply', state.scope);
+    const applied = results.filter((result) => result.applied).map((result) => result.profile);
     const message = applied.length
-      ? `Proxy reloaded: ${applied.join(', ')}`
-      : 'Nothing running; the allowlist applies at the next start';
+      ? `Changes made: ${applied.join(', ')}`
+      : 'Nothing running; the changes apply at the next start';
     toast(message, 'ok');
     refreshStatus();
   },
@@ -2692,7 +2798,7 @@ const actions = {
     }
 
     render();
-    toast(`Forwarding localhost:${port}`, 'ok');
+    reportOutcome(CHANGE_OUTCOME, `Forwarding localhost:${port}`);
   },
 
   async 'pick-folder'() {
@@ -2715,7 +2821,7 @@ const actions = {
     }
 
     render();
-    toast('Mount added', 'ok');
+    reportOutcome(CHANGE_OUTCOME, 'Mount added');
   },
 
   async 'add-extension'() {

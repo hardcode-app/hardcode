@@ -20,6 +20,7 @@ from typing import Callable, Optional
 
 from . import (
     allowlist,
+    applier,
     bounded,
     devices,
     dockerfile,
@@ -30,7 +31,6 @@ from . import (
     override,
     packages,
     profiles,
-    reloader,
     stack,
     version_text,
     yamlio,
@@ -42,7 +42,7 @@ USAGE = """\
 hardcode [-p NAME | --all] [--json] [--config DIR] <command> [args]
 
   up [--build]            build if needed and start the profile      down [-v]  containers (-v: volumes too)
-  start · stop · restart · build · logs [-f] [--tail N] [svc] · ps · shell · open · compose <docker compose args>
+  start · stop · restart · build · logs [-f] [--tail N] [svc|applier] · ps · shell · open · compose <docker compose args>
   profiles                list profiles                              status   the same
   profile add NAME --lang python,go,... | --from P · profile remove NAME [--yes]
   port <number>           move VS Code to another port on this machine
@@ -55,7 +55,7 @@ hardcode [-p NAME | --all] [--json] [--config DIR] <command> [args]
   token rotate  (--all)   a new VS Code token: every copy of the old one stops working
   allowlist               every entry: the profile's own, then those HardCode provides
   allow <entry> [rw|ssh]  allow a site (--all: every profile)        deny <entry> [ssh]
-  allowlist enable|disable|remove <entry> [ssh]  (--all)             reload   give the proxy the allowlist now
+  allowlist enable|disable|remove <entry> [ssh]  (--all)             apply    make the changes waiting now
   lan                     names that may reach your own network      lan add|remove|check <name> [address]  (--all)
                           (allow <entry> --lan: let its name reach it, without asking)
   forward <port> [vscode|docker] [target]                              unforward <port>
@@ -72,7 +72,7 @@ ALL_CAPABLE = {
     "deny",
     "allowlist",
     "lan",
-    "reload",
+    "apply",
     "mount",
     "unmount",
     "enable",
@@ -114,8 +114,7 @@ class App:
     """
     What the command handlers share: the home (where the profiles are), the
     output mode, and the runner, printers, this computer as the devices see
-    it and the start of the proxy's background reload (all injectable, for
-    tests).
+    it and the start of a profile's applier (all injectable, for tests).
     """
 
     def __init__(
@@ -131,7 +130,7 @@ class App:
         resolve: lan.Resolver = lan.resolve,
         this_computer: lan.ThisComputer = lan.is_this_computer,
         host: Optional[devices.Host] = None,
-        start_reloader: Callable[[Path, profiles.Profile], None] = reloader.start,
+        start_applier: Callable[[Path, profiles.Profile], None] = applier.start,
     ):
         self.root = root
         self.home_id = home.home_id(root)
@@ -145,7 +144,7 @@ class App:
         self.resolve = resolve
         self.this_computer = this_computer
         self.host = host or devices.Host()
-        self.start_reloader = start_reloader
+        self.start_applier = start_applier
         self.results: list[Result] = []
 
     def profile(self, name: str) -> profiles.Profile:
@@ -162,7 +161,7 @@ class App:
             resolve=self.resolve,
             this_computer=self.this_computer,
             host=self.host,
-            start_reloader=self.start_reloader,
+            start_applier=self.start_applier,
         )
 
     def compose(self, name: str) -> Compose:
@@ -208,8 +207,11 @@ class App:
             return
 
         line = f"{prefix}{result.message}"
-        if result.reloading:
-            line += " (the proxy reloads in a few seconds; hardcode reload: now)"
+        if result.restarts:
+            verb = "restarts" if len(result.restarts) == 1 else "restart"
+            line += f" ({', '.join(result.restarts)} {verb} in {applier.QUIET_SECONDS:g} seconds; hardcode apply: now)"
+        elif result.reloading:
+            line += f" (the proxy takes it in {applier.QUIET_SECONDS:g} seconds; hardcode apply: now)"
         elif result.applied is True:
             line += " (applied)"
         elif result.applied is False:
@@ -281,6 +283,11 @@ def cmd_lifecycle(app: App, args: argparse.Namespace) -> int:
         _first_profile(app, args.profile)
 
     with profiles.lock(app.profile(args.profile), waiting=app.err):
+        # A start or a stop leaves nothing for the applier: the next start
+        # takes every change written.
+        if args.command != "build":
+            applier.forget(app.profile(args.profile))
+
         if args.command in STARTS:
             return _start(app, args.profile, compose_args)
 
@@ -291,13 +298,10 @@ def _start(app: App, name: str, compose_args: list[str]) -> int:
     """
     up, start or restart, with the proxy's allowlist brought up to date
     first, so that the entries this HardCode provides (a language's new
-    download host, after an update) are in force without a reload. What
-    that changed is printed, one line per entry.
-
-    A proxy that wasn't running reads the file as it starts. One that was
-    keeps the rules it last loaded, so it is reloaded afterwards when those
-    aren't the file's: something changed, now or at a start or reload that
-    failed before the proxy had it.
+    download host, after an update) are in force at once. What that changed
+    is printed, one line per entry. Compose runs the one-shot renderer again
+    as it starts the profile, so the proxy has the file, running before or
+    not.
 
     A device of this computer the profile has on, which this computer can't
     give, stops the start before anything else, with why; the ones it can
@@ -305,8 +309,6 @@ def _start(app: App, name: str, compose_args: list[str]) -> int:
     """
     ops = app.ops(name)
     ops.check_devices()
-
-    was_running = ops.compose.running()
 
     changes = ops.update_proxy_allowlist()
     for change in changes:
@@ -317,12 +319,7 @@ def _start(app: App, name: str, compose_args: list[str]) -> int:
     for warning in ops.lan_warnings():
         app.err(f"on your network: {warning}")
 
-    returncode = ops.compose.run(*compose_args).returncode
-    if returncode != 0:
-        return returncode
-
-    ops.proxy_started(was_running)
-    return returncode
+    return ops.compose.run(*compose_args).returncode
 
 
 def _first_profile(app: App, name: str) -> None:
@@ -354,9 +351,21 @@ def cmd_logs(app: App, args: argparse.Namespace) -> int:
     """
     Container logs: followed, or the last lines. With ``--json``, the last
     lines (200 unless ``--tail`` says otherwise) as one string, for the app.
+    ``applier`` is the applier's log, which isn't a container's (``applier``).
     """
     if args.tail is not None and args.tail < 0:
         raise CommandError("--tail takes a number of lines, 0 or more")
+
+    if args.services == ["applier"]:
+        if args.follow:
+            raise CommandError("the applier's log can't be followed: it has a line for each change")
+
+        text = applier.log(app.profile(args.profile), 200 if args.tail is None else args.tail)
+        if app.json_output:
+            app.out(json.dumps({"services": args.services, "logs": text}, indent=2))
+        else:
+            app.out(text.rstrip("\n") or "the applier has made no changes yet")
+        return 0
 
     if app.json_output:
         if args.follow:
@@ -506,8 +515,8 @@ def _for_each(
     and the others carry on; the command fails only if every profile did.
 
     An edit of the allowlist is *files_only*: it takes the lock on the
-    profile's files alone, so a reload of the proxy under way doesn't hold
-    it up (``profiles.files_lock``).
+    profile's files alone, so containers being recreated (``applier``)
+    don't hold it up (``profiles.files_lock``).
     """
     names = app.targets(args.profile, args.all)
     failures = 0
@@ -992,30 +1001,21 @@ def cmd_port(app: App, args: argparse.Namespace) -> int:
     return _for_each(app, args, lambda ops: ops.set_port(args.port))
 
 
-def cmd_reload(app: App, args: argparse.Namespace) -> int:
-    return _for_each(app, args, lambda ops: ops.reload())
-
-
-def cmd_reloader(app: App, args: argparse.Namespace) -> int:
+def cmd_apply(app: App, args: argparse.Namespace) -> int:
     """
-    The background reload of a running profile's proxy, which an edit of its
-    allowlist starts (``reloader``); nobody runs it by hand.
+    Make the changes waiting now: the proxy's allowlist, and the containers
+    waiting to be recreated.
+    """
+    return _for_each(app, args, lambda ops: ops.apply())
+
+
+def cmd_applier(app: App, args: argparse.Namespace) -> int:
+    """
+    The applier of a running profile, which a change that recreates
+    containers starts (``applier``); nobody runs it by hand.
     """
     ops = app.ops(args.profile)
-    profile = ops.profile
-
-    def behind() -> bool:
-        try:
-            return not profiles.proxy_allowlist_current(profile, app.this_computer)
-        except OSError:
-            return False
-
-    reloader.run(
-        profile,
-        step=lambda: reloader.reload_step(ops),
-        behind=behind,
-        look=lambda: reloader.fingerprint(profile),
-    )
+    applier.run(ops.profile, ops.recreate_for, ops.compose.running)
     return 0
 
 
@@ -1112,7 +1112,7 @@ def _shared_options(parser: argparse.ArgumentParser, suppress: bool) -> None:
         "--all",
         action="store_true",
         default=all_default,
-        help="act on every profile (allow, deny, allowlist, lan, reload, mount, unmount, enable, disable, rebuild, "
+        help="act on every profile (allow, deny, allowlist, lan, apply, mount, unmount, enable, disable, rebuild, "
         "docker, extension, package, token)",
     )
     parser.add_argument("--json", action="store_true", default=json_default, help="machine-readable output")
@@ -1145,7 +1145,7 @@ def _add_lifecycle_commands(sub) -> None:
     logs = sub.add_parser("logs", help="container logs")
     logs.add_argument("-f", "--follow", action="store_true")
     logs.add_argument("--tail", type=int, metavar="N", help="only the last N lines of each")
-    logs.add_argument("services", nargs="*", help="services")
+    logs.add_argument("services", nargs="*", help="services, or applier: the applier's log")
     logs.set_defaults(func=cmd_logs)
 
     sub.add_parser("shell", help="a shell in the VS Code container").set_defaults(func=cmd_shell)
@@ -1224,12 +1224,13 @@ def _add_allowlist_commands(sub) -> None:
     lan_command.set_defaults(func=cmd_lan)
 
     sub.add_parser(
-        "reload",
-        help="give the running proxy the allowlist now (an edit gives it a few seconds after the last one)",
-    ).set_defaults(func=cmd_reload)
+        "apply",
+        help="make the changes waiting now: the proxy's allowlist, and the containers waiting to be recreated "
+        "(a change is made a few seconds after the last one)",
+    ).set_defaults(func=cmd_apply)
 
-    # The background reload an allowlist edit starts: not in the usage.
-    sub.add_parser(reloader.COMMAND).set_defaults(func=cmd_reloader)
+    # The applier a change that recreates containers starts: not in the usage.
+    sub.add_parser(applier.COMMAND).set_defaults(func=cmd_applier)
 
     blocked = sub.add_parser("blocked", help="what the proxy and DNS filter refused")
     blocked.add_argument("--since", default="30m", choices=["10m", "30m", "2h", "24h"])
@@ -1398,7 +1399,7 @@ def main(
     resolve: lan.Resolver = lan.resolve,
     this_computer: lan.ThisComputer = lan.is_this_computer,
     host: Optional[devices.Host] = None,
-    start_reloader: Callable[[Path, profiles.Profile], None] = reloader.start,
+    start_applier: Callable[[Path, profiles.Profile], None] = applier.start,
 ) -> int:
     """
     Run the command line in *argv* and return the exit code.
@@ -1408,8 +1409,8 @@ def main(
     ``--json``. *env* stands in for the environment (the home, sudo) in
     tests, *resolve* for this machine's name lookups, *this_computer* for
     its test of whether an address is its own, *host* for this computer as
-    the devices see it, and *start_reloader* for the start of a proxy's
-    background reload.
+    the devices see it, and *start_applier* for the start of a profile's
+    applier.
     """
     parser = build_parser()
     args = parser.parse_args(argv)
@@ -1444,7 +1445,7 @@ def main(
             resolve=resolve,
             this_computer=this_computer,
             host=host,
-            start_reloader=start_reloader,
+            start_applier=start_applier,
         )
         return args.func(app, args)
     except (CommandError, *USER_ERRORS) as error:

@@ -1,7 +1,13 @@
 #!/bin/bash
 # Renders a profile's allowlist.txt into the files CoreDNS and Squid read.
 # It runs as the one-shot "allowlist" service, before either of them starts
-# (on Kubernetes, as their init container).
+# (on Kubernetes, as their init container); in Compose, allowlist-watch runs
+# it again for each change of the allowlist while they run, and they reload
+# with what it publishes.
+#
+# The policy is rendered into a folder of its own and checked there with
+# squid's own parser (squid-check-policy), then published into /out file by
+# file; an allowlist it refuses leaves what /out has as it was.
 #
 # The entry format, one per line ("#" starts a comment):
 #
@@ -46,11 +52,45 @@
 #                             (DEVNET_SUBNET and CLUSTER_RANGES)
 #   /out/squid/clients.txt    who may use the proxy (CLIENT_RANGES)
 #   /out/squid/internal.txt   where an allowlisted name must never point (INTERNAL_RANGES)
+#   /out/squid/manifest       the sha256 of each of squid's files: a policy that
+#                             doesn't match it is caught halfway through publishing
+#   /out/allowlist.sha256     the sha256 of the allowlist all of it was rendered from
+#
+# With STATUS_DIR (Compose: the profile's proxy folder, where the hardcode
+# command reads how the proxy stands), it also writes there:
+#
+#   applied                   the sha256 of the allowlist last published
+#   failed                    the sha256 of an allowlist refused since, and why
 set -euo pipefail
 
 input=/config/allowlist.txt
 out=/out
+status_dir="${STATUS_DIR:-}"
 upstream="${UPSTREAM_DNS:-/etc/resolv.conf}"
+
+# Squid's files, in the order they are published.
+POLICY_FILES=(
+  hosts.txt
+  urls-ro.regex
+  urls-rw.regex
+  ssh.conf
+  pins.conf
+  pins.hosts
+  sandbox.txt
+  clients.txt
+  internal.txt
+)
+
+# The policy is rendered and checked here, never in /out; and from a copy
+# of the allowlist, so that what is published and the sha256 it is
+# published with are of one and the same text, whatever happens to the
+# file meanwhile.
+stage="$(mktemp -d)"
+trap 'rm -rf "$stage"' EXIT
+
+cp "$input" "$stage/allowlist.txt"
+digest="$(sha256sum < "$stage/allowlist.txt" | cut -d ' ' -f 1)"
+input="$stage/allowlist.txt"
 
 # Space-separated extra zones to resolve upstream unchecked, e.g. the squid
 # service's own name in the cluster on Kubernetes.
@@ -85,8 +125,23 @@ docker_desktop_subnet="192.168.65.0/24"
 devnet_subnet="${DEVNET_SUBNET-172.31.253.0/24}"
 cluster_ranges="${CLUSTER_RANGES:-}"
 
+# write_status <name> <text>: one of the files the command reads in
+# STATUS_DIR, written beside its final name and moved into place.
+write_status() {
+  printf '%s\n' "$2" > "$status_dir/$1.tmp"
+  chmod 0644 "$status_dir/$1.tmp"
+  mv "$status_dir/$1.tmp" "$status_dir/$1"
+}
+
+# die <message>: refuse the allowlist, saying why, and with STATUS_DIR keep
+# why for the command (the sha256 of the allowlist refused, then the reason).
 die() {
   echo "allowlist: $*" >&2
+
+  if [ -n "$status_dir" ]; then
+    write_status failed "$digest"$'\n'"$*"
+  fi
+
   exit 1
 }
 
@@ -405,9 +460,9 @@ sorted_unique zones
 # Writing the files
 # ---------------------------------------------------------------------------
 
-# Everything is written next to its final name first and moved into place
+# Everything is written to the stage first, checked there, and published
 # at the end, so a failure halfway never leaves a half-written policy.
-mkdir -p "$out/squid"
+mkdir -p "$stage/squid"
 
 # print_or <placeholder> <items...>: the items one per line, or the
 # placeholder when there are none. Squid rejects an empty ACL file, so with
@@ -423,15 +478,15 @@ print_or() {
   fi
 }
 
-print_or 'deny-all.hardcode.invalid' "${domains[@]}" > "$out/squid/hosts.txt.tmp"
-print_or '^$' "${ro[@]}" > "$out/squid/urls-ro.regex.tmp"
-print_or '^$' "${rw[@]}" > "$out/squid/urls-rw.regex.tmp"
+print_or 'deny-all.hardcode.invalid' "${domains[@]}" > "$stage/squid/hosts.txt"
+print_or '^$' "${ro[@]}" > "$stage/squid/urls-ro.regex"
+print_or '^$' "${rw[@]}" > "$stage/squid/urls-rw.regex"
 
 {
   echo "# Generated from allowlist.txt by allowlist-render. Do not edit."
   echo "# SSH tunnels (not inspectable), one host:port each."
   [ "${#ssh_rules[@]}" -eq 0 ] || printf '%s\n' "${ssh_rules[@]}"
-} > "$out/squid/ssh.conf.tmp"
+} > "$stage/squid/ssh.conf"
 
 # The pins: "pinned" matches a request for exactly a pinned name going to
 # exactly its address. With none, it is an annotation nothing ever makes, so
@@ -453,7 +508,7 @@ print_or '^$' "${rw[@]}" > "$out/squid/urls-rw.regex.tmp"
     done
     echo "acl pinned any-of ${pins[*]}"
   fi
-} > "$out/squid/pins.conf.tmp"
+} > "$stage/squid/pins.conf"
 
 {
   echo "# Generated from allowlist.txt by allowlist-render. Do not edit."
@@ -461,20 +516,20 @@ print_or '^$' "${rw[@]}" > "$out/squid/urls-rw.regex.tmp"
   for index in "${!pin_names[@]}"; do
     echo "${pin_addresses[$index]} ${pin_names[$index]}"
   done
-} > "$out/squid/pins.hosts.tmp"
+} > "$stage/squid/pins.hosts"
 
 # The ranges are space-separated words: one per line.
 # shellcheck disable=SC2086
-printf '%s\n' $client_ranges > "$out/squid/clients.txt.tmp"
+printf '%s\n' $client_ranges > "$stage/squid/clients.txt"
 
 # The sandbox's own network. Squid warns about an empty ACL file, so with
 # none (a cluster that names no ranges of its own), "this network"
 # (0.0.0.0/8), which nothing may reach anyway, stands in.
 sandbox=()
 for range in $devnet_subnet $cluster_ranges; do sandbox+=("$range"); done
-print_or '0.0.0.0/8' "${sandbox[@]}" > "$out/squid/sandbox.txt.tmp"
+print_or '0.0.0.0/8' "${sandbox[@]}" > "$stage/squid/sandbox.txt"
 # shellcheck disable=SC2086
-printf '%s\n' $internal_ranges > "$out/squid/internal.txt.tmp"
+printf '%s\n' $internal_ranges > "$stage/squid/internal.txt"
 
 {
   echo "# Generated from allowlist.txt by allowlist-render. Do not edit."
@@ -504,18 +559,68 @@ COREFILE
         rcode NXDOMAIN
     }
     errors
-    reload 10s
+    reload 2s
 }
 COREFILE
-} > "$out/Corefile.tmp"
+} > "$stage/Corefile"
 
-for file in squid/hosts.txt squid/urls-ro.regex squid/urls-rw.regex squid/ssh.conf \
-            squid/pins.conf squid/pins.hosts squid/sandbox.txt squid/clients.txt squid/internal.txt Corefile; do
-  mv "$out/$file.tmp" "$out/$file"
+# ---------------------------------------------------------------------------
+# Checking and publishing
+# ---------------------------------------------------------------------------
+
+# Squid's own parser on the policy, as squid will read it: beside its files,
+# the hosts file squid's entrypoint writes (the pinned names' lines are all
+# that can go wrong in it), a stand-in for the networks only squid can see,
+# and a CA of the check's own. A policy squid would refuse is never
+# published: a running squid would stop on it.
+check="$stage/check"
+mkdir -p "$check/policy" "$check/ca"
+cp "$stage"/squid/* "$check/policy/"
+cp "$stage/squid/pins.hosts" "$check/policy/hosts"
+echo '0.0.0.0/8' > "$check/own-networks.txt"
+
+openssl req -x509 \
+  -newkey ec -pkeyopt ec_paramgen_curve:P-256 \
+  -nodes -days 1 \
+  -subj '/CN=HardCode allowlist check' \
+  -addext 'basicConstraints=critical,CA:TRUE' \
+  -keyout "$check/ca/ca.key" \
+  -out "$check/ca/ca.pem" \
+  2>/dev/null
+
+if ! complaint="$(squid-check-policy "$check/policy" "$check" "$check/ca" 2>&1)"; then
+  die "squid refuses the policy this allowlist renders to, so it was not given to the proxy: $complaint"
+fi
+
+# Published file by file, each written beside its final name and moved into
+# place; then the manifest of squid's files, which squid's entrypoint takes
+# a policy by (one caught halfway through publishing doesn't match it);
+# then CoreDNS's, which CoreDNS reloads by itself; and last which allowlist
+# all of it came from.
+mkdir -p "$out/squid"
+for file in "${POLICY_FILES[@]}"; do
+  cp "$stage/squid/$file" "$out/squid/$file.tmp"
+  mv "$out/squid/$file.tmp" "$out/squid/$file"
 done
+
+(cd "$stage/squid" && sha256sum "${POLICY_FILES[@]}") > "$out/squid/manifest.tmp"
+mv "$out/squid/manifest.tmp" "$out/squid/manifest"
+
+cp "$stage/Corefile" "$out/Corefile.tmp"
+mv "$out/Corefile.tmp" "$out/Corefile"
+
+echo "$digest" > "$out/allowlist.sha256.tmp"
+mv "$out/allowlist.sha256.tmp" "$out/allowlist.sha256"
 
 # Squid and CoreDNS run as users of their own; they read, nothing more.
 chmod -R a+rX "$out"
+
+# Where the command reads how the proxy stands: this allowlist is given,
+# and nothing refused since.
+if [ -n "$status_dir" ]; then
+  write_status applied "$digest"
+  rm -f "$status_dir/failed"
+fi
 
 summary="${#domains[@]} hosts, ${#ro[@]} read-only and ${#rw[@]} read-write URL rules, ${#ssh_hosts[@]} ssh tunnels"
 summary="$summary, ${#pin_names[@]} names on your network"

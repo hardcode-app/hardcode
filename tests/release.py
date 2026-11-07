@@ -9,7 +9,7 @@ development build's descriptions, the checksums, the known vulnerabilities'
 section, whether a nightly run builds and when a development build is
 published, and what builds a release: the pinned BuildKit, the actions and
 secrets each job gets, and the macOS and Windows builds' toolchains. And the
-command as a release ships it, one file frozen with PyInstaller: a reloader
+command as a release ships it, one file frozen with PyInstaller: an applier
 it starts in the background outlives it.
 """
 
@@ -931,15 +931,15 @@ def check_build_supply(suite: Suite) -> None:
     )
 
 
-def check_frozen_reloader(suite: Suite) -> None:
+def check_frozen_applier(suite: Suite) -> None:
     """
     The command a release ships (and the app carries) is one file, frozen
     with PyInstaller as app/build.sh and the release workflow freeze it: it
-    unpacks itself into a folder it deletes as it ends. An allowlist edit
-    starts the proxy's reloader as a copy of it and ends; the copy must not
-    run from the folder that is about to go. frozen_spawner.py does what the
-    edit does, with the CLI's own _spawn, and its copy what the reloader
-    does: wait, then load what it hadn't.
+    unpacks itself into a folder it deletes as it ends. A change that
+    recreates containers starts the profile's applier as a copy of it and
+    ends; the copy must not run from the folder that is about to go.
+    frozen_spawner.py does what the change does, with the CLI's own _spawn,
+    and its copy what the applier does: wait, then load what it hadn't.
     """
     with harness.scratch_directory("hc-frozen-") as scratch:
         built = harness.run(
@@ -1002,8 +1002,8 @@ def run_checks(suite: Suite) -> None:
     suite.section("what builds a release")
     check_build_supply(suite)
 
-    suite.section("the frozen command's background reloader")
-    check_frozen_reloader(suite)
+    suite.section("the frozen command's background applier")
+    check_frozen_applier(suite)
 
 
 if __name__ == "__main__":

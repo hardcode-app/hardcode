@@ -187,7 +187,7 @@ def check_allowlist(suite: Suite, home: Home) -> None:
         return Output(0, home.profile_file(profile, "allowlist.txt"))
 
     def given(profile: str = "default") -> Output:
-        return Output(0, home.profile_file(profile, "proxy-allowlist.txt"))
+        return Output(0, home.profile_file(profile, "proxy/allowlist.txt"))
 
     suite.section("allowlist")
     suite.expect("allow appends to the Custom section", hc("allow", "GitHub.com/Me"), r"allowed github.com/me")
@@ -255,7 +255,7 @@ def check_allowlist(suite: Suite, home: Home) -> None:
     suite.expect("allow switches it back on", hc("allow", "pypi.org"), r"switched pypi\.org back on")
 
     # The proxy runs as its own user and must still be able to read its file.
-    mode = (home.root / "profiles" / "default" / "proxy-allowlist.txt").stat().st_mode & 0o777
+    mode = (home.root / "profiles" / "default" / "proxy" / "allowlist.txt").stat().st_mode & 0o777
     suite.check("the proxy's file is readable by the proxy user", mode == 0o644, f"mode {oct(mode)}")
 
 
@@ -343,14 +343,15 @@ def check_image_steps(suite: Suite, home: Home) -> None:
         config.text,
     )
 
-    # Every bind mount from the profile's folder is one file of the two
-    # compose.yaml hands over; none is the folder, holds it, or is the steps'.
+    # Every bind mount from the profile's folder is one of the two
+    # compose.yaml hands over, the proxy folder and the extension list; none
+    # is the folder, holds it, or is the steps'.
     sources = re.findall(r"^\s+source: (/.*)$", config.text, re.MULTILINE)
     from_profile = sorted({Path(source).name for source in sources if Path(source).is_relative_to(profile_dir)})
     holding = [source for source in sources if profile_dir.is_relative_to(Path(source))]
     suite.check(
         "no container mounts the profile's folder, or its Dockerfile steps",
-        from_profile == ["proxy-allowlist.txt", "vscode-extensions.txt"] and holding == [],
+        from_profile == ["proxy", "vscode-extensions.txt"] and holding == [],
         "\n".join(sources),
     )
 
@@ -594,7 +595,7 @@ def check_languages(suite: Suite, home: Home) -> None:
 
     # C#'s entries go. Java's all come with Android too, which is still on,
     # so they stay: an entry goes when no language that's on provides it.
-    given = home.profile_file("default", "proxy-allowlist.txt")
+    given = home.profile_file("default", "proxy/allowlist.txt")
     suite.check(
         "the proxy is no longer given their entries, but still those a language that's on provides",
         "api.nuget.org" not in given and "repo1.maven.org" in given,

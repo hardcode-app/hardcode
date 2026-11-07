@@ -18,7 +18,7 @@ from types import SimpleNamespace
 from typing import Iterable, Optional
 from unittest import mock
 
-from hardcode_cli import devices, home, langs, reloader, stack, yamlio
+from hardcode_cli import applier, devices, home, langs, stack, yamlio
 
 REPO = Path(__file__).resolve().parent.parent.parent
 
@@ -210,6 +210,7 @@ class FakeRunner:
                 health = "healthy" if self.healthy else "starting"
                 stdout = (
                     f'{{"Service":"squid","State":"running","Status":"Up","Health":"{health}"}}\n'
+                    '{"Service":"allowlist-watch","State":"running","Status":"Up","Health":""}\n'
                     '{"Service":"vscode","State":"running","Status":"Up","Health":""}\n'
                 )
         elif " exec -T vscode " in joined and "hardcode-extensions-status" in joined:
@@ -271,9 +272,9 @@ class HomeTestCase(unittest.TestCase):
         default.start()
         self.addCleanup(default.stop)
 
-        # No test starts a real background reload of a proxy: one that would
-        # says so, rather than leave a process behind.
-        spawn = mock.patch.object(reloader, "_spawn", side_effect=AssertionError("a test started a real reloader"))
+        # No test starts a real applier: one that would says so, rather than
+        # leave a process behind.
+        spawn = mock.patch.object(applier, "_spawn", side_effect=AssertionError("a test started a real applier"))
         spawn.start()
         self.addCleanup(spawn.stop)
 

@@ -81,30 +81,57 @@ class Profile:
         return self.dir / "compose.override.yaml"
 
     @property
+    def proxy_dir(self) -> Path:
+        """
+        The profile's proxy folder: the one part of its folder a container
+        may write in, the allowlist's renderer, which has no network
+        (compose.yaml's ``allowlist`` and ``allowlist-watch``). The command
+        writes the allowlist the proxy is given; the renderer, what it did
+        with it (``applied``, ``failed``).
+        """
+        return self.dir / "proxy"
+
+    @property
     def proxy_allowlist_file(self) -> Path:
         """
-        The allowlist the proxy is given (mounted read-only into its
-        renderer): ``allowlist.txt`` with the entries HardCode provides.
+        The allowlist the proxy is given: ``allowlist.txt`` with the entries
+        HardCode provides. A running proxy reloads with it by itself, a few
+        seconds after it last changed.
         """
-        return self.dir / "proxy-allowlist.txt"
+        return self.proxy_dir / "allowlist.txt"
 
     @property
     def proxy_applied_file(self) -> Path:
         """
-        A digest of the proxy allowlist the running proxy last loaded, as
-        far as this command saw it load one: written after a healthy start
-        or reload, never before.
+        The sha256 of the proxy allowlist the renderer last published, which
+        the running proxy reloads with within a second or two: written by
+        the renderer, never by the command.
         """
-        return self.dir / "proxy-allowlist.applied"
+        return self.proxy_dir / "applied"
 
     @property
     def proxy_failed_file(self) -> Path:
         """
-        Why the proxy's last background reload failed (see ``reloader``);
-        there is none once the proxy is given the allowlist, or another
-        reload is on its way.
+        The sha256 of a proxy allowlist the renderer refused, on its first
+        line, and why on the next: written by the renderer, and gone once
+        it publishes one.
         """
-        return self.dir / "proxy-allowlist.failed"
+        return self.proxy_dir / "failed"
+
+    @property
+    def changes_file(self) -> Path:
+        """
+        The changes that recreate containers, waiting to be made, and the
+        last ones that couldn't be (see ``applier``).
+        """
+        return self.dir / "changes.json"
+
+    @property
+    def applier_log(self) -> Path:
+        """
+        What the applier did, for ``hardcode logs applier`` (see ``applier``).
+        """
+        return self.dir / "applier.log"
 
     @property
     def extensions_file(self) -> Path:
@@ -195,12 +222,12 @@ def list_profiles(root: Path) -> list[str]:
 
 
 # The files a profile's locks are taken on, in its folder: the lock on its
-# files, the one on its containers, and the one its proxy's background
-# reload holds while it runs (see reloader).
+# files, the one on its containers, and the one its applier holds while it
+# runs (see applier).
 LOCK_FILE = ".lock"
 CONTAINERS_LOCK_FILE = ".containers.lock"
-RELOADER_LOCK_FILE = ".reloader.lock"
-LOCK_FILES = (LOCK_FILE, CONTAINERS_LOCK_FILE, RELOADER_LOCK_FILE)
+APPLIER_LOCK_FILE = ".applier.lock"
+LOCK_FILES = (LOCK_FILE, CONTAINERS_LOCK_FILE, APPLIER_LOCK_FILE)
 
 
 def _is_profile(folder: Path) -> bool:
@@ -499,10 +526,8 @@ def get(root: Path, name: str, home_id: str = "") -> Profile:
         profile.env_file.chmod(0o600)
         _assign_network(root, name, profile.env_file)
 
-    # The proxy's allowlist is there for Compose to mount (a missing file
-    # would be mounted as an empty directory). It is brought up to date only
-    # where the proxy is given it too: written here, the running proxy
-    # would no longer match it, and nothing would notice.
+    # The proxy folder is there for Compose to mount (a missing folder would
+    # be made by Docker, as root), with the allowlist for the renderer.
     if not profile.proxy_allowlist_file.exists():
         write_proxy_allowlist(profile)
 
@@ -535,8 +560,8 @@ def lock(
 
     They are two, taken in this order: the containers' (``.containers.lock``)
     and the files' (``.lock``). Only an edit of the allowlist takes the
-    files' alone (``files_lock``), and the proxy's background reload holds
-    the containers' alone while it recreates the proxy (``reloader``).
+    files' alone (``files_lock``), and the applier holds the containers'
+    alone while it recreates containers (``applier``).
     """
     deadline = clock() + timeout
     tell = _once(waiting)
@@ -556,8 +581,8 @@ def files_lock(
 ) -> Iterator[None]:
     """
     Hold the lock on the profile's files alone: for an edit of the
-    allowlist, which writes nothing a container reads while the proxy's
-    background reload recreates it, and so needn't wait for that reload to
+    allowlist, which writes nothing a container is recreated from, and so
+    needn't wait for the applier recreating containers (``applier``) to
     end. Every other change takes this lock after the containers' (``lock``),
     so it waits for such an edit, and such an edit for it. A holder of this
     lock never waits for the containers' one, or the two could wait for each
@@ -578,9 +603,9 @@ def containers_lock(
     sleep: Callable[[float], None] = time.sleep,
 ) -> Iterator[None]:
     """
-    Hold the lock on the profile's containers alone, as the proxy's
-    background reload does while it recreates the proxy. It is taken before
-    the files' lock, by whoever needs both.
+    Hold the lock on the profile's containers alone, as the applier does
+    while it recreates containers. It is taken before the files' lock, by
+    whoever needs both.
     """
     deadline = clock() + timeout
 
@@ -775,12 +800,11 @@ def write_proxy_allowlist(
     Write the allowlist the proxy is given (``proxy_allowlist_text``): the
     file's text before (``""`` when there was none) and after.
 
-    Only a holder of the profile's containers lock writes it, as it gives
-    the proxy the file (a start, a reload), or as nothing else does (an
-    allowlist edit, while the profile isn't running): the proxy's renderer
-    reads it as the proxy is recreated, and what it read is what is recorded
-    as loaded. It is written in place, as the renderer's bind mount follows
-    the file it was made with, and readable by the renderer's user.
+    A running proxy reloads with it by itself, a few seconds after it last
+    changed (the stack's ``allowlist-watch``); a stopped one, as it starts.
+    It is written with ``\n`` line ends on every platform, so that its
+    sha256, which the renderer reports what it published by, is the one
+    this command makes of the text; readable by the renderer's user.
     """
     text = proxy_allowlist_text(profile, this_computer, warn)
 
@@ -789,102 +813,84 @@ def write_proxy_allowlist(
     if before == text:
         return before, text
 
-    with open(path, "w", encoding="utf-8") as handle:
+    profile.proxy_dir.mkdir(exist_ok=True)
+    with open(path, "w", encoding="utf-8", newline="\n") as handle:
         handle.write(text)
     path.chmod(0o644)
 
     return before, text
 
 
-def _digest(text: str) -> str:
+def _digest(data: bytes) -> str:
     """
-    The sha256 of a proxy allowlist's text; the same on every platform,
-    whatever line endings the file was written with.
+    The sha256 of a proxy allowlist, as the renderer takes it: of the
+    file's bytes.
     """
-    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+    return hashlib.sha256(data).hexdigest()
 
 
 def _proxy_allowlist_digest(profile: Profile) -> str:
     """
-    The digest of the proxy allowlist file as it is now; ``""`` without one.
+    The sha256 of the proxy allowlist file as it is now; ``""`` without one.
     """
     path = profile.proxy_allowlist_file
     if not path.exists():
         return ""
 
-    return _digest(path.read_text(encoding="utf-8"))
+    return _digest(path.read_bytes())
 
 
-def _applied_digest(profile: Profile) -> str:
+def _first_line(path: Path) -> str:
     """
-    The digest of the proxy allowlist the running proxy last loaded, as
-    recorded; ``""`` when nothing is.
+    The first line of a file the renderer writes; ``""`` without one.
     """
-    path = profile.proxy_applied_file
-    if not path.exists():
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except OSError:
         return ""
 
-    return path.read_text(encoding="utf-8").strip()
-
-
-def mark_proxy_allowlist_applied(profile: Profile) -> None:
-    """
-    Record that the proxy has loaded the proxy allowlist as it is now: it
-    started from nothing and read it, or was reloaded with it and came back
-    healthy. A failed background reload before it is forgotten.
-    """
-    profile.proxy_applied_file.write_text(_proxy_allowlist_digest(profile) + "\n", encoding="utf-8")
-    forget_proxy_reload_failure(profile)
+    return lines[0].strip() if lines else ""
 
 
 def proxy_allowlist_applied(profile: Profile) -> bool:
     """
-    Whether the proxy last loaded the proxy allowlist as it is now. Not when
-    the file changed since, by an edit or a newer HardCode, and a start or
-    reload failed before the proxy had it: a proxy keeps the rules it
-    loaded, so a file that is right says nothing about the proxy.
+    Whether the renderer last published the proxy allowlist as the file is
+    now: the running proxy has it, or reloads with it within a second or
+    two. Not while a change waits for its quiet seconds, or after one the
+    renderer refused.
     """
-    applied = _applied_digest(profile)
+    applied = _first_line(profile.proxy_applied_file)
     return bool(applied) and applied == _proxy_allowlist_digest(profile)
 
 
 def proxy_allowlist_current(profile: Profile, this_computer: lan.ThisComputer = lan.is_this_computer) -> bool:
     """
-    Whether the proxy last loaded the allowlist the profile's files say it
-    is to be given now (``proxy_allowlist_text``): not while an edit waits
-    for its background reload, after a hand edit nobody reloaded the proxy
-    for, or after a reload that failed. Nothing is written.
+    Whether the renderer last published the allowlist the profile's files
+    say the proxy is to be given now (``proxy_allowlist_text``): not while
+    an edit waits for its quiet seconds, after a hand edit of
+    ``allowlist.txt`` nobody gave the proxy (``hardcode apply`` does), or
+    after one the renderer refused. Nothing is written.
     """
-    applied = _applied_digest(profile)
-    return bool(applied) and applied == _digest(proxy_allowlist_text(profile, this_computer))
+    applied = _first_line(profile.proxy_applied_file)
+    wanted = proxy_allowlist_text(profile, this_computer).encode("utf-8")
+
+    return bool(applied) and applied == _digest(wanted)
 
 
-def record_proxy_reload_failure(profile: Profile, message: str) -> None:
+def proxy_refusal(profile: Profile) -> str:
     """
-    Keep why the proxy's background reload failed, for ``ps`` and the app to
-    show until the proxy is given the allowlist.
+    Why the renderer refused the proxy allowlist as the file is now; ``""``
+    when it didn't (it published it, or hasn't looked at it yet).
     """
-    profile.proxy_failed_file.write_text(message.strip() + "\n", encoding="utf-8")
-
-
-def forget_proxy_reload_failure(profile: Profile) -> None:
-    """
-    Forget a failed background reload: the proxy has the allowlist since,
-    or another reload is on its way.
-    """
-    profile.proxy_failed_file.unlink(missing_ok=True)
-
-
-def proxy_reload_failure(profile: Profile) -> str:
-    """
-    Why the proxy's last background reload failed; ``""`` when it didn't,
-    or the proxy was given the allowlist since.
-    """
-    path = profile.proxy_failed_file
-    if not path.exists():
+    try:
+        lines = profile.proxy_failed_file.read_text(encoding="utf-8").splitlines()
+    except OSError:
         return ""
 
-    return path.read_text(encoding="utf-8").strip()
+    if not lines or lines[0].strip() != _proxy_allowlist_digest(profile):
+        return ""
+
+    return "\n".join(lines[1:]).strip() or "the renderer refused it"
 
 
 def write_extension_list(profile: Profile) -> bool:

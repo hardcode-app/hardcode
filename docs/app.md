@@ -30,7 +30,7 @@ The state next to the page title says:
 
 | State | Means |
 |---|---|
-| *running (5)* | every container runs (with Docker switched off, four) |
+| *running (6)* | every container runs (with Docker switched off, five) |
 | *2/5 running* | some containers run, some don't: the Overview shows which |
 | *stopped* | the sandbox exists but isn't running |
 | *not created* | the sandbox hasn't been started yet, or was removed |
@@ -40,12 +40,23 @@ The state next to the page title says:
 | *status unknown* | Docker Compose or the command failed; hover over it for the reason |
 
 While the sandbox installs VS Code extensions, the state adds how far it
-has got: *running (5) · extensions 3/12*. After a change to the
-allowlist, it adds *applying allowlist* until the proxy has it. It says
-*allowlist not applied* when the running proxy hasn't the allowlist as it
-is now: after you edited `allowlist.txt` by hand, or when the proxy
-couldn't take a change (hover over it for why). **Reload proxy**, on the
-Allowlist page, gives it the allowlist.
+has got: *running (6) · extensions 3/12*. After a change to the
+allowlist, it counts down to when the proxy takes it: *allowlist in 3s*.
+It says *allowlist not applied* when the running proxy hasn't the
+allowlist as it is now: after you edited `allowlist.txt` by hand, or when
+the proxy refused a change (hover over it for why).
+
+Some changes restart a container: VS Code's port, a port forward, a
+mount, the Docker daemon on or off, a device, a new token. The app saves
+the change at once and tells you what restarts, and when: *gateway
+restarts in 5 seconds*. The containers restart five seconds after your
+last such change, all at once, so several changes in a row are one
+restart; meanwhile the state counts down (*gateway, vscode in 3s*), then
+says *restarting*. If a container can't start with your changes (a port
+another program on your computer uses, say), they are undone: the app
+says which, and why, and the state shows *changes undone* until your next
+change. **Apply now**, on the Allowlist page, makes every change waiting
+at once.
 
 The app opens on the profile you used last. Closing the app doesn't stop
 any sandbox.
@@ -78,7 +89,8 @@ at once; **Close**, a click outside or Escape closes it.
 **The switch on the docker row** turns the profile's Docker daemon on or
 off. Off, no daemon runs for the profile and `docker` has nothing to talk
 to: the [harder sandbox](staying-safe.md#use-the-harder-sandbox-when-you-can).
-A running sandbox is changed at once (VS Code's container is recreated).
+A running sandbox's VS Code and Docker containers restart a few seconds
+later.
 
 **Devices**, below VS Code's card, lists the devices of your computer the
 sandbox may use: KVM, an AMD or Intel GPU, NVIDIA GPUs. Each is off until
@@ -99,11 +111,11 @@ doesn't have is greyed out, with the reason.
 
 **The VS Code card** says which port VS Code is on, with **change** to
 move it to another (refused for a port another profile uses; a running
-profile moves at once). Below is VS Code's address, with its token hidden:
+profile moves a few seconds later). Below is VS Code's address, with its token hidden:
 **Show** reveals it, **Copy** copies the whole address, and **Open VS
 Code ↗** opens it. **New token…** replaces the token after asking: every
-copy of the old one stops working, and VS Code restarts, so open windows
-need the new address. The address appears once the sandbox's VS Code is
+copy of the old one stops working, and VS Code restarts a few seconds
+later, so open windows need the new address. The address appears once the sandbox's VS Code is
 up; until then the box says why there is none.
 
 **The Languages / Tools card** lists what the profile is built around, and
@@ -125,8 +137,8 @@ allowlist is struck through) and the VS Code extensions it **brings**.
 
 A switch changes three things, at different times, as the banner says:
 
-1. **The allowlist entries** open or close, and a running proxy reloads
-   with them a few seconds later.
+1. **The allowlist entries** open or close, and a running proxy takes
+   them a few seconds later.
 2. **The extensions** follow within seconds, while VS Code runs (reload
    VS Code's window if one doesn't appear).
 3. **The software** comes with the next image rebuild. Until then the card
@@ -194,12 +206,13 @@ Each row has its type (host, subdomains, path, ssh), its access
 ![Searching the allowlist](images/app-allowlist-search.png)
 
 Every change is written to the profile's `allowlist.txt` at once. A
-running proxy reloads with it a few seconds after your last change, so
-several changes in a row are one reload: the message says *the proxy
-reloads in a few seconds*, or *applies when the sandbox starts* when it
-isn't running, and the state next to the page title says *applying
-allowlist* until the proxy has it. **Reload proxy** gives the proxy the
-allowlist at once; use it after you edited `allowlist.txt` by hand.
+running proxy takes it five seconds after your last change, without
+restarting, so several changes in a row are taken together: the message
+says *the proxy takes it in 5 seconds*, or *applies when the sandbox
+starts* when it isn't running, and the state next to the page title
+counts down until the proxy has it. **Apply now** gives the proxy the
+allowlist at once, and makes any other change waiting; use it after you
+edited `allowlist.txt` by hand.
 
 [The allowlist](allowlist.md) explains entries in full.
 
@@ -234,7 +247,8 @@ where the server **Runs in** (*the VS Code container*, or *a container
 (docker run -p)* for a port a Docker container publishes), and the
 **Target port** if it differs, then click **Add forward**. A server in
 VS Code's container must listen on `0.0.0.0`, not on `localhost`. A port
-on your computer belongs to one profile. **✕** removes a forward.
+on your computer belongs to one profile. **✕** removes a forward. A
+running sandbox's gateway restarts with the change a few seconds later.
 
 ## Mounts
 
@@ -245,8 +259,8 @@ folder with **Browse…**, type where it goes in the sandbox (a name such as
 `git` lands in the home folder: `/home/dev/git`), tick **read-only** if
 the sandbox only needs to read it, and click **Mount**. VS Code's
 container and the Docker daemon see the folder at the same path, so
-`docker run -v` works with it too. Adding or removing a mount recreates
-both containers (VS Code reloads).
+`docker run -v` works with it too. Adding or removing a mount restarts
+both containers a few seconds later (VS Code reloads).
 
 A writable mount is a way out of the sandbox: anything inside, Claude
 included, can change files that your computer later runs. Read

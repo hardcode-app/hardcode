@@ -2,18 +2,22 @@
 Tests for the operations behind the commands (hardcode_cli.ops).
 """
 
+import hashlib
 import os
 import re
 import sys
 import unittest
 from unittest import mock
 
-from hardcode_cli import allowlist, envfile, langs, override, profiles
+from hardcode_cli import allowlist, applier, envfile, langs, override, profiles
 from hardcode_cli.compose import ComposeError
 from hardcode_cli.ops import STATUS_BYTES, Image, Ops
 
 from .helpers import FakeRunner, HomeTestCase, fake_host, updated_catalogue
 from .resolver import FakeResolver
+
+# The time of day the tests' operations see.
+NOW = 1000.0
 
 
 def python_in_image(state: dict):
@@ -21,6 +25,25 @@ def python_in_image(state: dict):
     Whether the state says Python is in the image: True, False or None.
     """
     return next(lang for lang in state["langs"] if lang["key"] == "python")["inImage"]
+
+
+def publish(profile: profiles.Profile) -> None:
+    """
+    Do what the renderer does as it publishes the proxy allowlist: say so
+    in the proxy folder, by its sha256.
+    """
+    digest = hashlib.sha256(profile.proxy_allowlist_file.read_bytes()).hexdigest()
+    profile.proxy_applied_file.write_text(digest + "\n", encoding="utf-8")
+    profile.proxy_failed_file.unlink(missing_ok=True)
+
+
+def refuse(profile: profiles.Profile, reason: str) -> None:
+    """
+    Do what the renderer does as it refuses the proxy allowlist: say so,
+    and why, in the proxy folder.
+    """
+    digest = hashlib.sha256(profile.proxy_allowlist_file.read_bytes()).hexdigest()
+    profile.proxy_failed_file.write_text(f"{digest}\n{reason}\n", encoding="utf-8")
 
 
 class OpsTests(HomeTestCase):
@@ -33,15 +56,15 @@ class OpsTests(HomeTestCase):
         """
         Operations on profile *name* (created when missing), with a fresh fake
         runner that reports the profile as running or not, and name lookups
-        that give *answers* (``{name: [address, ...]}``). A proxy's
-        background reload is only noted in ``self.reloads``.
+        that give *answers* (``{name: [address, ...]}``). The start of an
+        applier is only noted in ``self.appliers``.
         """
         if not profiles.exists(self.root, name):
             profiles.create(self.root, name, languages=list(langs.LANGS))
 
         self.runner = FakeRunner(running=running, healthy=healthy)
         self.resolver = FakeResolver(answers)
-        self.reloads = []
+        self.appliers = []
         return Ops(
             self.root,
             profiles.get(self.root, name),
@@ -50,7 +73,8 @@ class OpsTests(HomeTestCase):
             sleep=lambda _: None,
             resolve=self.resolver,
             host=fake_host(),
-            start_reloader=lambda root, profile: self.reloads.append(profile.name),
+            start_applier=lambda root, profile: self.appliers.append(profile.name),
+            clock=lambda: NOW,
         )
 
     def make_folder(self, name="src"):
@@ -70,7 +94,7 @@ class OpsTests(HomeTestCase):
         self.assertIn("github.com/me", ops.profile.allowlist_file.read_text(encoding="utf-8"))
         if os.name != "nt":
             self.assertEqual(ops.profile.allowlist_file.stat().st_mode & 0o777, 0o644)
-        self.assertEqual(self.runner.commands("allowlist squid"), [], "nothing reloaded when stopped")
+        self.assertEqual(self.runner.commands(" allowlist"), [], "no renderer run")
 
     def test_provided_entries_are_switched_not_deleted(self):
         ops = self.ops(running=True)
@@ -92,79 +116,108 @@ class OpsTests(HomeTestCase):
         enabled = ops.set_entry_enabled("crates.io", True)
         self.assertEqual(enabled.message, "enabled crates.io")
         self.assertNotIn("off crates.io", ops.profile.allowlist_file.read_text(encoding="utf-8"))
-        self.assertEqual(self.reloads, ["default", "default"], "each change goes to the proxy in the background")
-        self.assertEqual(self.runner.commands("allowlist squid"), [])
+        self.assertIn("\ncrates.io\n", ops.profile.proxy_allowlist_file.read_text(encoding="utf-8"))
+        self.assertEqual(self.runner.commands(" allowlist"), [], "the proxy takes each change by itself")
+        self.assertEqual(self.appliers, [], "and no container is recreated for it")
 
-    def test_allow_gives_a_running_proxy_the_entry_in_the_background(self):
+    def test_allow_gives_a_running_proxy_the_entry_in_a_few_seconds(self):
         ops = self.ops(running=True)
-        given = ops.profile.proxy_allowlist_file.read_text(encoding="utf-8")
 
         result = ops.allow("github.com/me", "rw")
 
         self.assertEqual(result.message, "allowed github.com/me (rw)")
-        self.assertEqual((result.applied, result.reloading), (True, True))
-        self.assertEqual(self.reloads, ["default"])
-        self.assertEqual(self.runner.commands("allowlist squid"), [], "nothing is recreated meanwhile")
-        self.assertEqual(
+        self.assertEqual((result.applied, result.reloading, result.restarts), (True, True, []))
+        self.assertEqual(result.due, NOW + applier.QUIET_SECONDS, "it says when")
+        self.assertEqual(self.runner.commands(" allowlist"), [], "nothing is run or recreated for it")
+        self.assertRegex(
             ops.profile.proxy_allowlist_file.read_text(encoding="utf-8"),
-            given,
-            "the proxy's file is the reload's to write",
+            r"\ngithub\.com/me +rw\n",
+            "the file the proxy watches is written at once",
         )
+
+    def test_the_proxys_file_has_the_same_bytes_everywhere(self):
+        ops = self.ops()
+        ops.allow("x.org")
+
+        data = ops.profile.proxy_allowlist_file.read_bytes()
+        self.assertNotIn(b"\r", data, "no CRLF line ends on Windows: the sha256 is the text's")
+        self.assertEqual(data, profiles.proxy_allowlist_text(ops.profile).encode("utf-8"))
 
     def test_an_unchanged_allowlist_reloads_nothing(self):
         ops = self.ops(running=True)
         ops.allow("x.org")
-        self.reloads.clear()
 
         again = ops.allow("x.org")
 
-        self.assertEqual((again.changed, again.applied, again.reloading), (False, None, False))
-        self.assertEqual(self.reloads, [])
+        self.assertEqual((again.changed, again.applied, again.reloading, again.due), (False, None, False, None))
 
     def test_a_stopped_profiles_edit_is_written_for_its_next_start(self):
         ops = self.ops()
 
-        ops.allow("x.org")
+        result = ops.allow("x.org")
+        self.assertEqual((result.applied, result.reloading, result.due), (False, False, None))
         self.assertIn("\nx.org\n", ops.profile.proxy_allowlist_file.read_text(encoding="utf-8"))
-        self.assertEqual(self.reloads, [])
 
-        # Unless a reload may be giving the proxy the file this moment: the
-        # next start writes it.
+        # Even while the containers are being recreated: the proxy's file is
+        # nothing they are recreated from.
         with profiles.containers_lock(ops.profile):
             ops.allow("y.org")
-        self.assertNotIn("y.org", ops.profile.proxy_allowlist_file.read_text(encoding="utf-8"))
+        self.assertIn("\ny.org\n", ops.profile.proxy_allowlist_file.read_text(encoding="utf-8"))
 
-    def test_reload_reports_an_unhealthy_proxy(self):
-        ops = self.ops(running=True, healthy=False)
+    def test_apply_says_why_the_renderer_refused_the_allowlist(self):
+        ops = self.ops(running=True)
+        self.runner.fail_on.add("run --rm --no-deps allowlist")
 
         result = ops.allow("x.org")
         self.assertTrue(result.reloading, "an edit doesn't wait for the proxy")
 
-        with self.assertRaisesRegex(ComposeError, "written, but squid didn't come back healthy"):
-            ops.reload()
+        with self.assertRaisesRegex(ComposeError, "the proxy keeps the allowlist it has: .*simulated failure"):
+            ops.apply()
         self.assertIn(
             "x.org",
             ops.profile.allowlist_file.read_text(encoding="utf-8"),
-            "the edit is kept; what failed is the reload",
+            "the edit is kept; what failed is giving it to the proxy",
         )
-        self.assertFalse(profiles.proxy_allowlist_current(ops.profile), "and the proxy isn't taken to have it")
 
     def test_the_proxys_state(self):
         ops = self.ops(running=True)
-        ops.reload()
+        publish(ops.profile)
+        quiet = {"reloading": False, "due": None, "behind": False, "error": ""}
 
-        self.assertEqual(ops.proxy_state(True), {"reloading": False, "behind": False, "error": ""})
+        self.assertEqual(ops.proxy_state(True, True), quiet)
 
+        # A change waits for its quiet seconds, counted from the file's last write.
         ops.allow("x.org")
-        profiles.record_proxy_reload_failure(ops.profile, "squid didn't come back healthy")
+        written = ops.profile.proxy_allowlist_file.stat().st_mtime
         self.assertEqual(
-            ops.proxy_state(True),
-            {"reloading": False, "behind": True, "error": "squid didn't come back healthy"},
+            ops.proxy_state(True, True),
+            {"reloading": True, "due": written + applier.QUIET_SECONDS, "behind": True, "error": ""},
         )
-        self.assertEqual(ops.proxy_state(False), {"reloading": False, "behind": False, "error": ""})
+        self.assertEqual(
+            ops.proxy_state(True, False),
+            {"reloading": False, "due": None, "behind": True, "error": ""},
+            "nothing gives it to the proxy without the watch",
+        )
 
-        ops.reload()
-        self.assertEqual(ops.proxy_state(True), {"reloading": False, "behind": False, "error": ""})
+        # The renderer refused it: why, while it stays behind.
+        refuse(ops.profile, "squid refuses the policy")
+        self.assertEqual(
+            ops.proxy_state(True, True),
+            {"reloading": False, "due": None, "behind": True, "error": "squid refuses the policy"},
+        )
+        self.assertEqual(ops.proxy_state(False, False), quiet, "a stopped proxy is behind nothing")
+
+        # A refusal of an allowlist that has changed since is no longer the reason.
+        ops.allow("y.org")
+        self.assertEqual(ops.proxy_state(True, True)["error"], "")
+
+        publish(ops.profile)
+        self.assertEqual(ops.proxy_state(True, True), quiet)
+
+        # A hand edit of allowlist.txt: behind, with nothing on its way.
+        with open(ops.profile.allowlist_file, "a", encoding="utf-8") as handle:
+            handle.write("hand.example\n")
+        self.assertEqual(ops.proxy_state(True, True), {**quiet, "behind": True})
 
     def test_allow_idempotent(self):
         ops = self.ops()
@@ -221,58 +274,64 @@ class OpsTests(HomeTestCase):
         self.assertFalse(ops.remove_entry("x.org").changed)
         self.assertEqual(allowlist.find(ops.profile.allowlist_file.read_text(encoding="utf-8"), "x.org"), [])
 
-    def test_reload(self):
+    def test_apply(self):
         ops = self.ops()
-        quiet = ops.reload()
+        quiet = ops.apply()
         self.assertEqual((quiet.message, quiet.changed, quiet.applied), ("profile isn't running", False, False))
 
-        # A hand edit reaches the proxy's file, and the reload says what it changes...
+        # A hand edit reaches the proxy's file, and apply says what it changes...
         with open(ops.profile.allowlist_file, "a", encoding="utf-8") as handle:
             handle.write("hand.example\n")
 
-        edited = ops.reload()
+        edited = ops.apply()
         self.assertEqual(edited.message, "allowlist: Custom: + hand.example; profile isn't running")
         self.assertEqual(edited.data["changes"], ["Custom: + hand.example"])
         self.assertIn("\nhand.example\n", ops.profile.proxy_allowlist_file.read_text(encoding="utf-8"))
 
         # ...as does an update of HardCode's provided entries.
         with mock.patch.object(langs, "CATALOGUE", updated_catalogue(added=["newrustsite.com"])):
-            updated = ops.reload()
+            updated = ops.apply()
         self.assertEqual(updated.data["changes"], ["Rust: + newrustsite.com"])
 
-        running = self.ops(running=True).reload()
+        # Running: the one-shot renderer runs again, at once, and only it;
+        # squid and CoreDNS reload with what it publishes, in place.
+        running = self.ops(running=True).apply()
+        self.assertTrue(running.message.endswith("the proxy has the allowlist"), running.message)
         self.assertTrue(running.applied)
+        self.assertEqual(len(self.runner.commands(" run --rm --no-deps allowlist")), 1)
+        self.assertEqual(self.runner.commands(" up "), [], "nothing is recreated")
 
-        # Every container of the two services goes first, a leftover from a
-        # recreate that was cut short included, then both start fresh.
-        reload_steps = [command for command in map(" ".join, self.runner.calls) if "allowlist squid" in command]
-        self.assertEqual(len(reload_steps), 2)
-        self.assertIn("rm --stop --force allowlist squid", reload_steps[0])
-        self.assertIn("up -d allowlist squid", reload_steps[1])
+    def test_apply_makes_the_changes_waiting_at_once(self):
+        ops = self.ops(running=True)
+        ops.forward(8080)
+        ops.mount(str(self.make_folder()), "/home/dev/src")
+        self.assertEqual(self.runner.commands(" up "), [], "they wait")
+
+        result = ops.apply()
+
+        self.assertEqual(result.message, "the proxy has the allowlist; the changes waiting were made")
+        self.assertEqual(
+            [command.split(" up ", 1)[1] for command in self.runner.commands(" up ")],
+            ["-d --no-deps gateway docker", "-d --no-deps vscode"],
+        )
+        self.assertEqual(applier.load(ops.profile), applier.Waiting(), "nothing waits any more")
 
     def test_rebuild(self):
         ops = self.ops(running=True)
-        profiles.mark_proxy_allowlist_applied(ops.profile)  # the proxy has the file, as after a start
         first = ops.rebuild()
 
         self.assertEqual(first.message, "VS Code image rebuilt")
         self.assertTrue(first.applied)
         self.assertEqual(len(self.runner.commands(" build vscode")), 1)
-        self.assertEqual(self.runner.commands("up -d allowlist squid"), [], "nothing new for the proxy")
+        self.assertEqual(self.runner.commands(" allowlist"), [], "nothing new for the proxy")
 
-        # A running proxy nobody saw load the file is given it.
-        ops.profile.proxy_applied_file.unlink()
-        ops.rebuild()
-        self.assertEqual(len(self.runner.commands("up -d allowlist squid")), 1)
-        self.runner.calls.clear()
-
-        # The proxy's allowlist is brought up to date too, as at every start,
-        # and the running proxy given it.
+        # The proxy's allowlist is brought up to date too, as at every start;
+        # a running proxy reloads with it by itself.
         with mock.patch.object(langs, "CATALOGUE", updated_catalogue(added=["newrustsite.com"])):
             updated = ops.rebuild()
 
         self.assertEqual(updated.message, "VS Code image rebuilt; allowlist: Rust: + newrustsite.com")
-        self.assertEqual(len(self.runner.commands("up -d allowlist squid")), 1)
+        self.assertIn("\nnewrustsite.com\n", ops.profile.proxy_allowlist_file.read_text(encoding="utf-8"))
 
         self.assertIsNotNone(self.ops().rebuild())
 
@@ -304,7 +363,7 @@ class OpsTests(HomeTestCase):
     def test_services_and_blocked(self):
         ops = self.ops(running=True)
 
-        self.assertEqual([service["service"] for service in ops.services()], ["squid", "vscode"])
+        self.assertEqual([service["service"] for service in ops.services()], ["squid", "allowlist-watch", "vscode"])
 
         self.assertEqual(ops.blocked("2h"), [])
         logs = self.runner.commands("logs")
@@ -343,20 +402,43 @@ class OpsTests(HomeTestCase):
 
     # -- forwards -------------------------------------------------------------
 
-    def test_forward_writes_override_and_recreates_gateway_when_running(self):
+    def test_forward_writes_override_and_recreates_gateway_a_few_seconds_later(self):
         ops = self.ops(running=True)
 
         result = ops.forward(3000)
 
         self.assertEqual(result.message, "forwarding localhost:3000 -> vscode:3000")
-        self.assertTrue(result.applied)
-        self.assertEqual(len(self.runner.commands("up -d gateway")), 1)
-        self.assertTrue(self.runner.commands("config --quiet"), "the file is validated with compose")
+        self.assertEqual(
+            (result.applied, result.restarts, result.due), (True, ["gateway"], NOW + applier.QUIET_SECONDS)
+        )
+        self.assertTrue(self.runner.commands("config --quiet"), "the file is validated with compose at once")
+        self.assertEqual(self.runner.commands(" up "), [], "the gateway waits")
+        self.assertEqual(self.appliers, ["default"], "for the applier")
+
+        waiting = applier.load(ops.profile)
+        self.assertEqual(
+            (waiting.changes, waiting.services), (["forwarding localhost:3000 -> vscode:3000"], ["gateway"])
+        )
 
         _, document = override.load(ops.profile.override_file)
         self.assertEqual(override.get_forwards(document)[0].port, 3000)
 
         self.assertFalse(ops.forward(3000).changed)
+
+    def test_changes_made_meanwhile_wait_together(self):
+        ops = self.ops(running=True)
+        before = applier.snapshot(ops.profile)
+
+        ops.forward(3000)
+        ops.clock = lambda: NOW + 3
+        later = ops.mount(str(self.make_folder()), "/home/dev/src")
+
+        self.assertEqual(later.restarts, ["gateway", "vscode", "docker"], "every container waiting is said")
+        self.assertEqual(later.due, NOW + 3 + applier.QUIET_SECONDS, "the time is pushed out")
+
+        waiting = applier.load(ops.profile)
+        self.assertEqual(len(waiting.changes), 2)
+        self.assertEqual(waiting.before, before, "what goes back is the profile before the first")
 
     def test_forward_refuses_vscode_port_and_other_profiles_ports(self):
         ops = self.ops()
@@ -416,17 +498,30 @@ class OpsTests(HomeTestCase):
         # gateway is started again from it, VS Code's port with it.
         ops = self.ops(running=True)
         before = ops.profile.override_file.read_text(encoding="utf-8")
-        self.runner.fail_on.add("up -d gateway")
+        self.runner.fail_on.add("up -d --no-deps gateway")
 
-        warnings: list[str] = []
-        ops.warn = warnings.append
+        result = ops.forward(3000)
+        self.assertEqual(result.restarts, ["gateway"], "the change itself is fine")
 
-        with self.assertRaisesRegex(ComposeError, "simulated failure for up -d gateway; the change was undone"):
-            ops.forward(3000)
+        made = ops.apply_waiting(now=True)
 
+        self.assertEqual(made.undone, ["forwarding localhost:3000 -> vscode:3000"])
+        self.assertIn("simulated failure for up -d --no-deps gateway", made.error)
+        self.assertEqual(applier.load(ops.profile), made, "kept for ps and the app")
         self.assertEqual(ops.profile.override_file.read_text(encoding="utf-8"), before)
-        self.assertEqual(len(self.runner.commands("up -d gateway")), 2, "with the change, then as before")
-        self.assertIn("couldn't be started again as before", warnings[0], "the fake fails both times")
+        self.assertEqual(len(self.runner.commands("up -d --no-deps gateway")), 2, "with the change, then as before")
+        self.assertIn("couldn't be started again as before", applier.log(ops.profile), "the fake fails both times")
+
+    def test_a_vscode_port_the_gateway_cannot_take_goes_back(self):
+        ops = self.ops(running=True)
+        port = envfile.read(ops.profile.env_file).get("VSCODE_PORT")
+        ops.set_port(9000)
+        self.runner.fail_on.add("up -d --no-deps gateway")
+
+        made = ops.apply_waiting(now=True)
+
+        self.assertEqual(made.undone, ["VS Code on port 9000"])
+        self.assertEqual(envfile.read(ops.profile.env_file).get("VSCODE_PORT"), port, "the old port is back")
 
     def test_an_override_edit_is_undone_when_it_cannot_be_checked(self):
         local = self.make_folder()
@@ -457,7 +552,8 @@ class OpsTests(HomeTestCase):
         result = ops.mount(str(local), "work", read_only=True)
 
         self.assertIn("at /home/dev/work (read-only)", result.message, "DEV_USER from .env is used")
-        self.assertEqual(len(self.runner.commands("up -d vscode docker")), 1)
+        self.assertEqual(result.restarts, ["vscode", "docker"], "both, a few seconds later")
+        self.assertEqual(self.runner.commands(" up "), [])
 
         _, document = override.load(ops.profile.override_file)
         self.assertEqual(document["services"]["docker"]["volumes"], document["services"]["vscode"]["volumes"])
@@ -512,8 +608,8 @@ class OpsTests(HomeTestCase):
         result = ops.set_languages({"python": True, "go": False}, build=False)
 
         self.assertEqual(result.message, "python on, go off (the image is rebuilt with: hardcode rebuild)")
-        self.assertEqual((result.applied, result.reloading), (True, True), "the proxy is given them in the background")
-        self.assertEqual(self.reloads, ["default"])
+        self.assertEqual((result.applied, result.reloading), (True, True), "the proxy takes them by itself")
+        self.assertEqual(result.due, NOW + applier.QUIET_SECONDS)
         self.assertEqual(self.runner.commands("allowlist squid"), [])
         self.assertEqual(self.runner.commands(" build"), [])
 
@@ -607,19 +703,27 @@ class OpsTests(HomeTestCase):
             self.assertIsNone(ops.extension_status(), str(status)[:120])
 
     def test_a_new_vscode_token(self):
-        # Running: the token file goes, and VS Code restarts to write a new one.
+        # Running: a few seconds later, the token file goes, and VS Code is
+        # recreated to write a new one, though nothing else of it changed.
         ops = self.ops(running=True)
         result = ops.rotate_token()
 
-        self.assertTrue(result.applied)
+        self.assertEqual((result.applied, result.restarts), (True, ["vscode"]))
+        self.assertTrue(applier.load(ops.profile).token)
+        self.assertEqual(self.runner.commands("connection-token"), [], "it waits")
+
+        ops.apply_waiting(now=True)
+
         calls = [" ".join(call) for call in self.runner.calls]
         removed = next(
             index
             for index, call in enumerate(calls)
             if "exec -T vscode sh -c rm -f ~/.vscode-server/connection-token" in call
         )
-        restarted = next(index for index, call in enumerate(calls) if call.endswith("restart vscode"))
-        self.assertLess(removed, restarted)
+        recreated = next(
+            index for index, call in enumerate(calls) if call.endswith("up -d --no-deps --force-recreate vscode")
+        )
+        self.assertLess(removed, recreated)
 
         # Stopped: a container of its own removes it, and nothing starts.
         stopped = self.ops()
@@ -699,9 +803,12 @@ class OpsTests(HomeTestCase):
         running = self.ops(running=True)
         result = running.set_docker(True)
 
-        self.assertEqual((result.message, result.applied), ("docker on", True))
+        self.assertEqual((result.message, result.applied, result.restarts), ("docker on", True, ["docker", "vscode"]))
+        running.apply_waiting(now=True)
         self.assertEqual(
-            len(self.runner.commands(" up -d")), 1, "the VS Code container is recreated with the daemon beside it"
+            [command.split(" up ", 1)[1] for command in self.runner.commands(" up ")],
+            ["-d --no-deps docker", "-d --no-deps vscode"],
+            "the daemon is started, and the VS Code container recreated beside it",
         )
         self.assertEqual(self.runner.commands("rm --stop"), [])
 
@@ -709,17 +816,22 @@ class OpsTests(HomeTestCase):
         ops = self.ops(running=True)
         self.runner.fail_on.add("rm --stop")
 
-        with self.assertRaisesRegex(ComposeError, "the change was undone"):
-            ops.set_docker(False)
+        ops.set_docker(False)
+        made = ops.apply_waiting(now=True)
 
+        self.assertEqual(made.undone, ["docker off"])
         self.assertNotIn("ENABLE_DOCKER", envfile.read(ops.profile.env_file), "back on: unset, the default")
         self.assertTrue(ops.compose.docker_enabled())
-        self.assertTrue(self.runner.commands("--progress quiet up -d"), "started again as it was, daemon included")
+        self.assertTrue(
+            self.runner.commands("--progress quiet up -d --no-deps docker"),
+            "started again as it was, daemon included",
+        )
 
     def test_docker_off_stops_the_daemon_and_nothing_restarts_it(self):
         ops = self.ops(running=True)
 
         result = ops.set_docker(False)
+        ops.apply_waiting(now=True)
 
         self.assertEqual((result.message, result.applied), ("docker off", True))
         stopped = self.runner.commands("--profile docker --progress quiet rm --stop --force docker")
@@ -737,21 +849,23 @@ class OpsTests(HomeTestCase):
         # Mounts recreate the VS Code container, but must never name docker while it is off:
         # naming a service starts it.
         local = self.make_folder()
+        self.runner.calls.clear()
         ops.mount(str(local), "work")
         ops.unmount("work")
+        ops.apply_waiting(now=True)
 
         recreates = [command for command in self.runner.commands(" up -d ") if "rm --stop" not in command]
         self.assertTrue(recreates, "mounts still recreate the VS Code container")
-        vscode_recreates = [command for command in recreates if "vscode" in command]
         self.assertTrue(
-            all(command.endswith(" up -d vscode") for command in vscode_recreates),
+            all(not command.endswith(" docker") for command in recreates),
             f"never naming docker while it is off: {recreates}",
         )
 
         ops.set_docker(True)
         ops.mount(str(local), "again")
+        ops.apply_waiting(now=True)
         self.assertTrue(
-            any(command.endswith(" up -d vscode docker") for command in self.runner.commands(" up -d ")),
+            any(command.endswith(" up -d --no-deps docker") for command in self.runner.commands(" up -d ")),
             "on again, both are recreated",
         )
 
@@ -834,15 +948,15 @@ class LanTests(HomeTestCase):
         """
         Operations on the default profile, with name lookups giving *answers*,
         on a computer whose own addresses are *this_computer* (none, so that
-        nothing depends on the machine the tests run on). A proxy's
-        background reload is only noted in ``self.reloads``.
+        nothing depends on the machine the tests run on). The start of an
+        applier is only noted in ``self.appliers``.
         """
         if not profiles.exists(self.root, "default"):
             profiles.create(self.root, "default", languages=[])
 
         self.runner = FakeRunner(running=running)
         self.resolver = FakeResolver(self.GITLAB if answers is None else answers)
-        self.reloads = []
+        self.appliers = []
         return Ops(
             self.root,
             profiles.get(self.root, "default"),
@@ -852,7 +966,8 @@ class LanTests(HomeTestCase):
             resolve=self.resolver,
             this_computer=lambda address: address in this_computer,
             host=fake_host(),
-            start_reloader=lambda root, profile: self.reloads.append(profile.name),
+            start_applier=lambda root, profile: self.appliers.append(profile.name),
+            clock=lambda: NOW,
         )
 
     def pins(self, ops):
@@ -884,8 +999,11 @@ class LanTests(HomeTestCase):
         self.assertTrue(result.data["lan"]["pinned"])
         self.assertIn("gitlab.example.com may reach 192.168.71.200 on your network", result.message)
         self.assertEqual(self.pins(ops), [("gitlab.example.com", "192.168.71.200")])
-        self.assertEqual(self.reloads, ["default"], "one reload for both")
-        self.assertIn("lan gitlab.example.com 192.168.71.200", profiles.proxy_allowlist_text(ops.profile))
+        self.assertTrue(result.reloading, "one change of the proxy's allowlist for both")
+        self.assertIn(
+            "lan gitlab.example.com 192.168.71.200",
+            ops.profile.proxy_allowlist_file.read_text(encoding="utf-8"),
+        )
 
     def test_a_no_pins_nothing_and_lan_ok_doesnt_ask(self):
         ops = self.ops()
@@ -989,11 +1107,11 @@ class LanTests(HomeTestCase):
         )
         self.assertIn(("moved.example.com", "10.0.0.8"), self.pins(ops), "the pin stays where it was")
 
-    def test_reload_looks_the_names_up_again(self):
+    def test_apply_looks_the_names_up_again(self):
         ops = self.ops({"moved.example.com": ["10.0.0.9"]}, running=True)
         ops.add_pin("moved.example.com", "10.0.0.8")
 
-        result = ops.reload()
+        result = ops.apply()
 
         self.assertIn("moved.example.com now resolves to 10.0.0.9, not 10.0.0.8", result.message)
         self.assertEqual(result.data["lan"][0]["state"], "moved")
@@ -1092,7 +1210,7 @@ class LanTests(HomeTestCase):
         path = ops.profile.allowlist_file
         path.write_text(path.read_text(encoding="utf-8") + "lan nas.example.com 192.168.1.5\n", encoding="utf-8")
 
-        ops.reload()
+        ops.apply()
         ops.allow("pypi.org")
 
         line = "on your network: allowlist.txt pins nas.example.com to 192.168.1.5, which is this computer: left out"

@@ -114,18 +114,26 @@ Look at **Blocked traffic** (or `hardcode blocked`):
 Before you allow anything, read
 [Staying safe](staying-safe.md#read-blocked-traffic-before-you-allow-anything).
 
-### The app says *applying allowlist*, or *allowlist not applied*
+### The app counts down, or says *allowlist not applied*
 
-*applying allowlist*: the proxy reloads with your changes a few seconds
-after the last one. Nothing is wrong; it goes away once the proxy has
-them. To have them at once, click **Reload proxy** on the Allowlist page,
-or run `hardcode reload`.
+*allowlist in 3s*, or *gateway in 3s*: your change is made five seconds
+after the last one, so several in a row are made together. Nothing is
+wrong; it goes away once the change is made. To have it at once, click
+**Apply now** on the Allowlist page, or run `hardcode apply`.
 
 *allowlist not applied*: the running proxy doesn't have the allowlist as
 it is now. Hover over it for why. Either you edited `allowlist.txt` by
-hand, or the proxy didn't come back healthy with your changes:
-`hardcode logs allowlist squid` shows what it said. Fix the line it
-names, if it names one, then click **Reload proxy**.
+hand, or the proxy refused your changes and kept the rules it had:
+`hardcode logs allowlist-watch squid` shows what it said. Fix the line it
+names, if it names one, then click **Apply now**.
+
+### The app says *changes undone*
+
+A container couldn't start with your changes, so they were undone and the
+sandbox runs as it did before them. Hover over it for which changes, and
+why; `hardcode logs applier` has the same. The usual reason is a port that
+another program on your computer already uses: choose another port, and
+make the change again.
 
 ### `git push` is refused
 
@@ -191,7 +199,8 @@ Languages / Tools page, or `hardcode rebuild`.
 
 The profile runs without its Docker daemon (`ENABLE_DOCKER=false`, the
 switch on the docker row of the app's Overview, or `hardcode docker off`).
-`hardcode docker on` brings it back; VS Code's container is recreated. If
+`hardcode docker on` brings it back; VS Code's container restarts a few
+seconds later. If
 `docker` itself isn't found, the profile doesn't have the **Docker CLI**
 tool: switch it on and rebuild.
 

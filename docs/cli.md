@@ -81,7 +81,7 @@ command's options.
 | Option | Meaning |
 |---|---|
 | `-p NAME`, `--profile NAME` | The profile to act on, before or after the command. Default: `$HARDCODE_PROFILE`, else `default`. |
-| `--all` | Act on every profile. Accepted by `allow`, `deny`, `allowlist` (`enable`, `disable`, `remove`), `reload`, `mount`, `unmount`, `enable`, `disable`, `rebuild`, `docker`, `extension`, `lan add`, `lan remove`, `package add`, `package remove` and `token`. |
+| `--all` | Act on every profile. Accepted by `allow`, `deny`, `allowlist` (`enable`, `disable`, `remove`), `apply`, `mount`, `unmount`, `enable`, `disable`, `rebuild`, `docker`, `extension`, `lan add`, `lan remove`, `package add`, `package remove` and `token`. |
 | `--json` | Machine-readable output ([below](#--json-output)); what the desktop app uses. |
 | `--config DIR` | The folder the profiles are kept in (the home). Default: `$HARDCODE_CONFIG`, else `~/.config/hardcode` on Linux (`$XDG_CONFIG_HOME/hardcode`), `~/Library/Application Support/HardCode` on macOS, `%LOCALAPPDATA%\HardCode` on Windows. |
 | `--version` | The command's version: `hardcode 0.1.0`, or `hardcode 0.1.0 (dev, 2c419ae)` for a development build, with the commit it was built from. |
@@ -104,16 +104,16 @@ however it ends.
 
 | Command | Does |
 |---|---|
-| `up [--build] [service…]` | Start the profile (`docker compose up -d`), building the images that don't exist yet (`--build`: build them again first). With no such profile yet, on a terminal, it asks which languages and tools to build it around (Enter alone: the five tools) and makes it; without a terminal it says how to (`hardcode profile add default --lang …`). It gives the proxy the allowlist as this HardCode provides it first, as `reload` does, so entries a newer HardCode added to a block arrive (and ones it dropped go), and prints what changed (`allowlist: Rust: + newrustsite.com`); a proxy that was already running is reloaded when something did. |
+| `up [--build] [service…]` | Start the profile (`docker compose up -d`), building the images that don't exist yet (`--build`: build them again first). With no such profile yet, on a terminal, it asks which languages and tools to build it around (Enter alone: the five tools) and makes it; without a terminal it says how to (`hardcode profile add default --lang …`). It writes the proxy's allowlist as this HardCode provides it first, as `apply` does, so entries a newer HardCode added to a block arrive (and ones it dropped go), and prints what changed (`allowlist: Rust: + newrustsite.com`); the start renders it for the proxy, running or not. Any change waiting to recreate containers is made by the start. |
 | `down [-v]` | Remove the containers; with `-v` the storage too (the home folder, `/shared`, the Docker daemon's data, the proxy's certificate). |
-| `start`, `stop`, `restart` | Start, stop or restart the existing containers, keeping everything. `start` and `restart` give the proxy its allowlist first, as `up` does. |
+| `start`, `stop`, `restart` | Start, stop or restart the existing containers, keeping everything. `start` and `restart` give the proxy its allowlist first, as `up` does. Changes waiting to recreate containers are left to the start. |
 | `build [service…]` | Build the profile's images. |
-| `logs [-f] [--tail N] [service…]` | Containers' logs: followed with `-f`, the last `N` lines of each with `--tail`. With `--json`, the last lines (200 unless `--tail` says otherwise) as one string. |
+| `logs [-f] [--tail N] [service…]` | Containers' logs: followed with `-f`, the last `N` lines of each with `--tail`. With `--json`, the last lines (200 unless `--tail` says otherwise) as one string. `logs applier` is the applier's log instead: each change that recreates containers, and what became of it. |
 | `ps` | The profile's containers and their state. |
 | `shell` | A login shell (`bash -l`) in the VS Code container, as `dev`. |
 | `open [--no-browser]` | Print VS Code's address with its token, and open it in your browser (`--no-browser`: just print it). The address is where the running gateway really publishes VS Code. Says what is missing when there is none: the profile isn't running, VS Code is still starting (no token yet), or the gateway isn't running. The token never goes to the logs: this is the way to get it. |
-| `token rotate` | A new VS Code token, so that every copy of the old one (a screenshot, a shared screen, a browser's history) stops working: a running VS Code restarts with it; a stopped profile gets it at its next start. A token fixed in `.env` (`VSCODE_CONNECTION_TOKEN`) is refused: change it there. |
-| `port <number>` | Move VS Code to another port on this machine: `VSCODE_PORT` in `.env`, and a running profile's gateway recreated on it (VS Code itself carries on). Refused for a port another profile publishes or one of this profile's forwards; if another program holds it, Docker can't publish it, and the old port stays. |
+| `token rotate` | A new VS Code token, so that every copy of the old one (a screenshot, a shared screen, a browser's history) stops working: a running VS Code restarts with it a few seconds later; a stopped profile gets it at its next start. A token fixed in `.env` (`VSCODE_CONNECTION_TOKEN`) is refused: change it there. |
+| `port <number>` | Move VS Code to another port on this machine: `VSCODE_PORT` in `.env`, and a running profile's gateway recreated on it a few seconds later (VS Code itself carries on). Refused for a port another profile publishes or one of this profile's forwards; if another program holds it, Docker can't publish it, and the old port goes back. |
 | `compose <args…>` | Any `docker compose` command for the profile, with its project, settings and override (`hardcode compose build --no-cache vscode`). This is the only way to run Compose for a profile: its Compose file needs what the command sets. |
 
 ### Profiles
@@ -139,7 +139,7 @@ are open, and which VS Code extensions the sandbox gets.
 | Command | Does |
 |---|---|
 | `languages` | Every language and tool: on or off, how many allowlist entries it opens and extensions it brings, and whether the image was built with other ones. For a profile that doesn't exist yet, the catalogue, every entry off. |
-| `enable <lang>… [--no-build]`, `disable <lang>… [--no-build]` | Switch languages and tools on or off: `INSTALL_<LANG>` in `.env`; the allowlist entries they bring (a running proxy reloads with them in the background, a few seconds later; `allowlist.txt` isn't touched, and an entry switched off there stays off); the extension list (a running sandbox installs or removes the extensions within seconds); then the image is rebuilt with the new software and the VS Code container recreated. `--no-build` leaves the image for a later `rebuild`, and does everything else at once. |
+| `enable <lang>… [--no-build]`, `disable <lang>… [--no-build]` | Switch languages and tools on or off: `INSTALL_<LANG>` in `.env`; the allowlist entries they bring (a running proxy takes them by itself, a few seconds later; `allowlist.txt` isn't touched, and an entry switched off there stays off); the extension list (a running sandbox installs or removes the extensions within seconds); then the image is rebuilt with the new software and the VS Code container recreated. `--no-build` leaves the image for a later `rebuild`, and does everything else at once. |
 | `rebuild` | Rebuild the VS Code image with the profile's languages and tools, and recreate the container if it runs. Gives the proxy its allowlist too, as `up` does. |
 | `extensions` | Every VS Code extension the sandbox gets, and where it comes from: every VS Code container, a language or tool, or the profile's own. While the sandbox runs, which are still installing, refused (a publisher without a verified domain) or to be tried again. |
 | `extension add\|remove <publisher.name>` | Add or remove one of the profile's own extensions (`VSCODE_EXTENSIONS` in `.env`). A running sandbox installs or removes it within seconds, without a restart. One a language or tool already brings isn't added twice; a language's own goes when the language is switched off, and the one every sandbox has can't be removed. Only publishers with a verified domain are installed. |
@@ -160,46 +160,58 @@ work too: `c`, `c++`, `cxx`, `c#`, `csharp`, `net`, `.net`, `js`,
 | Command | Does |
 |---|---|
 | `allowlist` | Every entry of one profile's allowlist, as the app lists them: its own from `allowlist.txt` first, then those HardCode provides, by block (every profile's, then its languages' and tools'); each on or off, with its access and note; an invalid line is marked. The names on your network follow, in a section of their own. |
-| `allow <entry> [rw\|ssh]` | Add the entry (or uncomment and re-flag an existing line); a running proxy reloads with it a few seconds after the profile's last change, in the background. A provided entry that already allows as much isn't added; one that was switched off is switched back on. `github:OWNER/REPO` adds the two entries one GitHub repository needs, `github.com/OWNER/REPO.git` and `api.github.com/repos/OWNER/REPO`; `deny` accepts it too ([GitHub from the sandbox](github.md)). When the entry's name points inside your network, it asks whether to let the name reach that address; `--lan` says yes without asking ([a server on your own network](allowlist.md#a-server-on-your-own-network)). |
+| `allow <entry> [rw\|ssh]` | Add the entry (or uncomment and re-flag an existing line); a running proxy takes it five seconds after the allowlist's last change, in place. A provided entry that already allows as much isn't added; one that was switched off is switched back on. `github:OWNER/REPO` adds the two entries one GitHub repository needs, `github.com/OWNER/REPO.git` and `api.github.com/repos/OWNER/REPO`; `deny` accepts it too ([GitHub from the sandbox](github.md)). When the entry's name points inside your network, it asks whether to let the name reach that address; `--lan` says yes without asking ([a server on your own network](allowlist.md#a-server-on-your-own-network)). |
 | `lan` | The names that may reach an address on your network, each with its state: `ok`, `moved` (the name points elsewhere now; the approved address stays), `unresolved`, or `this-computer` (a pin written by hand to this computer, which the proxy is never given). |
 | `lan add <name> [address]` | Let one name reach one address on your network: the address given, or the one the name has now. Adding a name again moves it. |
 | `lan remove <name>` | Stop letting the name reach its address. |
 | `lan check <name>` | What the name resolves to now, and whether that is on your network; it says why when an address can't be pinned (this computer, or the sandbox's own network). |
 | `deny <entry> [ssh]` | Switch an entry off: one of the profile's own is commented out (wherever it is in the file), a provided one gets an `off <entry>` line. An error if it isn't on. `ssh` means the host's SSH entry; without it, its HTTPS one. |
 | `allowlist enable\|disable\|remove <entry> [ssh]` | Comment the entry's line back in, comment it out, or delete it. A provided entry is switched on or off (its `off` line removed or added) and can't be removed: it would come back with its block. `github:OWNER/REPO` acts on both its entries. |
-| `reload` | Give a running proxy the allowlist at once, with the entries this HardCode provides, and wait until it has it; says what changed. For after you edited `allowlist.txt` by hand, and for a script that needs its edits in force before its next step. |
+| `apply` | Make every change waiting at once: give a running proxy the allowlist, with the entries this HardCode provides, and recreate the containers waiting to be; says what changed. For after you edited `allowlist.txt` by hand, and for a script that needs its changes in force before its next step. |
 | `blocked [--since 10m\|30m\|2h\|24h]` | What the proxy and the DNS server refused, by target, most frequent first. Default: the last 30 minutes. |
 
 An edit of the allowlist (`allow`, `deny`, `allowlist enable|disable|remove`,
 `lan add|remove`, and `enable`/`disable` for the entries a language or
 tool brings) on a running profile returns once its files are written: the
-proxy reloads with it in the background, five seconds after the profile's
-last change, so a script's edits in a row are one reload after the last
-([how](allowlist.md#how-edits-are-made)). An edit doesn't wait for a reload
-under way; every other change to the profile does, as it waits for any
-other change. If the proxy doesn't come back healthy, `ps --json` says so
-(`proxy.error`).
-`reload` gives the proxy the allowlist at once: if the proxy doesn't come
-back healthy, it fails (exit 1, the change kept), and which rules are in
-force is then unknown until `hardcode logs allowlist squid` says why.
+proxy reloads with it by itself, in place, five seconds after the
+allowlist's last change, so a script's edits in a row are one reload after
+the last ([how](allowlist.md#how-edits-are-made)). An edit doesn't wait
+for containers being recreated for another change. If the proxy refuses
+the list, it keeps the rules it has, and `ps --json` says why
+(`proxy.error`). `apply` gives the proxy the allowlist at once: if it is
+refused, it fails (exit 1, the change kept) with the reason.
+
+A change that recreates containers (`port`, `forward`, `unforward`,
+`mount`, `unmount`, `docker on|off`, `device on|off`, `token rotate`) on a
+running profile is checked and written at once, and says which containers
+restart: `forwarding localhost:3000 -> vscode:3000 (gateway restarts in 5
+seconds; hardcode apply: now)`. They are recreated five seconds after the
+profile's last such change, all at once, by a process of HardCode's on
+this computer; each change pushes the time out. When they can't be
+recreated with the changes (another program holds a port, say), the
+changes are undone: the files go back as they were, the containers are
+recreated from them, and `ps --json` says which were undone and why
+(`changes.undone`, `changes.error`) until the next change. `hardcode logs
+applier` shows what it did. A start or a stop takes the changes waiting
+with it.
 [The allowlist](allowlist.md#entry-format) has the entry format.
 
 ### Ports and folders
 
 | Command | Does |
 |---|---|
-| `forward <port> [vscode\|docker] [target]` | Publish `localhost:<port>` (on `VSCODE_BIND`) to port `target` (the same port by default) in the VS Code container, or with `docker` in the Docker daemon's container (for a container's `docker run -p` port). Refused: the VS Code port, 8000, a port another profile uses (every profile holding it is named), and `docker` on a profile without the Docker daemon. Another profile's damaged `compose.override.yaml` is a warning (its forwards can't be counted), not a stop. Recreates the gateway if the profile runs; if the gateway can't start with the forward (the port is taken on this machine), the forward is undone, the gateway started again as it was, and the error gives Compose's reason. |
+| `forward <port> [vscode\|docker] [target]` | Publish `localhost:<port>` (on `VSCODE_BIND`) to port `target` (the same port by default) in the VS Code container, or with `docker` in the Docker daemon's container (for a container's `docker run -p` port). Refused: the VS Code port, 8000, a port another profile uses (every profile holding it is named), and `docker` on a profile without the Docker daemon. Another profile's damaged `compose.override.yaml` is a warning (its forwards can't be counted), not a stop. Recreates the gateway a few seconds later if the profile runs; if the gateway can't start with the forward (the port is taken on this machine), the forward is undone, the gateway started again as it was, and `ps --json` gives Compose's reason. |
 | `unforward <port>` | Remove a forward. |
-| `mount <local> <remote> [--ro]` | Share a folder of this machine with the VS Code container and the Docker daemon, at the same path in both. `<local>` must exist. `<remote>` is absolute, or relative to the home folder (`git` is `/home/dev/git`). A folder under your home folder is written as `${HOME}/…`. Recreates both containers if the profile runs, undoing the mount if they can't start with it. A folder that is, holds or is inside HardCode's home is refused, so that a profile's files stay out of every sandbox. |
+| `mount <local> <remote> [--ro]` | Share a folder of this machine with the VS Code container and the Docker daemon, at the same path in both. `<local>` must exist. `<remote>` is absolute, or relative to the home folder (`git` is `/home/dev/git`). A folder under your home folder is written as `${HOME}/…`. Recreates both containers a few seconds later if the profile runs, undoing the mount if they can't start with it. A folder that is, holds or is inside HardCode's home is refused, so that a profile's files stay out of every sandbox. |
 | `unmount <remote>` | Remove a mount from both. A mount written by hand as `/home/${DEV_USER:-dev}/git` is the one `unmount git` names. |
 
 ### The Docker daemon, and the whole profile
 
 | Command | Does |
 |---|---|
-| `docker on\|off` | The Docker daemon beside the VS Code container. `off` leaves it out of the profile: nothing privileged runs for it, and there is no `docker` inside (the harder sandbox). On a running profile it applies at once: the daemon's container is stopped and removed (its data is kept for `on`), the VS Code container is recreated, and nothing recreates the daemon while it is off. `down` always covers it. |
+| `docker on\|off` | The Docker daemon beside the VS Code container. `off` leaves it out of the profile: nothing privileged runs for it, and there is no `docker` inside (the harder sandbox). On a running profile it applies a few seconds later: the daemon's container is stopped and removed (its data is kept for `on`), the VS Code container is recreated, and nothing recreates the daemon while it is off. `down` always covers it. |
 | `devices` | The devices of this computer the VS Code container may use (`kvm`, `gpu`, `nvidia`): each one on or off, and whether this computer has it. |
-| `device on\|off <name> [--yes]` | Give the VS Code container a device of this computer, or take it away; the container restarts. `on` asks first, since it weakens the sandbox, and needs `--yes` without a terminal. Linux only ([devices of your computer](vscode-image.md#devices-of-your-computer)). |
+| `device on\|off <name> [--yes]` | Give the VS Code container a device of this computer, or take it away; the container restarts a few seconds later. `on` asks first, since it weakens the sandbox, and needs `--yes` without a terminal. Linux only ([devices of your computer](vscode-image.md#devices-of-your-computer)). |
 | `show` | The profile's languages, extensions, allowlist, forwards and mounts at a glance, and whether the image needs a rebuild. |
 
 ### Environment variables
@@ -217,25 +229,26 @@ profile they touched:
 ```json
 {
   "results": [
-    {"profile": "default", "message": "allowed github.com/ourcompany (rw)", "changed": true, "applied": true, "data": {}, "reloading": true}
+    {"profile": "default", "message": "allowed github.com/ourcompany (rw)", "changed": true, "applied": true, "data": {}, "reloading": true, "restarts": [], "due": 1762500000.0}
   ]
 }
 ```
 
-`applied` is `true` when the running containers took the change, `false`
+`applied` is `true` when the running containers take the change, `false`
 when the profile isn't running (the change applies at its next start), and
 `null` when there was nothing to apply. `reloading` is `true` when the
-running proxy is given the change in the background, a few seconds after
-the profile's last change: until then it isn't in force. `profile add` puts the new
-profile's `name`, `source`, `port`, `subnet` and `languages` in `data`;
-`open` puts the `url` there; `reload` its `changes`.
+running proxy reloads with the change by itself; `restarts` names the
+containers recreated for it (with every change waiting); `due` says when,
+in seconds since the epoch: until then it isn't in force. `profile add`
+puts the new profile's `name`, `source`, `port`, `subnet` and `languages`
+in `data`; `open` puts the `url` there; `apply` its `changes`.
 
 Queries print their own objects:
 
 | Command | Shape |
 |---|---|
 | `profiles` / `status` | `{"home": "<folder>", "version": "<as --version says it>", "profiles": [{"name", "port", "subnet", "state", "running"}]}` |
-| `ps` | `{"services": [{"service", "state", "status", "health"}], "docker": true, "error": "", "extensions": {"state", "installed", "total"}, "proxy": {"reloading", "behind", "error"}}` (`docker: false` when the Docker CLI isn't found; `error` says why Compose couldn't list the containers, such as a daemon that isn't running, and is empty when it could; `extensions` is how far the running VS Code container's extensions have got, `state` `installing` or `done`, and `null` when it isn't running; `proxy` is `{"reloading", "behind", "error"}`: whether the proxy's background reload is running, whether the running proxy hasn't the allowlist the files say, and while it hasn't, why its last background reload failed, `""` when none did) |
+| `ps` | `{"services": [{"service", "state", "status", "health"}], "docker": true, "error": "", "extensions": {"state", "installed", "total"}, "proxy": {"reloading", "due", "behind", "error"}, "changes": {"changes", "services", "token", "due", "applying", "undone", "error"}}` (`docker: false` when the Docker CLI isn't found; `error` says why Compose couldn't list the containers, such as a daemon that isn't running, and is empty when it could; `extensions` is how far the running VS Code container's extensions have got, `state` `installing` or `done`, and `null` when it isn't running; `proxy` is `{"reloading", "due", "behind", "error"}`: whether the running proxy is about to reload with a change, and when (`due`, in seconds since the epoch), whether it hasn't the allowlist the files say, and while it hasn't, why the list was refused, `""` when it wasn't; `changes` is what waits to recreate containers: what each change said, the containers, whether VS Code gets a new token, when (`due`), whether they are being recreated now (`applying`), and the last changes undone, with why, until the next change) |
 | `show` | `{"profile", "env": {…}, "vscodePort", "allowlist": [entries], "forwards": [{port, host, target}], "mounts": [{local, remote, mode}], "langs": [languages], "extensions": [extensions], "lan": [pins], "packages": [names], "dockerfile": {"path", "exists"}, "image": {"built", "languages", "packages", "dockerfile"}, "rebuildNeeded", "rebuildReasons", "docker": bool, "profiles": [{name, port}]}` (`image.built` is `false` with no image and `null` when Docker can't say; `image.languages` is `[]` with no image, the image's languages and tools when it has the label, `null` when nobody can tell; `rebuildNeeded` is `null` when nobody can tell) |
 | `languages` | `{"languages": [languages], "rebuildNeeded": bool}` |
 | `devices` | `{"devices": [{"key", "name", "summary", "warning", "enabled", "available", "reason"}]}` |

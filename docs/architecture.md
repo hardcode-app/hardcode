@@ -28,9 +28,10 @@ publish ports from internal networks.
 |---|---|---|
 | `vscode` | built from [`images/vscode/Dockerfile`](../images/vscode/Dockerfile), tagged `hardcode-vscode:<profile>` | VS Code (`code serve-web`) as user `dev`, toolchains, Claude Code. [Details](vscode-image.md). |
 | `docker` | built from [`images/docker/Dockerfile`](../images/docker/Dockerfile): Docker's `docker:dind-rootless` (by digest), with HardCode's runc wrapper on top | The VS Code container's Docker daemon. Rootless, not `--privileged`; talks TLS on `docker:2376`. Its runc ([`hardcode_runc.py`](../images/docker/hardcode_runc.py)) gives every container and build step the proxy CA ([Using Docker inside the sandbox](vscode-image.md#using-docker-inside-the-sandbox)). Behind the `docker` Compose profile, which the CLI activates unless the profile's `ENABLE_DOCKER=false`. |
-| `squid` | built from [`images/squid/Dockerfile`](../images/squid/Dockerfile) (the archive's `squid-openssl`) | Egress proxy on `squid:3128`. Decrypts HTTPS with the profile's own CA and allows requests by URL and method. |
+| `squid` | built from [`images/squid/Dockerfile`](../images/squid/Dockerfile) (the archive's `squid-openssl`) | Egress proxy on `squid:3128`. Decrypts HTTPS with the profile's own CA and allows requests by URL and method. Its entrypoint ([`entrypoint.sh`](../images/squid/entrypoint.sh)) runs squid from its own copy of the published policy, and gives squid each new one in place: copied whole (it matches the policy's manifest), checked with squid's parser ([`check-policy.sh`](../images/squid/check-policy.sh)), then SIGHUP. |
 | `coredns` | `coredns/coredns:1.15.0` (by digest) | The VS Code container's only nameserver. Allowlisted names resolve upstream; everything else is answered NXDOMAIN locally. |
-| `allowlist` | the squid image, one shot | Renders the profile's allowlist into Squid's and CoreDNS's rule files on the `egress-config` volume before they start. It is given `proxy-allowlist.txt`, which `hardcode` writes: the entries HardCode provides (every profile's, and the profile's languages' and tools'), less those switched off, with the profile's own from `allowlist.txt`. |
+| `allowlist` | the squid image, one shot, at every start | Renders the profile's allowlist into Squid's and CoreDNS's rule files on the `egress-config` volume before they start ([`allowlist-render.sh`](../images/squid/allowlist-render.sh)): into a folder of its own, checked with squid's parser, then published file by file, the manifest of their sha256 last. It is given the profile's `proxy/` folder, where `hardcode` writes `allowlist.txt` (the entries HardCode provides, every profile's and the profile's languages' and tools', less those switched off, with the profile's own from `allowlist.txt`), and where it writes what it did: `applied` (the sha256 of the list it published) or `failed` (of one it refused, and why). No network. |
+| `allowlist-watch` | the squid image | Gives the running proxy each change of the list ([`allowlist-watch.sh`](../images/squid/allowlist-watch.sh)): five seconds after `proxy/allowlist.txt` last changed, it runs the renderer again, and squid and CoreDNS reload with what it publishes. No network, every capability dropped but `DAC_OVERRIDE`, a read-only filesystem. |
 | `pki` | the squid image, one shot | Generates the proxy CA once per profile. Squid gets key and certificate; vscode and docker only the certificate (docker passes it on to its containers). |
 | `gateway` | built from [`images/gateway/Dockerfile`](../images/gateway/Dockerfile) (socat) | Publishes VS Code (`127.0.0.1:<VSCODE_PORT>` → `vscode:8000`) and any ports added with `hardcode forward`. |
 
@@ -125,15 +126,28 @@ One change to a profile at a time: every command that changes one holds
 its two locks, the operating system's on files in its folder, one on its
 containers (`.containers.lock`) and one on its files (`.lock`), taken in
 that order. An edit of the allowlist takes the files' lock alone, writes
-`allowlist.txt` and returns; on a running profile it starts the proxy's
-background reload, `hardcode _reloader` (`cli/hardcode_cli/reloader.py`),
-unless one is running (it holds `.reloader.lock`). That process waits until
-the profile's files have gone five seconds without a change, then, under
-both locks, writes `proxy-allowlist.txt`, and recreates `allowlist` and
-`squid` holding the containers' lock alone, so that edits go on meanwhile;
-it does it again for an edit made during the reload, and ends when the
-proxy is caught up or the profile isn't running. A reload that fails is
-kept in `proxy-allowlist.failed`, which `ps --json` reports.
+`allowlist.txt` and `proxy/allowlist.txt`, and returns: the running
+proxy takes it by itself (`allowlist-watch`), and `ps --json` reads what
+the renderer said of it.
+
+A change that recreates containers (VS Code's port, a forward, a mount,
+the Docker daemon, a device, a new token) takes both locks, is checked
+(`docker compose config`) and written, and records itself in
+`changes.json`: what it said, the containers it recreates, when they are
+due (five seconds on, pushed out by each change), and, for the first of a
+batch, the settings and files it touched as they were before it. Then it
+starts the profile's applier, `hardcode _applier`
+(`cli/hardcode_cli/applier.py`), unless one is running (it holds
+`.applier.lock`). The applier waits until the batch is due, then, holding
+the containers' lock (so such changes wait for it, while allowlist edits
+go on), runs `docker compose up -d --no-deps` for those containers (the
+token deleted first, and the VS Code container recreated even unchanged;
+the Docker daemon removed by name while it is off). When that fails, it
+puts the settings and files back, recreates the containers from them,
+and keeps which changes were undone and why in `changes.json` until the
+next change. It logs to `applier.log` (`hardcode logs applier`), and ends
+once nothing waits. A start or a stop forgets what waits: the next start
+takes every change written. `hardcode apply` makes the batch at once.
 
 ## The same shape on Kubernetes
 
