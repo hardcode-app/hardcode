@@ -138,10 +138,6 @@ A switch changes three things, at different times, as the banner says:
 Before the first start there is no image yet: it is built with the chosen
 languages and tools at the first **▶ Start**.
 
-**Ubuntu packages**, below the tools, adds packages of your own to the
-image: type a name and click **Add**; **✕** removes one. The next
-rebuild installs them, and **Rebuild image** appears until then.
-
 ## Extensions
 
 ![Extensions](images/app-extensions.png)
@@ -260,8 +256,14 @@ included, can change files that your computer later runs. Read
 
 ![Image](images/app-image.png)
 
-Your own Dockerfile steps, built on top of HardCode's image, for what a
-package can't do. A new profile has none: the editor starts with an
+What you add to HardCode's image. First, **Ubuntu packages** of your own:
+type a name and click **Add**; **✕** removes one. The next rebuild
+installs them, and **Rebuild image** appears until then. With more than
+one profile, **this profile** and **all profiles** say which ones a change
+is for.
+
+Then your own Dockerfile steps, built on top of HardCode's image, for what
+a package can't do. A new profile has none: the editor starts with an
 example to begin from. **Save** keeps your steps, and **Save & rebuild**
 also builds the image, in the Console. Below the editor is HardCode's own
 Dockerfile, which your steps build on.

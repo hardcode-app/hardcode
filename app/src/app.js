@@ -12,8 +12,8 @@
  * in the image. So the Languages / Tools view comes right after the
  * Overview, a new profile starts with choosing them, and the Extensions and
  * Allowlist views say what came from which language. The image has the
- * profile's own Ubuntu packages too (the Languages / Tools view's last card)
- * and its own Dockerfile steps (the Image view), built on HardCode's.
+ * profile's own Ubuntu packages too, and its own Dockerfile steps, built on
+ * HardCode's: both on the Image view, packages first.
  *
  * The extensions aren't in the image: a running VS Code container installs
  * and removes them in the background, within seconds of a change. The page
@@ -1491,8 +1491,8 @@ function imageBadge(lang) {
 /**
  * The Languages / Tools view: what the profile is built around. A card per
  * language, then per tool, each with its switch, its toolchain or CLI, the
- * allowlist entries it opens and the extensions it brings; then the
- * profile's own Ubuntu packages.
+ * allowlist entries it opens and the extensions it brings. (The profile's
+ * own Ubuntu packages are on the Image view, with its own steps.)
  */
 function langs() {
   const data = state.data;
@@ -1524,8 +1524,7 @@ function langs() {
     <h3 class="group-title">Languages</h3>
     <div class="lang-grid">${languages.map(langCard).join('')}</div>
     <h3 class="group-title">Tools</h3>
-    <div class="lang-grid">${tools.map(langCard).join('')}</div>
-    ${packagesCard()}`;
+    <div class="lang-grid">${tools.map(langCard).join('')}</div>`;
 }
 
 /** One language's or tool's card: its switch, its toolchain, what it opens and what it brings. */
@@ -1573,7 +1572,7 @@ function packagesCard() {
   const none = '<span class="muted small">None yet.</span>';
 
   return `
-    <div class="card" id="packages-card" style="margin-top:14px">
+    <div class="card" id="packages-card" style="margin-bottom:14px">
       <div class="card-head"><h2>Ubuntu packages</h2><span class="muted small">this profile's own, in VSCODE_PACKAGES in its .env</span></div>
       <p class="muted small">Installed in the image from Ubuntu 26.04's archive, beside what the languages and tools bring: they arrive with the next image rebuild. A name the archive doesn't have fails the rebuild, and the console says so.</p>
       <div class="tags">${chips || none}</div>
@@ -1596,22 +1595,30 @@ function packageChip(name) {
   );
 }
 
-// -- the Image: the profile's own Dockerfile steps ---------------------------------
+// -- the Image: the profile's own packages and Dockerfile steps --------------------
 
 /**
- * The Image view: the profile's own Dockerfile steps in a plain editor,
- * with Save and Save & rebuild (the rebuild streams to the console), and
- * HardCode's Dockerfile they are built on, to read. The steps run on this
- * computer's Docker, which the view says first. A profile without the file
- * gets the starter in the editor, written when it is saved.
+ * The Image view: what the profile adds to HardCode's image. First its own
+ * Ubuntu packages, the simple way, which can apply to every profile (the
+ * scope chips); then its own Dockerfile steps in a plain editor, for what a
+ * package can't do, with Save and Save & rebuild (the rebuild streams to the
+ * console), and HardCode's Dockerfile they are built on, to read. The steps
+ * run on this computer's Docker, which the view says above them. A profile
+ * without the file gets the starter in the editor, written when it is saved.
  */
 function imageView() {
+  const toolbar = profileCount() > 1 ? `<div class="toolbar"><span class="spacer"></span>${scopeChips('package changes')}</div>` : '';
+  const top = `${toolbar}
+    ${scopeNote('Adding or removing a package changes it in every profile')}
+    ${rebuildCallout('rebuild-image')}
+    ${packagesCard()}`;
+
   const steps = state.imageSteps;
   if (!steps) {
     const why = state.imageStepsError
       ? `The Dockerfile steps couldn't be read: ${state.imageStepsError}`
       : 'Reading the Dockerfile steps…';
-    return `<div class="empty">${esc(why)}</div>`;
+    return `${top}<div class="empty">${esc(why)}</div>`;
   }
 
   const busy = state.running ? 'disabled' : '';
@@ -1620,8 +1627,8 @@ function imageView() {
   const where = steps.exists ? steps.path : `${steps.path} (not there yet: Save writes it)`;
 
   return `
-    <div class="callout">These steps run on your computer's Docker, with your computer's network, not the sandbox's allowlist.</div>
-    ${rebuildCallout('rebuild-image')}
+    ${top}
+    <div class="callout">The steps below run on your computer's Docker, with your computer's network, not the sandbox's allowlist.</div>
     <div class="card">
       <div class="card-head"><h2>Your Dockerfile steps</h2><span class="muted small mono">${esc(where)}</span></div>
       <p class="muted small">Built on HardCode's image, <span class="mono">FROM hardcode</span>, which has the profile's languages, tools and packages. The files they COPY go in the same folder. Without this file the image is HardCode's as it is.</p>
@@ -2443,7 +2450,7 @@ function bindExtensions() {
   });
 }
 
-/** The Ubuntu packages card's form and ✕ buttons, on the Languages / Tools view. */
+/** The Ubuntu packages card's form and ✕ buttons, on the Image view. */
 function bindPackages() {
   const input = $('#pkg-name');
   if (input) {
@@ -3034,8 +3041,9 @@ async function waitUntil(condition, milliseconds) {
 
 /**
  * What a view must show once it is open: the Languages / Tools view its
- * name, a card for every language and tool and the Ubuntu packages card
- * with its form, the Extensions view its groups and its form.
+ * name and a card for every language and tool, the Image view the Ubuntu
+ * packages card with its form first, the Extensions view its groups and
+ * its form.
  */
 function checkView(view, errors) {
   if (view === 'langs') {
@@ -3049,8 +3057,12 @@ function checkView(view, errors) {
       errors.push(`the Languages / Tools view shows ${cards} cards for ${state.data.langs.length} languages and tools`);
     }
 
-    if (!$('#packages-card') || !$('#pkg-name')) {
-      errors.push('the Languages / Tools view has no Ubuntu packages card with its form');
+  }
+
+  if (view === 'image') {
+    const first = $('#view').querySelector('.card');
+    if (!$('#packages-card') || !$('#pkg-name') || first !== $('#packages-card')) {
+      errors.push('the Image view has no Ubuntu packages card, with its form, at the top');
     }
   }
 
@@ -3190,7 +3202,7 @@ async function checkAllowlistAdd(errors) {
  * in the profile's state; its ✕ takes it away again.
  */
 async function checkPackages(errors) {
-  showView('langs');
+  showView('image');
   await sleep(200);
 
   $('#pkg-name').value = 'Not_A_Package';

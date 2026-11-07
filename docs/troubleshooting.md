@@ -214,7 +214,7 @@ NAME`, or its switch on the Overview page, and start again.
 
 One of the profile's Ubuntu packages isn't in Ubuntu 26.04 under that
 name. Check the spelling, or remove it with `hardcode package remove
-NAME` (or its **✕** on the Languages / Tools page), and rebuild.
+NAME` (or its **✕** on the Image page), and rebuild.
 
 ### A rebuild fails in your own Dockerfile steps
 
