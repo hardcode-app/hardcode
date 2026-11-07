@@ -123,13 +123,17 @@ then open `http://localhost:8000/?tkn=<token>`.
 | give a sandbox to a member | **Owner** on the **Settings** tab | `spec.owner` |
 | decide what a member asked for | **Approve** or **Deny** on **Requests** | `POST /api/requests/{id}/approve` |
 
-Allowlist changes are live within seconds: the operator rolls the
-profile's proxy and DNS five seconds after the profile's last change, so
-several changes in a row are one restart, and a change made while they
-are still restarting for the last one waits for that restart to end
-(two minutes at most), then five seconds more. The profile is *Pending*
-meanwhile, its message saying so. Language and extension changes reach
-the running VS Code container within about a minute, without a restart.
+Changes are live within seconds: the operator applies a profile's
+changes five seconds after its last one, so several changes in a row are
+one restart of the pods they touch (the proxy and DNS server for the
+allowlist; VS Code for its settings, packages and a new token), and an
+allowlist change made while they are still restarting for the last one
+waits for that restart to end (two minutes at most), then five seconds
+more. The profile is *Pending* meanwhile, its message saying so, and the
+admin says which pods restart, and when. Suspending or resuming a
+profile isn't held: it is a stop or a start. Language and extension
+changes reach the running VS Code container within about a minute,
+without a restart.
 
 **Upgrading HardCode** is a `helm upgrade` to the new chart version. Helm
 installs the CRD on the first install only: apply the new one with
@@ -265,9 +269,10 @@ with a digit: Compose has no such limit.)
 admin shows `Deleting` while Kubernetes removes a deleted profile),
 `message` (what it is waiting for, such as
 `waiting for vscode (ImagePullBackOff)`, or
-`allowlist changes apply a few seconds after the last one`), `observedGeneration`,
-`dnsClusterIP`, `proxyURL`, `vscodeService`, `tokenSecret` and
-`lastReconciled`. `kubectl get profiles` (short name `hcp`) shows the
+`changes apply a few seconds after the last one`), `observedGeneration`,
+`dnsClusterIP`, `proxyURL`, `vscodeService`, `tokenSecret`,
+`tokenRotatedAt` (when the new token VS Code was last given was asked
+for) and `lastReconciled`. `kubectl get profiles` (short name `hcp`) shows the
 phase, the owner, the image, whether it is suspended, the DNS ClusterIP
 and its age.
 
@@ -324,7 +329,9 @@ allowlist entries of such profiles at their next reconcile.
   bytes, or `spec.vscodeToken`; a changed fixed token is written to the
   Secret and, through a hash in the pod template, **restarts the VS Code
   container** so the running server uses it; so does a new token written
-  into the Secret, which is how the admin's **New token…** works), applies
+  into the Secret, which is how the admin's **New token…** works: it
+  writes the profile's `hardcode-app.github.io/token-rotated-at`
+  annotation, which the operator sees, as the Secret), applies
   the DNS Service first so Kubernetes allocates its ClusterIP, then
   **server-side applies** the rest in this order: configuration, Services,
   the **NetworkPolicies**, and only then the pods, with that IP in the VS
@@ -422,13 +429,14 @@ one release per namespace.
 | `hardcode --all allow …` | **All allowlists** in the admin UI, or `POST /api/allowlist/bulk` |
 | `hardcode enable` / `disable` (a language) | `spec.languages`, switched on the admin's **Languages / Tools** tab (its allowlist entries and extensions; the image stays as it is) |
 | `hardcode allowlist` | the admin's **Allowlist** tab, or `GET /api/profiles/{name}` (its `allowlist`) |
-| `profiles/<name>/proxy-allowlist.txt` | the `<profile>-allowlist` ConfigMap |
+| `profiles/<name>/proxy/allowlist.txt` | the `<profile>-allowlist` ConfigMap |
 | `hardcode extension add` / `remove` | `spec.extensions`, on the admin's **Extensions** tab, which also shows how far the installing has got |
 | `hardcode mount` | `spec.extraVolumes` + `spec.extraVolumeMounts`, applied to vscode and docker |
 | `hardcode forward` | `kubectl port-forward` to the VS Code pod |
 | the gateway | an Ingress per profile (`vscodeHost`), or `kubectl port-forward` |
 | `hardcode down -v` / `profile remove` | `suspended: true` / deleting the Profile |
 | the `pki` and `allowlist` one-shots | the CA Secret (once) and the render init container (every pod start) |
+| `allowlist-watch`, which reloads the running proxy in place | none: the operator restarts the proxy and DNS server with each change |
 
 ### Chart layout
 

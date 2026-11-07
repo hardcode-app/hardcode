@@ -10,6 +10,7 @@ that DNS.
 from __future__ import annotations
 
 import copy
+import hashlib
 import ipaddress
 import re
 from dataclasses import dataclass
@@ -30,6 +31,14 @@ LABEL_COMPONENT = f"{GROUP}/component"
 ANNOTATION_ALLOWLIST_HASH = f"{GROUP}/allowlist-hash"
 ANNOTATION_TOKEN_HASH = f"{GROUP}/token-hash"
 
+# On a profile: when a new VS Code token was last asked for (the admin's
+# rotate_token writes it), which the operator records in the profile's
+# status once VS Code has it.
+ANNOTATION_TOKEN_ROTATED = f"{GROUP}/token-rotated-at"
+
+# The components whose pods a change of a profile can restart.
+WORKLOADS = ("vscode", "squid", "coredns")
+
 # Hard memory limits on every container: a runaway build, a misbehaving proxy
 # or a nested container must be OOM-killed, never allowed to eat the node.
 # The VS Code container's and the Docker sidecar's can be raised by the chart
@@ -40,7 +49,10 @@ VSCODE_RESOURCES = {"requests": {"cpu": "250m", "memory": "1Gi"}, "limits": {"me
 DOCKER_RESOURCES = {"requests": {"cpu": "100m", "memory": "256Mi"}, "limits": {"memory": "4Gi"}}
 SQUID_RESOURCES = {"requests": {"cpu": "50m", "memory": "128Mi"}, "limits": {"memory": "512Mi"}}
 COREDNS_RESOURCES = {"requests": {"cpu": "20m", "memory": "32Mi"}, "limits": {"memory": "128Mi"}}
-INIT_RESOURCES = {"requests": {"cpu": "10m", "memory": "16Mi"}, "limits": {"memory": "64Mi"}}
+# The allowlist's renderer, the init container of squid's and CoreDNS's
+# pods, checks each policy with squid's own parser, which sizes its tables
+# for squid.conf's descriptors.
+RENDER_RESOURCES = {"requests": {"cpu": "10m", "memory": "32Mi"}, "limits": {"memory": "256Mi"}}
 SEED_RESOURCES = {"requests": {"cpu": "50m", "memory": "64Mi"}, "limits": {"memory": "256Mi"}}
 
 # The resource names in REST paths.
@@ -600,7 +612,7 @@ def _render_allowlist_init(build: _Build) -> dict:
         "image": spec["squidImage"],
         "imagePullPolicy": spec["imagePullPolicy"],
         "command": ["/usr/local/bin/allowlist-render"],
-        "resources": INIT_RESOURCES,
+        "resources": RENDER_RESOURCES,
         "securityContext": {"runAsUser": 0},
         "env": [
             {"name": "UPSTREAM_DNS", "value": spec["upstreamDNS"]},
@@ -1122,6 +1134,54 @@ def _pin_rules(build: _Build) -> list[dict]:
         )
 
     return rules
+
+
+def content_hash(text: str) -> str:
+    """
+    A short fingerprint of a text, for pod template annotations: a change
+    of the text rolls the pods.
+    """
+    return hashlib.sha256(text.encode()).hexdigest()[:16]
+
+
+def restarts(before: dict, after: dict, defaults: Optional[dict]) -> list[str]:
+    """
+    The components (``WORKLOADS``) whose pods a change of a profile from
+    *before* to *after* restarts: those whose pod template it changes, by
+    the allowlist's hash too, with which the proxy and the DNS server
+    restart. What the operator finds in the cluster (the DNS server's
+    address, the CA, the token) is the same stand-in for both: a change of
+    the spec is all this looks at. Suspending or resuming restarts nothing;
+    it stops or starts VS Code. Nothing is said without the settings the
+    chart gives (its pinned images).
+    """
+
+    def templates(profile: dict) -> dict:
+        spec = effective_spec(profile, defaults)
+        ctx = {
+            "dnsClusterIP": "10.0.0.10",
+            "caCert": "",
+            "allowlistHash": content_hash(spec["proxyAllowlist"]),
+            "tokenHash": "",
+            "existingClaims": None,
+        }
+
+        found = {}
+        for obj in render(profile, defaults, ctx):
+            if obj["kind"] in ("Deployment", "StatefulSet"):
+                found[obj["metadata"]["labels"][LABEL_COMPONENT]] = obj["spec"]["template"]
+
+        return found
+
+    # A setting the chart should give and doesn't (an image) leaves nothing
+    # to compare: the operator reports it on the profile.
+    try:
+        old = templates(before)
+        new = templates(after)
+    except ValueError:
+        return []
+
+    return [component for component in WORKLOADS if old.get(component) != new.get(component)]
 
 
 def render(profile: dict, defaults: Optional[dict], ctx: dict) -> list[dict]:

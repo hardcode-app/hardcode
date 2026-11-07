@@ -15,7 +15,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from hardcode_admin import manifests, totp, web
+from hardcode_admin import manifests, operator, totp, web
 from hardcode_admin.auth import ADMIN, Sessions, StoreConflict, Users
 from hardcode_admin.web import (
     ACCOUNT_CODE_ATTEMPTS,
@@ -30,7 +30,7 @@ from hardcode_admin.web import (
 )
 from hardcode_cli import langs, packages
 
-from .helpers import FakeK8s, MemoryStore
+from .helpers import FakeK8s, MemoryStore, chart_defaults, policy_changed
 
 try:
     import yaml
@@ -481,7 +481,9 @@ class WebTests(unittest.TestCase):
         def edit(body):
             return self.client.post("/api/profiles/team-a/allowlist", json=body)
 
-        self.assertEqual(edit({"op": "add", "entry": "github.com/ourcompany", "flag": "rw"}).json, {"changed": True})
+        self.assertEqual(
+            edit({"op": "add", "entry": "github.com/ourcompany", "flag": "rw"}).json, policy_changed(self.now[0])
+        )
 
         detail = self.client.get("/api/profiles/team-a").json
         entry = self.entry("team-a", "github.com/ourcompany")
@@ -564,7 +566,7 @@ class WebTests(unittest.TestCase):
 
         self.k8s.before_patch = someone_else_adds_first
         response = self.client.post("/api/profiles/team-a/allowlist", json={"op": "disable", "entry": "old.example"})
-        self.assertEqual(response.json, {"changed": True})
+        self.assertEqual(response.json, policy_changed(self.now[0]))
 
         enabled = {entry["entry"]: entry["enabled"] for entry in self.allowlist_of("team-a")}
         self.assertEqual(
@@ -788,7 +790,7 @@ class WebTests(unittest.TestCase):
         self.assertEqual((vscode["provided"], vscode["source"], vscode["section"]), (True, "vscode", "VS Code"))
 
         response = self.client.post("/api/profiles/team-a/allowlist", json={"op": "disable", "entry": "crates.io"})
-        self.assertEqual((response.status_code, response.json), (200, {"changed": True}))
+        self.assertEqual((response.status_code, response.json), (200, policy_changed(self.now[0])))
         self.assertIn("\noff crates.io\n", self.stored_spec("team-a")["allowlist"])
         self.assertFalse(self.entry("team-a", "crates.io")["enabled"])
 
@@ -797,7 +799,7 @@ class WebTests(unittest.TestCase):
         self.assertIn("comes with Rust and can't be deleted", response.json["error"])
 
         added = self.client.post("/api/profiles/team-a/allowlist", json={"op": "add", "entry": "crates.io"})
-        self.assertEqual(added.json, {"changed": True}, "adding it switches it back on")
+        self.assertEqual(added.json, policy_changed(self.now[0]), "adding it switches it back on")
         self.assertTrue(self.entry("team-a", "crates.io")["enabled"])
 
         results = self.client.post("/api/allowlist/bulk", json={"op": "disable", "entry": "static.crates.io"}).json
@@ -940,6 +942,11 @@ class WebTests(unittest.TestCase):
 
         response = self.client.post("/api/profiles/team-a/token", json={})
         self.assertEqual(response.status_code, 200, response.json)
+        self.assertEqual(
+            (response.json["restarts"], response.json["due"]),
+            (["vscode"], self.now[0] + operator.QUIET_SECONDS),
+            "VS Code restarts with it, a few seconds later",
+        )
         new = self.k8s.get(secret_path)["data"]["token"]
         self.assertNotEqual(new, old)
         self.assertGreaterEqual(len(base64.b64decode(new)), 24)
@@ -950,6 +957,34 @@ class WebTests(unittest.TestCase):
         refused = self.client.post("/api/profiles/team-a/token", json={})
         self.assertEqual(refused.status_code, 400)
         self.assertIn("fixed in its spec", refused.json["error"])
+
+    def test_a_change_says_what_restarts_and_when(self):
+        app = create_app(
+            self.k8s,
+            self.users,
+            chart_defaults({"image": "img:1"}),
+            cookie_secure="never",
+            template_allowlist=TEMPLATE,
+            clock=lambda: self.now[0],
+        )
+        app.testing = True
+        self.client = app.test_client()
+        self.sign_in()
+        self.client.post("/api/profiles", json={"name": "team-a"})
+
+        packages = self.client.post("/api/profiles/team-a/packages", json={"op": "add", "names": ["jq"]}).json
+        self.assertEqual((packages["restarts"], packages["due"]), (["vscode"], self.now[0] + operator.QUIET_SECONDS))
+
+        extensions = self.client.post("/api/profiles/team-a/extensions", json={"op": "add", "id": "me.mine"}).json
+        self.assertNotIn("restarts", extensions, "the running VS Code container takes them by itself")
+
+        settings = self.client.patch("/api/profiles/team-a", json={"allowlist": "pypi.org\n"}).json
+        self.assertEqual(settings["restarts"], ["squid", "coredns"])
+
+        # Suspended, VS Code has no pod to restart.
+        self.client.patch("/api/profiles/team-a", json={"suspended": True})
+        removed = self.client.post("/api/profiles/team-a/packages", json={"op": "remove", "names": ["jq"]}).json
+        self.assertNotIn("restarts", removed)
 
     def test_extensions_are_checked(self):
         self.sign_in()
@@ -1221,7 +1256,8 @@ class LanWebTests(unittest.TestCase):
     def test_add_list_move_and_remove(self):
         added = self.lan(op="add", name="GitLab.example.com", address="192.168.71.200")
         self.assertEqual(
-            added.json, {"changed": True, "message": "gitlab.example.com may reach 192.168.71.200 on your network"}
+            added.json,
+            policy_changed(self.now[0], message="gitlab.example.com may reach 192.168.71.200 on your network"),
         )
 
         self.lan(op="add", name="moved.example.com", address="10.0.0.8")

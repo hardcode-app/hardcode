@@ -12,6 +12,7 @@ from pathlib import Path
 
 import yaml
 
+from hardcode_admin import operator
 from hardcode_admin.auth import StoreConflict
 from hardcode_admin.k8s import ApiError
 
@@ -38,6 +39,15 @@ def chart_defaults(overrides: dict | None = None) -> dict:
     values = yaml.safe_load(VALUES.read_text(encoding="utf-8"))
 
     return merged(values["profileDefaults"], overrides or {})
+
+
+def policy_changed(now: float, **more) -> dict:
+    """
+    The answer to an allowlist edit made at *now*: changed, and the proxy
+    and the DNS server restart with it, as the operator applies every change
+    ``operator.QUIET_SECONDS`` after the last; with *more* besides.
+    """
+    return {"changed": True, **more, "restarts": ["squid", "coredns"], "due": now + operator.QUIET_SECONDS}
 
 
 class FakeK8s:

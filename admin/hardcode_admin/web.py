@@ -29,6 +29,7 @@ import os
 import re
 import secrets
 import threading
+import time
 from concurrent.futures import ThreadPoolExecutor
 from concurrent.futures import wait as wait_for
 from datetime import datetime, timezone
@@ -41,7 +42,7 @@ from werkzeug.exceptions import RequestEntityTooLarge
 
 from hardcode_cli import allowlist, blocked, lan, langs, packages
 
-from . import manifests, totp
+from . import manifests, operator, totp
 from .approvals import APPROVED, DENIED, PENDING, ApprovalError, Approvals, NoSuchRequest
 from .auth import (
     MEMBER,
@@ -180,10 +181,9 @@ MEMBER_COPIED = ("allowlist", "languages", "extensions", "packages")
 # What a member may not give a new profile, in the words of the refusal.
 ADMIN_ONLY_ON_CREATE = {"image": "the image", "vscodeHost": "the VS Code host", "owner": "the owner"}
 
-# Where a profile records when a new VS Code token was last asked for: the
-# write that asks for it, made on the version of the profile checked to be
-# the user's (rotate_token).
-TOKEN_ROTATED_ANNOTATION = "hardcode-app.github.io/token-rotated-at"
+# The pods a change of a profile's allowlist restarts: the proxy's and the
+# DNS server's, with the policy.
+POLICY_RESTARTS = list(operator.POLICY_COMPONENTS)
 
 # The Secret holding the members' requests (approvals.py), beside the
 # accounts' (``USERS_SECRET``).
@@ -1080,6 +1080,23 @@ class AdminApi:
 
         return False  # pragma: no cover - the loop returns or raises
 
+    def restarting(self, restarts: list[str], profile: Optional[dict] = None) -> dict:
+        """
+        What the answer to a change says of the pods it restarts: the
+        components (*restarts*), and when, ``operator.QUIET_SECONDS`` from
+        now, in seconds since the epoch as the page's clock counts them (the
+        operator holds every change that long after the last); nothing when
+        none does. Not VS Code while *profile* is suspended: it has no pod.
+        """
+        if profile is not None and manifests.effective_spec(profile, self.defaults)["suspended"]:
+            restarts = [component for component in restarts if component != "vscode"]
+
+        if not restarts:
+            return {}
+
+        now = self.clock() if self.clock else time.time()
+        return {"restarts": restarts, "due": now + operator.QUIET_SECONDS}
+
     def respond(self, payload: Any, status: int = 200, cookie: Optional[str] = None):
         """
         A JSON response; with *cookie*, the session cookie set (or, when it
@@ -1503,7 +1520,8 @@ class AdminApi:
 
             try:
                 updated = self.k8s.merge_patch(self.profile_path(name), self.versioned(profile, {"spec": patch}))
-                return self.respond(self.summarise(updated))
+                restarts = manifests.restarts(profile, updated, self.defaults)
+                return self.respond({**self.summarise(updated), **self.restarting(restarts, updated)})
             except ApiError as error:
                 if error.status != 409:
                     raise
@@ -1552,7 +1570,8 @@ class AdminApi:
         data = self.body()
 
         if is_admin(user):
-            return self.respond({"changed": self.patch_allowlist(name, data)})
+            changed = self.patch_allowlist(name, data)
+            return self.respond({"changed": changed, **self.restarting(POLICY_RESTARTS if changed else [])})
 
         op, entry, flag = self.check_op(data)
 
@@ -1568,7 +1587,7 @@ class AdminApi:
             return self.apply_op(current, data, self.languages_of(latest))
 
         payload, status = self.member_edit(user, profile, edit, change, data.get("reason"))
-        return self.respond(payload, status)
+        return self.respond({**payload, **self.restarting(POLICY_RESTARTS if payload.get("changed") else [])}, status)
 
     def lan_view(self, profile: dict, answers: Optional[dict[str, list[str]]] = None) -> dict:
         """
@@ -1668,12 +1687,14 @@ class AdminApi:
 
         if is_admin(user):
             changed = self.patch_allowlist_text(name, edit)
-            return self.respond({"changed": changed, "message": messages[-1] if messages else ""})
+            restarting = self.restarting(POLICY_RESTARTS if changed else [])
+            return self.respond({"changed": changed, "message": messages[-1] if messages else "", **restarting})
 
         change = {"kind": "lan", "op": op, "entry": pin, "flag": "", "address": address}
         payload, status = self.member_edit(user, profile, edit, change, data.get("reason"))
+        restarting = self.restarting(POLICY_RESTARTS if payload.get("changed") else [])
 
-        return self.respond({**payload, "message": messages[-1] if messages else ""}, status)
+        return self.respond({**payload, "message": messages[-1] if messages else "", **restarting}, status)
 
     def lan_edit(self, op: str, pin: str, address: str, messages: list[str]) -> Callable[[str, dict], str]:
         """
@@ -1713,11 +1734,12 @@ class AdminApi:
         Give a profile's VS Code a new connection token, so that every copy
         of the old one stops working.
 
-        The token is the profile's token Secret, which the operator made; a
-        new one written there reaches the pod at the operator's next pass (a
-        minute at most), which restarts VS Code with it. A token the spec
-        fixes (``vscodeToken``) is changed there instead. The profile records
-        when it was last asked for (``TOKEN_ROTATED_ANNOTATION``).
+        The token is the profile's token Secret, which the operator made; the
+        profile records when a new one was last asked for
+        (``manifests.ANNOTATION_TOKEN_ROTATED``), which the operator sees,
+        and a few seconds later restarts VS Code with the new one, as with
+        any change. A token the spec fixes (``vscodeToken``) is changed there
+        instead.
         """
         user = self.require("full")
         names = manifests.Names(name)
@@ -1748,7 +1770,7 @@ class AdminApi:
             asked = {
                 "metadata": {
                     "resourceVersion": profile["metadata"].get("resourceVersion"),
-                    "annotations": {TOKEN_ROTATED_ANNOTATION: datetime.now(timezone.utc).isoformat()},
+                    "annotations": {manifests.ANNOTATION_TOKEN_ROTATED: datetime.now(timezone.utc).isoformat()},
                 },
             }
 
@@ -1764,7 +1786,8 @@ class AdminApi:
         token = base64.b64encode(secrets.token_urlsafe(24).encode()).decode()
         self.k8s.merge_patch(path, self.versioned(secret, {"data": {"token": token}}))
 
-        return self.respond({"message": "new token; VS Code restarts with it within a minute"})
+        message = "new token; VS Code restarts with it in a few seconds"
+        return self.respond({"message": message, **self.restarting(["vscode"], profile)})
 
     def edit_extensions(self, name: str):
         """
@@ -1801,8 +1824,9 @@ class AdminApi:
             patch = {"spec": {"extensions": updated or None}}
 
             try:
-                self.k8s.merge_patch(self.profile_path(name), self.versioned(profile, patch))
-                return self.respond({"changed": True, "message": message})
+                after = self.k8s.merge_patch(self.profile_path(name), self.versioned(profile, patch))
+                restarting = self.restarting(manifests.restarts(profile, after, self.defaults), after)
+                return self.respond({"changed": True, "message": message, **restarting})
             except ApiError as error:
                 if error.status != 409 or attempt == PATCH_RETRIES - 1:
                     raise
@@ -1880,8 +1904,9 @@ class AdminApi:
             patch = {"spec": {"packages": updated or None}}
 
             try:
-                self.k8s.merge_patch(self.profile_path(name), self.versioned(profile, patch))
-                return self.respond({"changed": True, "message": message})
+                after = self.k8s.merge_patch(self.profile_path(name), self.versioned(profile, patch))
+                restarting = self.restarting(manifests.restarts(profile, after, self.defaults), after)
+                return self.respond({"changed": True, "message": message, **restarting})
             except ApiError as error:
                 if error.status != 409 or attempt == PATCH_RETRIES - 1:
                     raise
@@ -2030,7 +2055,9 @@ class AdminApi:
             self.approvals.reopen(request_id)
             raise
 
-        return self.respond({"request": request, "changed": changed})
+        return self.respond(
+            {"request": request, "changed": changed, **self.restarting(POLICY_RESTARTS if changed else [])}
+        )
 
     def deny_request(self, request_id: str):
         """

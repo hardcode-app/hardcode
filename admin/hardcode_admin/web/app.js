@@ -75,6 +75,8 @@ const ALLOWLIST_RIGHTS = {
 
 // An entry's access, in words.
 const ACCESS_WORDS = { '': 'read-only', rw: 'read-write', ssh: 'ssh tunnel' };
+// What an allowlist edit did, by its op, for its toast.
+const ALLOWLIST_DONE = { enable: 'switched on', disable: 'switched off', remove: 'removed', add: 'added' };
 const TAB_TITLES = {
   languages: 'Languages / Tools',
   extensions: 'Extensions',
@@ -91,6 +93,23 @@ const PACKAGE_NAME = /^[a-z0-9][a-z0-9+.-]+$/;
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+
+/**
+ * What a change's answer says restarts, for its toast: " · squid, coredns
+ * restart in 5 seconds", counted from the answer's due time; nothing when no
+ * pod restarts. The operator applies every change a few seconds after the
+ * last, so the time moves with each.
+ */
+function restartNote(answer) {
+  const restarts = (answer && answer.restarts) || [];
+  if (!restarts.length) {
+    return '';
+  }
+
+  const seconds = Math.max(1, Math.round(answer.due - Date.now() / 1000));
+  const verb = restarts.length === 1 ? 'restarts' : 'restart';
+  return ` · ${restarts.join(', ')} ${verb} in ${seconds} seconds`;
+}
 
 /** A message in the corner that goes away by itself; errors stay longer. */
 function toast(message, kind = '') {
@@ -1459,8 +1478,9 @@ function rawAllowlistModal() {
 
   modal(html, (card) => {
     card.querySelector('#raw-save').onclick = async () => {
+      let answer;
       try {
-        await api('PATCH', profilePath(), { allowlist: card.querySelector('#raw-text').value, version: openedAt });
+        answer = await api('PATCH', profilePath(), { allowlist: card.querySelector('#raw-text').value, version: openedAt });
       } catch (error) {
         card.querySelector('#raw-error').textContent = error.message;
         return;
@@ -1468,7 +1488,7 @@ function rawAllowlistModal() {
 
       closeModal();
       await openProfile(state.profile.name);
-      toast('Allowlist saved · the proxy reloads in a few seconds', 'ok');
+      toast(`Allowlist saved${restartNote(answer)}`, 'ok');
     };
   });
 }
@@ -1522,18 +1542,18 @@ async function setLanguage(key, enabled) {
   const others = current.languages.filter((lang) => lang.enabled && lang.key !== key).map((lang) => lang.key);
   const languages = enabled ? [...others, key] : others;
 
-  await call('PATCH', profilePath(), { languages });
+  const answer = await call('PATCH', profilePath(), { languages });
   await openProfile(state.profile.name);
 
   const lang = state.catalogue.find((entry) => entry.key === key);
   let what = enabled ? 'its allowlist entries open' : 'its allowlist entries close';
-  what += ' as the proxy reloads in a few seconds';
+  what += ' as the proxy restarts';
   if (lang && lang.extensions.length) {
     const how = enabled ? 'installed' : 'removed';
     what += `; its VS Code extensions are ${how} in the background within about a minute`;
   }
 
-  toast(`${languageName(key)} ${enabled ? 'on' : 'off'}: ${what}`, 'ok');
+  toast(`${languageName(key)} ${enabled ? 'on' : 'off'}: ${what}${restartNote(answer)}`, 'ok');
 }
 
 /**
@@ -1550,7 +1570,7 @@ async function editExtensions(op, id) {
     message += `; the VS Code container ${how} it in the background within about a minute`;
   }
 
-  toast(message, answer.changed ? 'ok' : '');
+  toast(`${message}${restartNote(answer)}`, answer.changed ? 'ok' : '');
 }
 
 /**
@@ -1561,7 +1581,7 @@ async function editPackages(op, names) {
   const answer = await api('POST', profilePath('/packages'), { op, names });
   await openProfile(state.profile.name);
 
-  toast(answer.message, answer.changed ? 'ok' : '');
+  toast(`${answer.message}${restartNote(answer)}`, answer.changed ? 'ok' : '');
 }
 
 async function reloadUsers() {
@@ -1597,7 +1617,7 @@ async function decideRequest(id, decision) {
   const request = answer.request;
 
   if (decision === 'approve') {
-    toast(`Approved ${request.entry} on ${request.profile} · the proxy reloads in a few seconds`, 'ok');
+    toast(`Approved ${request.entry} on ${request.profile}${restartNote(answer)}`, 'ok');
   } else {
     toast(`Denied ${request.entry} on ${request.profile}`, 'ok');
   }
@@ -1612,7 +1632,7 @@ async function decideRequest(id, decision) {
 
 /**
  * What an allowlist edit's answer means, as a toast: a request made, or
- * the change made (*done*, its words).
+ * the change made (*done*, its words), with what restarts for it.
  */
 function allowlistOutcome(answer, done) {
   if (answer.requested) {
@@ -1621,7 +1641,7 @@ function allowlistOutcome(answer, done) {
     return;
   }
 
-  toast(done, 'ok');
+  toast(`${done}${restartNote(answer)}`, 'ok');
 }
 
 // ---------------------------------------------------------------------------
@@ -1691,7 +1711,7 @@ const actions = {
     state.prefill = '';
     state.prefillFlag = '';
     await openProfile(state.profile.name);
-    allowlistOutcome(answer, `Added ${entry} · the proxy reloads in a few seconds`);
+    allowlistOutcome(answer, `Added ${entry}`);
   },
 
   async 'lan-add'() {
@@ -1747,7 +1767,7 @@ const actions = {
 
   async 'rotate-token'() {
     const name = esc(state.profile.name);
-    const html = `<h2>A new VS Code token for ${name}?</h2><p>Every copy of the current token stops working (a screenshot, a shared screen, a browser history), and VS Code restarts with the new one within a minute: open windows need the new URL.</p><div class="modal-actions"><button class="btn" data-close>Cancel</button><button class="btn primary" id="rotate-yes">New token</button></div>`;
+    const html = `<h2>A new VS Code token for ${name}?</h2><p>Every copy of the current token stops working (a screenshot, a shared screen, a browser history), and VS Code restarts with the new one in a few seconds: open windows need the new URL.</p><div class="modal-actions"><button class="btn" data-close>Cancel</button><button class="btn primary" id="rotate-yes">New token</button></div>`;
 
     modal(html, (card) => {
       card.querySelector('#rotate-yes').onclick = async () => {
@@ -1770,9 +1790,9 @@ const actions = {
 
     // A member's form has the one setting that is theirs.
     if (!isAdmin()) {
-      await call('PATCH', profilePath(), body);
+      const answer = await call('PATCH', profilePath(), body);
       await openProfile(state.profile.name);
-      toast('Saved', 'ok');
+      toast(`Saved${restartNote(answer)}`, 'ok');
       return;
     }
 
@@ -1799,9 +1819,9 @@ const actions = {
       body.home = { size: home };
     }
 
-    await call('PATCH', profilePath(), body);
+    const answer = await call('PATCH', profilePath(), body);
     await openProfile(state.profile.name);
-    toast('Saved', 'ok');
+    toast(`Saved${restartNote(answer)}`, 'ok');
   },
 
   async 'toggle-suspend'() {
@@ -1846,8 +1866,8 @@ async function editAllowlist(op, entry, flag) {
   const answer = await call('POST', profilePath('/allowlist'), { op, entry, flag });
   await openProfile(state.profile.name);
 
-  if (answer.requested) {
-    allowlistOutcome(answer, '');
+  if (answer.requested || answer.changed) {
+    allowlistOutcome(answer, `${entry}: ${ALLOWLIST_DONE[op] || op}`);
   }
 }
 

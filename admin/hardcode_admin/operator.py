@@ -5,17 +5,18 @@ step with them, by server-side apply.
 Deleting a Profile deletes everything it owns, its volumes included, through
 owner references and the StatefulSet's retention policy.
 
-A change of a profile's allowlist restarts its proxy and DNS server, so
-changes are gathered first, as the command gathers them on one computer:
-the profile is reconciled once its allowlist has gone ``QUIET_SECONDS``
-without a change, and a change made while the last one's restart is under
-way waits for that restart to end, then as long again.
+A change of a profile restarts some of its pods (its allowlist, the proxy
+and the DNS server; its settings, VS Code), so changes are gathered first,
+as the command gathers them on one computer: the profile is reconciled once
+it has gone ``QUIET_SECONDS`` without a change, and a change of the
+allowlist made while the last one's restart is under way waits for that
+restart to end, then as long again. Suspending or resuming a profile, and
+making one, aren't held: they are a stop and a start.
 """
 
 from __future__ import annotations
 
 import base64
-import hashlib
 import logging
 import secrets
 import subprocess
@@ -65,7 +66,7 @@ def allowlist_hash(text: str) -> str:
     """
     A short fingerprint of a text, for pod template annotations.
     """
-    return hashlib.sha256(text.encode()).hexdigest()[:16]
+    return manifests.content_hash(text)
 
 
 def generate_ca(name: str, openssl: str = "openssl") -> tuple[str, str]:
@@ -114,6 +115,23 @@ def _status_only(obj: dict) -> bool:
     return generation is not None and generation == observed
 
 
+def _token_rotated(obj: dict) -> str:
+    """
+    When a new VS Code token was last asked for, as the profile says
+    (``manifests.ANNOTATION_TOKEN_ROTATED``); ``""`` when never.
+    """
+    annotations = obj.get("metadata", {}).get("annotations") or {}
+    return annotations.get(manifests.ANNOTATION_TOKEN_ROTATED, "")
+
+
+def _token_asked(obj: dict) -> bool:
+    """
+    Whether a new VS Code token was asked for that VS Code hasn't been
+    given: the profile's annotation isn't the one its status records.
+    """
+    return _token_rotated(obj) != (obj.get("status") or {}).get("tokenRotatedAt", "")
+
+
 def _without_timestamp(status: dict) -> dict:
     return {key: value for key, value in status.items() if key != "lastReconciled"}
 
@@ -121,12 +139,13 @@ def _without_timestamp(status: dict) -> dict:
 @dataclass
 class _Waiting:
     """
-    A profile's allowlist change that waits to be given to its proxy:
-    the allowlist's hash, when it last changed (or the restart it waited
-    for ended), and since when a restart under way has been waited for.
+    A profile's changes that wait to be applied: what they add up to (its
+    generation, the token asked for and the allowlist's hash), when that
+    last changed (or the restart it waited for ended), and since when a
+    restart under way has been waited for.
     """
 
-    allowlist_hash: str
+    fingerprint: str
     since: float
     rollout_since: Optional[float] = None
 
@@ -153,6 +172,10 @@ class Operator:
         self._lock = threading.Lock()
         self._inflight: set[str] = set()
         self._waiting: dict[str, _Waiting] = {}
+
+        # Each profile's spec as it was last reconciled, to tell a change of
+        # its suspension alone; not known after the operator restarts.
+        self._reconciled: dict[str, dict] = {}
 
     # -- lifecycle -------------------------------------------------------------
 
@@ -203,8 +226,10 @@ class Operator:
             log.info("profile %s: deleted (garbage collection removes its resources)", name)
             return
 
-        if kind == "MODIFIED" and _status_only(obj):
-            return  # our own status write echoing back
+        # Our own status write echoing back; but not a new token asked for,
+        # which is the profile's annotation, not its spec.
+        if kind == "MODIFIED" and _status_only(obj) and not _token_asked(obj):
+            return
 
         self.enqueue(name)
 
@@ -243,7 +268,7 @@ class Operator:
         try:
             profile = self.k8s.get(f"{profiles_path(self.k8s.namespace)}/{name}")
             if profile and not profile["metadata"].get("deletionTimestamp"):
-                hold = self.allowlist_hold(profile)
+                hold = self.change_hold(profile)
                 if hold:
                     self.enqueue(name, hold)
                 else:
@@ -278,60 +303,85 @@ class Operator:
         except Exception:  # noqa: BLE001 - nothing more to do; the next resync tries again
             pass
 
-    # -- gathering allowlist changes ---------------------------------------------
+    # -- gathering changes ---------------------------------------------------------
 
-    def allowlist_hold(self, profile: dict) -> float:
+    def change_hold(self, profile: dict) -> float:
         """
-        How many seconds to hold off reconciling *profile*, so that its proxy
-        and DNS server are restarted once for a burst of allowlist changes;
-        0 to go ahead. Its status says what it waits for meanwhile.
+        How many seconds to hold off reconciling *profile*, so that its pods
+        are restarted once for a burst of changes; 0 to go ahead. Its status
+        says what it waits for meanwhile.
 
-        It waits until the allowlist the proxy is to be given has gone
+        A change is anything the profile asks for that it hasn't been
+        given: its spec edited (a generation not reconciled yet), a new VS
+        Code token asked for (``manifests.ANNOTATION_TOKEN_ROTATED``), or a
+        proxy allowlist other than its proxy's (after an update of HardCode,
+        the entries it provides). It waits until those have gone
         ``QUIET_SECONDS`` without a change, and while the restart for the
-        last change is under way, then as long again; not for a new profile,
-        whose proxy has nothing yet. The whole reconcile waits, the rest of
-        an edit made with the allowlist included: the policy and the pods
-        it is applied with stay one.
+        last allowlist is under way, then as long again. Not for a new
+        profile, which has nothing running yet, nor for suspending or
+        resuming one, which are a stop and a start. The whole reconcile
+        waits: what the profile asks for is applied at once.
         """
         name = profile["metadata"]["name"]
         namespace = profile["metadata"]["namespace"]
         names = manifests.Names(name)
+        spec = manifests.effective_spec(profile, self.defaults)
 
-        wanted = manifests.effective_spec(profile, self.defaults)["proxyAllowlist"]
+        wanted = spec["proxyAllowlist"]
         current = self.k8s.get(f"/api/v1/namespaces/{namespace}/configmaps/{names.allowlist}")
         given = ((current or {}).get("data") or {}).get("allowlist.txt")
 
-        if given is None or given == wanted:
+        generation = profile["metadata"].get("generation")
+        edited = generation != (profile.get("status") or {}).get("observedGeneration")
+        token = _token_asked(profile)
+        policy = given is not None and given != wanted
+
+        held = given is not None and (edited or token or policy)
+        if held and not token and not policy and self._suspension_only(name, spec):
+            held = False
+
+        if not held:
             self._waiting.pop(name, None)
             return 0
 
-        # The wait starts again whenever the allowlist changes.
+        # The wait starts again whenever what the profile asks for changes.
         now = self.clock()
-        wanted_hash = allowlist_hash(wanted)
+        fingerprint = f"{generation}/{_token_rotated(profile)}/{allowlist_hash(wanted)}"
         waiting = self._waiting.get(name)
-        if waiting is None or waiting.allowlist_hash != wanted_hash:
-            waiting = _Waiting(wanted_hash, now)
+        if waiting is None or waiting.fingerprint != fingerprint:
+            waiting = _Waiting(fingerprint, now)
             self._waiting[name] = waiting
 
-        # A restart for the last change, still under way: the wait starts
+        # A restart for the last allowlist, still under way: the wait starts
         # again once it is over, or has been waited for long enough.
-        if self._restarting(profile, allowlist_hash(given)):
+        if policy and self._restarting(profile, allowlist_hash(given)):
             if waiting.rollout_since is None:
                 waiting.rollout_since = now
 
             if now - waiting.rollout_since < ROLLOUT_WAIT_SECONDS:
                 waiting.since = now
-                self._say_waiting(profile, "allowlist changes wait for the proxy's restart to finish")
+                self._say_waiting(profile, "changes wait for the proxy's restart to finish")
                 return ROLLOUT_POLL_SECONDS
         else:
             waiting.rollout_since = None
 
         remaining = QUIET_SECONDS - (now - waiting.since)
         if remaining > 0:
-            self._say_waiting(profile, "allowlist changes apply a few seconds after the last one")
+            self._say_waiting(profile, "changes apply a few seconds after the last one")
             return remaining
 
         return 0
+
+    def _suspension_only(self, name: str, spec: dict) -> bool:
+        """
+        Whether *spec* differs from the one last reconciled for the profile
+        in whether it is suspended alone; not when that isn't known.
+        """
+        before = self._reconciled.get(name)
+        if before is None:
+            return False
+
+        return {**before, "suspended": None} == {**spec, "suspended": None}
 
     def _restarting(self, profile: dict, given_hash: str) -> bool:
         """
@@ -439,6 +489,7 @@ class Operator:
         names = manifests.Names(name)
         spec = manifests.effective_spec(profile, self.defaults)
         notes: list[str] = []
+        self._reconciled[name] = spec
 
         ca_cert = self._proxy_ca(profile, names)
         token = self._vscode_token(profile, names, spec)
@@ -648,6 +699,9 @@ class Operator:
             "proxyURL": f"http://{names.squid}.{namespace}.svc.cluster.local:3128",
             "vscodeService": names.vscode,
             "tokenSecret": names.token,
+            # The new token last asked for, which VS Code was given with
+            # this reconcile.
+            "tokenRotatedAt": _token_rotated(profile),
         }
 
     def set_status(self, name: str, status: dict, previous: Optional[dict] = None) -> None:

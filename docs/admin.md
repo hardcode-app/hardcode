@@ -88,8 +88,8 @@ extensions it **brings** (one too long for the card is cut short with
 "…", and its tooltip has it whole).
 
 Switching one sets `spec.languages`, and the operator gives the proxy the
-language's entries, or takes them away, a few seconds after the last
-change (`spec.allowlist`
+language's entries, or takes them away, restarting it five seconds after
+the last change (`spec.allowlist`
 isn't touched, and an entry switched off there stays off). Its extensions
 follow without a restart: the operator rewrites the profile's extension
 list (the `<profile>-vscode-extensions` ConfigMap), the kubelet brings the
@@ -161,7 +161,8 @@ your own, a delete button; the form at the top adds one
 - Changes go into `spec.allowlist`, and the operator rolls the profile's
   proxy and DNS server five seconds after the last one, so they are live
   within seconds, and several changes in a row are one restart; there is
-  no separate *Apply*. The profile is *Pending* until the proxy has them.
+  no separate *Apply*. Each change says so: *squid, coredns restart in 5
+  seconds*. The profile is *Pending* until the proxy has them.
 - Two admins editing the same profile at once can't lose each other's
   edits: every single-entry write names the version it read, and one that
   lost the race is applied again on top of the newer text.
@@ -206,8 +207,9 @@ VS Code's address, with its token hidden (**Show** reveals it; **Copy**
 and the links use the whole address), behind the Ingress, or with the
 `kubectl port-forward` command to use instead. **New token…** writes a new
 token into the profile's token Secret after asking, so that every copy of
-the old one stops working: the operator restarts VS Code with it within a
-minute (a token the spec fixes, `vscodeToken`, is changed there instead).
+the old one stops working: the operator restarts VS Code with it a few
+seconds later (a token the spec fixes, `vscodeToken`, is changed there
+instead).
 Below: the names of the token Secret, the proxy's address and the DNS
 ClusterIP.
 
@@ -254,7 +256,7 @@ What members have asked to allow. **Waiting** lists the requests no admin
 has decided yet, newest first: the profile, who asked, the entry and its
 access (or a name and the address it should reach), and why they said they
 need it. **Approve** makes the change, as if you had added it on the
-profile's Allowlist tab, and the proxy has it a few seconds later; **Deny**
+profile's Allowlist tab, and the proxy restarts with it a few seconds later; **Deny**
 changes nothing. Either way the member sees what became of it. **Decided**
 lists the latest decisions, and who made them.
 
@@ -465,7 +467,10 @@ credentials changed gets `401`. A member gets `403` for a route that is
 an admin's alone, and `404` for a profile that isn't theirs
 ([members and requests](#members-and-requests)). A request carrying
 `X-HardCode-Poll: 1` (the page's background refresh sends it) doesn't
-count as activity for the idle timeout.
+count as activity for the idle timeout. The answer to a change that
+restarts pods says which, and when: `restarts` (`vscode`, `squid`,
+`coredns`) and `due` (seconds since the epoch, five seconds on, as the
+operator applies a profile's changes five seconds after its last).
 
 | Method and path | Body | Response |
 |---|---|---|
@@ -480,7 +485,7 @@ count as activity for the idle timeout.
 | `GET /api/profiles/{name}` | | summary + `languages` (here the whole catalogue, each entry with `enabled`) + `extensions` (every extension the VS Code container gets and why: `[{id, source: "core"\|<language key>\|"custom", enabled, duplicate?}…]`, those of languages that are off with `enabled: false`; `duplicate` marks one of the profile's own that the catalogue lists too) + `extensionStatus` (how far the running VS Code container has got with them, from the latest progress line in the last 1000 lines of its log: `{state: "installing"\|"done", installed, total, refused, failed}`, `installed` of the `total` wanted extensions in place, `refused` turned away for an unverified publisher, `failed` to be tried again; while installing, `refused` and `failed` count this pass so far; `null` when there is no pod or no such line yet) + `spec` (with `effective`, the defaults filled in) + `status` + `allowlist` (every entry, provided and the profile's own, as in the CLI's `hardcode --json allowlist`) + `access` (`token`, `url`, `portForward`, `host`) + `requests` (those waiting for this profile: every one to an admin, a member's own to them) + `version` (the spec's `generation`, for an editing precondition) |
 | `PATCH /api/profiles/{name}` | any of `image`, `suspended`, `home`, `shared`, `docker`, `resources`, `env`, `vscodeHost`, `networkPolicy`, `upstreamDNS`, `extraVolumes`, `extraVolumeMounts`, `allowlist` (an empty `image`/`vscodeHost` removes the field; a text `allowlist` gets its final newline), `owner` (an account's email; empty: nobody's), `languages` (the whole list of languages and tools to have on; the provided allowlist entries follow it), plus an optional `version` (the `version` a `GET` returned: the edit is refused if the spec changed since; status updates don't count) | summary; `400` for an allowlist with an invalid entry, a `vscodeHost` that isn't a host name, a `home`/`shared`/`docker` `size` that isn't a Kubernetes quantity (`20Gi`, `500Mi`), or `languages` that aren't a list of known languages, or an `owner` with no account; `403` for a member changing anything but `suspended` and `languages`; `409` if the spec changed since the `version` given, or the profile since it was read (a `languages` change is first redone on top of a concurrent edit, a few times) |
 | `DELETE /api/profiles/{name}` | | `{"ok": true}`; the requests waiting for it are forgotten |
-| `POST /api/profiles/{name}/token` | | `{"message"}`: a new VS Code token in the profile's token Secret; the operator restarts VS Code with it within a minute. `400` when the spec fixes the token (`vscodeToken`), `409` before the operator has made one |
+| `POST /api/profiles/{name}/token` | | `{"message", "restarts", "due"}`: a new VS Code token in the profile's token Secret; the operator restarts VS Code with it a few seconds later. `400` when the spec fixes the token (`vscodeToken`), `409` before the operator has made one |
 | `POST /api/profiles/{name}/extensions` | `{op: "add"\|"remove", id}` | `{"changed": bool, "message"}`: an extension of the profile's own added to or removed from `spec.extensions` (the running VS Code container installs or removes it in the background within about a minute, without a restart); adding one the VS Code container already gets is `changed: false` (`… already comes with Python`, `… is already added`). `400` for an id that isn't `publisher.name`, removing a language's (`… comes with Python; switch that off in Languages / Tools to remove it`; one every VS Code container has can't be removed) or one the profile doesn't have, and for adding one to a profile that has 100 of its own already |
 | `POST /api/profiles/{name}/allowlist` | `{op: "add"\|"remove"\|"enable"\|"disable", entry, flag?, reason?}` | `{"changed": bool}`, with the CLI's rules: a provided entry is switched off and on with an `off` line, and `add` of one switches it back on. A member's edit goes by their rights: `403` without them (or without the tick for a read-write or ssh entry it would open); one that would open something, under *ask*, is `202` `{"changed": false, "requested": true, "request"}`, with `reason` for the admins (`400` when the request would be too long, or too many are waiting). `400` invalid op, entry or flag, or `remove` of a provided entry |
 | `POST /api/profiles/{name}/lan` | `{op: "add"\|"remove", name, address?, reason?}` | `{"changed": bool, "message"}`; a member's goes as an allowlist edit does, a new name or address needing the network tick |

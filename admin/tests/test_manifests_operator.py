@@ -957,10 +957,40 @@ class OperatorTests(unittest.TestCase):
         self.assertIn("p3", self.operator._inflight, "the other reconcile is left alone")
 
 
-class AllowlistHoldTests(unittest.TestCase):
+class RestartsTests(unittest.TestCase):
     """
-    Allowlist changes gathered before the proxy is restarted with them, as
-    the command gathers them on one computer.
+    What a change of a profile restarts (manifests.restarts): the components
+    whose pod template it changes.
+    """
+
+    def setUp(self):
+        self.defaults = chart_defaults({"image": "img:1"})
+        self.before = profile("p5")
+
+    def after(self, **spec):
+        changed = profile("p5")
+        changed["spec"] = {**changed.get("spec", {}), **spec}
+        return changed
+
+    def test_an_allowlist_restarts_the_proxy_and_the_dns_server(self):
+        restarted = manifests.restarts(self.before, self.after(allowlist="pypi.org\nexample.com\n"), self.defaults)
+        self.assertEqual(restarted, ["squid", "coredns"])
+
+    def test_packages_restart_vscode(self):
+        self.assertEqual(manifests.restarts(self.before, self.after(packages=["jq"]), self.defaults), ["vscode"])
+
+    def test_suspending_and_nothing_restart_nothing(self):
+        self.assertEqual(manifests.restarts(self.before, self.after(suspended=True), self.defaults), [])
+        self.assertEqual(manifests.restarts(self.before, profile("p5"), self.defaults), [])
+
+    def test_nothing_is_said_without_the_charts_images(self):
+        self.assertEqual(manifests.restarts(self.before, self.after(packages=["jq"]), {"image": "img:1"}), [])
+
+
+class ChangeHoldTests(unittest.TestCase):
+    """
+    Changes gathered before the pods are restarted with them, as the command
+    gathers them on one computer.
     """
 
     def setUp(self):
@@ -1004,12 +1034,52 @@ class AllowlistHoldTests(unittest.TestCase):
     def test_a_new_profile_is_not_held(self):
         self.k8s.create(PROFILES, profile("p4"))
 
-        self.assertEqual(self.operator.allowlist_hold(self.k8s.get(f"{PROFILES}/p4")), 0)
+        self.assertEqual(self.operator.change_hold(self.k8s.get(f"{PROFILES}/p4")), 0)
 
-    def test_other_changes_are_not_held(self):
+    def test_nothing_new_is_not_held(self):
+        self.assertEqual(self.operator.change_hold(self.current()), 0)
+
+    def test_suspending_or_resuming_is_not_held(self):
+        self.k8s.merge_patch(f"{PROFILES}/p3", {"spec": {"suspended": True}})
+        self.assertEqual(self.operator.change_hold(self.current()), 0, "a stop, at once")
+
+        self.operator.reconcile(self.current())
+        self.k8s.merge_patch(f"{PROFILES}/p3", {"spec": {"suspended": False}})
+        self.assertEqual(self.operator.change_hold(self.current()), 0, "a start, at once")
+
+    def test_suspending_is_held_when_the_operator_doesnt_know_what_else_changed(self):
+        self.operator._reconciled.clear()  # as after the operator restarts
         self.k8s.merge_patch(f"{PROFILES}/p3", {"spec": {"suspended": True}})
 
-        self.assertEqual(self.operator.allowlist_hold(self.current()), 0)
+        self.assertEqual(self.operator.change_hold(self.current()), operator.QUIET_SECONDS)
+
+    def test_every_other_change_of_the_spec_is_held(self):
+        self.k8s.merge_patch(f"{PROFILES}/p3", {"spec": {"packages": ["jq"]}})
+        self.assertEqual(self.operator.change_hold(self.current()), operator.QUIET_SECONDS)
+
+        # Along with a suspension, too.
+        self.k8s.merge_patch(f"{PROFILES}/p3", {"spec": {"suspended": True}})
+        self.assertEqual(self.operator.change_hold(self.current()), operator.QUIET_SECONDS, "and the wait starts again")
+
+        self.now = operator.QUIET_SECONDS
+        self.assertEqual(self.operator.change_hold(self.current()), 0)
+
+    def test_a_new_token_asked_for_is_held_then_seen_through(self):
+        rotated = "2026-11-07T10:00:00+00:00"
+        self.k8s.merge_patch(
+            f"{PROFILES}/p3",
+            {"metadata": {"annotations": {manifests.ANNOTATION_TOKEN_ROTATED: rotated}}},
+        )
+        asked = self.current()
+
+        self.assertFalse(_status_only(asked) and not operator._token_asked(asked), "the event isn't skipped")
+        self.assertEqual(self.operator.change_hold(asked), operator.QUIET_SECONDS)
+
+        self.now = operator.QUIET_SECONDS
+        self.operator.reconcile_by_name("p3")
+        self.assertEqual(self.current()["status"]["tokenRotatedAt"], rotated, "seen through")
+        self.assertEqual(self.operator.change_hold(self.current()), 0)
+        self.assertFalse(operator._token_asked(self.current()), "its status write echoing back is skipped")
 
     def test_a_burst_of_changes_restarts_the_proxy_once_after_the_last(self):
         self.edit("pypi.org\na.example\n")
@@ -1020,22 +1090,22 @@ class AllowlistHoldTests(unittest.TestCase):
         status = self.current()["status"]
         self.assertEqual(
             (status["phase"], status["message"]),
-            ("Pending", "allowlist changes apply a few seconds after the last one"),
+            ("Pending", "changes apply a few seconds after the last one"),
         )
 
         # Another change two seconds on starts the wait again.
         self.now = 2.0
         self.edit("pypi.org\na.example\nb.example\n")
-        self.assertEqual(self.operator.allowlist_hold(self.current()), operator.QUIET_SECONDS)
+        self.assertEqual(self.operator.change_hold(self.current()), operator.QUIET_SECONDS)
 
         self.now = 6.0
-        self.assertEqual(self.operator.allowlist_hold(self.current()), 1.0)
+        self.assertEqual(self.operator.change_hold(self.current()), 1.0)
 
         # Quiet for long enough: the profile is reconciled, with both.
         self.now = 7.0
         self.operator.reconcile_by_name("p3")
         self.assertIn("\nb.example\n", self.given())
-        self.assertEqual(self.operator.allowlist_hold(self.current()), 0, "nothing left to wait for")
+        self.assertEqual(self.operator.change_hold(self.current()), 0, "nothing left to wait for")
 
     def apply(self, text):
         """
@@ -1056,18 +1126,16 @@ class AllowlistHoldTests(unittest.TestCase):
         # the old ones) when the next comes.
         self.now = 6.0
         self.edit("pypi.org\na.example\nb.example\n")
-        self.assertEqual(self.operator.allowlist_hold(self.current()), operator.ROLLOUT_POLL_SECONDS)
-        self.assertEqual(
-            self.current()["status"]["message"], "allowlist changes wait for the proxy's restart to finish"
-        )
+        self.assertEqual(self.operator.change_hold(self.current()), operator.ROLLOUT_POLL_SECONDS)
+        self.assertEqual(self.current()["status"]["message"], "changes wait for the proxy's restart to finish")
 
         # Restarted: the wait starts over from there.
         self.now = 8.0
         self.k8s.pods = self.current_pods()
-        self.assertEqual(self.operator.allowlist_hold(self.current()), operator.QUIET_SECONDS - 2.0)
+        self.assertEqual(self.operator.change_hold(self.current()), operator.QUIET_SECONDS - 2.0)
 
         self.now = 11.0
-        self.assertEqual(self.operator.allowlist_hold(self.current()), 0)
+        self.assertEqual(self.operator.change_hold(self.current()), 0)
 
     def test_a_restart_that_never_ends_is_waited_for_two_minutes_at_most(self):
         self.apply("pypi.org\na.example\n")
@@ -1078,13 +1146,13 @@ class AllowlistHoldTests(unittest.TestCase):
             pod["status"]["conditions"] = [{"type": "Ready", "status": "False"}]
 
         self.edit("pypi.org\nb.example\n")
-        self.assertEqual(self.operator.allowlist_hold(self.current()), operator.ROLLOUT_POLL_SECONDS)
+        self.assertEqual(self.operator.change_hold(self.current()), operator.ROLLOUT_POLL_SECONDS)
 
         self.now = 5.0 + operator.ROLLOUT_WAIT_SECONDS - 1
-        self.assertEqual(self.operator.allowlist_hold(self.current()), operator.ROLLOUT_POLL_SECONDS)
+        self.assertEqual(self.operator.change_hold(self.current()), operator.ROLLOUT_POLL_SECONDS)
 
         self.now += operator.QUIET_SECONDS + 1
-        self.assertEqual(self.operator.allowlist_hold(self.current()), 0, "the change may be what puts it right")
+        self.assertEqual(self.operator.change_hold(self.current()), 0, "the change may be what puts it right")
 
 
 @unittest.skipUnless(shutil.which("bash") and os.name != "nt", "needs bash")

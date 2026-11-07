@@ -16,7 +16,7 @@ from hardcode_admin.auth import ADMIN, MEMBER, Users
 from hardcode_admin.mail import Mailer, SmtpSettings
 from hardcode_admin.web import REQUESTS_SECRET, SecretStore, create_app
 
-from .helpers import FakeK8s, MemoryStore
+from .helpers import FakeK8s, MemoryStore, policy_changed
 
 REPO = Path(__file__).resolve().parent.parent.parent
 TEMPLATE = str(REPO / "template" / "allowlist.txt")
@@ -284,7 +284,9 @@ class OwnProfilesTests(MemberTestCase):
 
         rights = {"profiles": 1, "allowlist": "edit", "rw": False, "ssh": False, "lan": False}
         self.assertEqual(self.admin.patch("/api/users/member%40example.com", json={"rights": rights}).status_code, 200)
-        self.assertEqual(self.allowlist(member, "mine", op="add", entry="example.com").json, {"changed": True})
+        self.assertEqual(
+            self.allowlist(member, "mine", op="add", entry="example.com").json, policy_changed(self.now[0])
+        )
 
         self.admin.patch("/api/users/member%40example.com", json={"role": ADMIN})
         self.assertEqual(len(member.get("/api/users").json), 3, "made an admin, they are one at once")
@@ -315,11 +317,17 @@ class AllowlistRightsTests(MemberTestCase):
         member = self.member(allowlist="edit")
         self.profile("mine", owner=MEMBER_EMAIL)
 
-        self.assertEqual(self.allowlist(member, "mine", op="add", entry="example.com").json, {"changed": True})
+        self.assertEqual(
+            self.allowlist(member, "mine", op="add", entry="example.com").json, policy_changed(self.now[0])
+        )
         self.assertIn("example.com", self.own_lines("mine"))
 
-        self.assertEqual(self.allowlist(member, "mine", op="disable", entry="example.com").json, {"changed": True})
-        self.assertEqual(self.allowlist(member, "mine", op="remove", entry="example.com").json, {"changed": True})
+        self.assertEqual(
+            self.allowlist(member, "mine", op="disable", entry="example.com").json, policy_changed(self.now[0])
+        )
+        self.assertEqual(
+            self.allowlist(member, "mine", op="remove", entry="example.com").json, policy_changed(self.now[0])
+        )
         self.assertEqual(self.sent, [], "nobody is asked")
 
     def test_read_write_ssh_and_the_network_each_need_their_right(self):
@@ -411,7 +419,9 @@ class AllowlistRightsTests(MemberTestCase):
         self.assertEqual((response.status_code, response.json["requested"]), (202, True))
         self.assertFalse(self.entry(self.admin, "mine", "crates.io")["enabled"])
 
-        self.assertEqual(self.allowlist(member, "mine", op="disable", entry="static.crates.io").json, {"changed": True})
+        self.assertEqual(
+            self.allowlist(member, "mine", op="disable", entry="static.crates.io").json, policy_changed(self.now[0])
+        )
 
 
 class RequestsTests(MemberTestCase):
@@ -470,8 +480,12 @@ class RequestsTests(MemberTestCase):
 
         self.allowlist(self.admin, "mine", op="add", entry="example.org")
 
-        self.assertEqual(self.allowlist(member, "mine", op="disable", entry="pypi.org").json, {"changed": True})
-        self.assertEqual(self.allowlist(member, "mine", op="remove", entry="example.org").json, {"changed": True})
+        self.assertEqual(
+            self.allowlist(member, "mine", op="disable", entry="pypi.org").json, policy_changed(self.now[0])
+        )
+        self.assertEqual(
+            self.allowlist(member, "mine", op="remove", entry="example.org").json, policy_changed(self.now[0])
+        )
         self.assertEqual(self.ask(member, entry="api.anthropic.com").json, {"changed": False}, "it has it already")
         self.assertEqual(self.sent, [])
 
