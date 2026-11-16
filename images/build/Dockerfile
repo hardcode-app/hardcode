@@ -65,9 +65,9 @@ RUN set -eu; \
 # OSV-Scanner, for a release's known vulnerabilities (release/scan.sh runs
 # it sealed: no network, no token); the archive has no scanner. The
 # project's release binaries, checksum-pinned.
-ARG OSV_SCANNER_VERSION=2.7.0
-ARG OSV_SCANNER_SHA256_AMD64=160c6253e2922e9e0a6a9771c5c4c40a4b3c6090b34a3cdd5e80c96cc2e4218b
-ARG OSV_SCANNER_SHA256_ARM64=4061ef4c021ed3c47f203b818f337e351336cc5cd67c0274fc36bd1dfc728dd7
+ARG OSV_SCANNER_VERSION=2.7.1
+ARG OSV_SCANNER_SHA256_AMD64=fb7dab19a8bd9bbe5c3189f09d4b7ee1820c9553a23bac202648a56efd2f6ee8
+ARG OSV_SCANNER_SHA256_ARM64=983d22fbad9724514e3fcc6acc83b5fa64c5ffa6b0d9f510028f22c1b223ff81
 RUN set -eu; \
     arch="$(dpkg --print-architecture)"; \
     case "$arch" in \
