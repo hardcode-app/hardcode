@@ -3,4 +3,4 @@
 # image builds with the archive's rustc, and its cargo ignores this file.
 # Dependabot moves it a week after a Rust release; CI's Pin ages dates it.
 [toolchain]
-channel = "1.99.1"
+channel = "1.100.0"
