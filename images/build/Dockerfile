@@ -43,9 +43,9 @@ ARG KIND_SHA256_ARM64=20022bee6cfcd5086cb7234d218e3454e6090022f2a8f55d1fa7fcf42c
 ARG KUBECTL_VERSION=1.37.2
 ARG KUBECTL_SHA256_AMD64=c04487523e7aa7d1493f7808174c899db93d7a9cf57531420cd76b9bd415f8f4
 ARG KUBECTL_SHA256_ARM64=fcc16f63186659d9722014b7e02d5fdd2d4e669cb8c0ab66365d7d3b8ba03509
-ARG HELM_VERSION=4.3.1
-ARG HELM_SHA256_AMD64=0403a88ae20913d11b10a2467b50087721fea7581736da6b9d3992f5357fe54b
-ARG HELM_SHA256_ARM64=8cf8f66ecbc252ac8f7f06cca68aba88508ddfde3a6a34feb1678ad1694b4f88
+ARG HELM_VERSION=4.3.2
+ARG HELM_SHA256_AMD64=d1c0278d46beab79582d7e50f5b3dc206944ba8e577cde618513fd07daa53983
+ARG HELM_SHA256_ARM64=df31cb61680ef728f82c770e5280dd565617bee6b039d37e85c677288be4bbb0
 RUN set -eu; \
     arch="$(dpkg --print-architecture)"; \
     case "$arch" in \
@@ -65,9 +65,9 @@ RUN set -eu; \
 # OSV-Scanner, for a release's known vulnerabilities (release/scan.sh runs
 # it sealed: no network, no token); the archive has no scanner. The
 # project's release binaries, checksum-pinned.
-ARG OSV_SCANNER_VERSION=2.7.0
-ARG OSV_SCANNER_SHA256_AMD64=160c6253e2922e9e0a6a9771c5c4c40a4b3c6090b34a3cdd5e80c96cc2e4218b
-ARG OSV_SCANNER_SHA256_ARM64=4061ef4c021ed3c47f203b818f337e351336cc5cd67c0274fc36bd1dfc728dd7
+ARG OSV_SCANNER_VERSION=2.7.1
+ARG OSV_SCANNER_SHA256_AMD64=fb7dab19a8bd9bbe5c3189f09d4b7ee1820c9553a23bac202648a56efd2f6ee8
+ARG OSV_SCANNER_SHA256_ARM64=983d22fbad9724514e3fcc6acc83b5fa64c5ffa6b0d9f510028f22c1b223ff81
 RUN set -eu; \
     arch="$(dpkg --print-architecture)"; \
     case "$arch" in \
@@ -83,8 +83,8 @@ RUN set -eu; \
 # The Tauri CLI, for the installers: the project's release binary for amd64,
 # checksum-pinned; other architectures build the same version from crates.io,
 # and so do the release's macOS and Windows builds (release.yml reads it here).
-ARG TAURI_CLI_VERSION=2.12.4
-ARG TAURI_CLI_SHA256_AMD64=820ae3c7580ca637cad15f65638960ee2a96e5a491e224691c86d6f25e6c9e8a
+ARG TAURI_CLI_VERSION=2.12.5
+ARG TAURI_CLI_SHA256_AMD64=79f9596308f74e41753d1d30688a3f41914187b1bc7eea5dbd20cc0cd6acd640
 RUN set -eu; \
     if [ "$(dpkg --print-architecture)" = amd64 ]; then \
       release="https://github.com/tauri-apps/tauri/releases/download/tauri-cli-v${TAURI_CLI_VERSION}"; \
